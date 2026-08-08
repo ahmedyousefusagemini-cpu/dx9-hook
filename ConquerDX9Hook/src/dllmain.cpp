@@ -5,7 +5,6 @@
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "libMinHook.x86.lib")
 
-extern HMODULE g_originalChatDllHandle;
 extern std::vector<StringConfiguration> g_itemStringConfigurations;
 extern GameWindowInfo g_gameWindow;
 extern EndSceneFunc g_originalEndSceneFunction;
@@ -120,8 +119,6 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 	case DLL_PROCESS_ATTACH:
 	
 		DisableThreadLibraryCalls(moduleHandle);
-		
-		g_originalChatDllHandle = LoadLibraryA("OChat.dll");
 
 		g_itemStringConfigurations.push_back(StringConfiguration("WhiteDye")); /// itens blackground/strings edit
 
@@ -129,11 +126,6 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 		break;
 		
 	case DLL_PROCESS_DETACH:
-		
-		if (g_originalChatDllHandle) 
-		{
-			FreeLibrary(g_originalChatDllHandle);
-		}
 		break;
 	}
 	return TRUE;
