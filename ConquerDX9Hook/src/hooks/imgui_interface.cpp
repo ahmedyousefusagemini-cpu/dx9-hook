@@ -22,7 +22,8 @@ void RenderImGuiInterface()
 	ImGui::SetNextWindowSize(ImVec2(420, 700), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_FirstUseEver);
 	
-	ImGui::Begin("ConquerDX9.Hook by Carniato", nullptr, ImGuiWindowFlags_None);
+	// NoCollapse: the window can never get stuck in the collapsed state.
+	ImGui::Begin("ConquerDX9.Hook by Carniato", nullptr, ImGuiWindowFlags_NoCollapse);
 
 	UpdateRainbowColors();
 	
