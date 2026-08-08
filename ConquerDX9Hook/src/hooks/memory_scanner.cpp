@@ -11,11 +11,15 @@ MemoryScanner g_memoryScanner;
 // Upper bound of 32-bit user-mode address space.
 static const uintptr_t USER_SPACE_END = 0x7FFE0000;
 
-// Safety cap so a broad first scan (e.g. "0" as Int32) cannot exhaust memory.
+// Safety cap so a broad scan cannot exhaust memory.
 static const size_t MAX_MATCHES = 2000000;
 
-// Regions are scanned in 1 MB chunks to bound temporary allocations.
+// Regions are processed in 1 MB chunks to bound temporary allocations.
 static const size_t SCAN_CHUNK_SIZE = 1024 * 1024;
+
+// Unknown-initial-value scans copy whole regions; cap the total copy size
+// (the 32-bit process only has ~2 GB of address space, shared with the game).
+static const size_t MAX_SNAPSHOT_BYTES = 512ull * 1024 * 1024;
 
 size_t ScanValueTypeSize(ScanValueType type)
 {
@@ -94,12 +98,106 @@ static bool IsScannableProtection(DWORD protect)
 		PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
-size_t MemoryScanner::FirstScan(ScanValueType type, const unsigned char* valueBytes)
+MemoryScanner::MemoryScanner()
+	: m_scanInProgress(false), m_cancelRequested(false),
+	m_scanProgress(0.0f), m_liveMatchCount(0), m_snapshotTooLarge(false)
 {
-	m_matches.clear();
-	m_valueType = type;
+}
 
-	const size_t valueSize = ScanValueTypeSize(type);
+MemoryScanner::~MemoryScanner()
+{
+	CancelScan();
+	JoinScanThread();
+}
+
+void MemoryScanner::JoinScanThread()
+{
+	if (m_scanThread.joinable())
+		m_scanThread.join();
+}
+
+void MemoryScanner::CancelScan()
+{
+	m_cancelRequested = true;
+}
+
+bool MemoryScanner::StartFirstScan(ScanValueType type, const unsigned char* valueBytes)
+{
+	if (m_scanInProgress)
+		return false;
+	JoinScanThread();
+
+	m_pendingKind = ScanKind::FirstExact;
+	m_valueType = type;
+	memset(m_pendingValue, 0, sizeof(m_pendingValue));
+	memcpy(m_pendingValue, valueBytes, ScanValueTypeSize(type));
+
+	m_cancelRequested = false;
+	m_snapshotTooLarge = false;
+	m_scanProgress = 0.0f;
+	m_liveMatchCount = 0;
+	m_scanInProgress = true;
+	m_scanThread = std::thread(&MemoryScanner::ScanThreadMain, this);
+	return true;
+}
+
+bool MemoryScanner::StartFirstScanUnknown(ScanValueType type)
+{
+	if (m_scanInProgress)
+		return false;
+	JoinScanThread();
+
+	m_pendingKind = ScanKind::FirstUnknown;
+	m_valueType = type;
+	memset(m_pendingValue, 0, sizeof(m_pendingValue));
+
+	m_cancelRequested = false;
+	m_snapshotTooLarge = false;
+	m_scanProgress = 0.0f;
+	m_liveMatchCount = 0;
+	m_scanInProgress = true;
+	m_scanThread = std::thread(&MemoryScanner::ScanThreadMain, this);
+	return true;
+}
+
+bool MemoryScanner::StartNextScan(ScanCompareType compare, const unsigned char* valueBytes)
+{
+	if (m_scanInProgress)
+		return false;
+	if (!m_hasResults && !m_unknownValueMode)
+		return false;
+	JoinScanThread();
+
+	m_pendingKind = ScanKind::Next;
+	m_pendingCompare = compare;
+	memset(m_pendingValue, 0, sizeof(m_pendingValue));
+	memcpy(m_pendingValue, valueBytes, ScanValueTypeSize(m_valueType));
+
+	m_cancelRequested = false;
+	m_snapshotTooLarge = false;
+	m_scanProgress = 0.0f;
+	m_liveMatchCount = 0;
+	m_scanInProgress = true;
+	m_scanThread = std::thread(&MemoryScanner::ScanThreadMain, this);
+	return true;
+}
+
+void MemoryScanner::ScanThreadMain()
+{
+	switch (m_pendingKind)
+	{
+	case ScanKind::FirstExact:		DoFirstScanExact(); break;
+	case ScanKind::FirstUnknown:	DoFirstScanUnknown(); break;
+	case ScanKind::Next:			DoNextScan(); break;
+	}
+	m_scanProgress = 1.0f;
+	m_scanInProgress = false;
+}
+
+void MemoryScanner::DoFirstScanExact()
+{
+	const size_t valueSize = ScanValueTypeSize(m_valueType);
+	std::vector<ScanMatch> results;
 	std::vector<unsigned char> buffer;
 	buffer.reserve(SCAN_CHUNK_SIZE);
 
@@ -108,11 +206,18 @@ size_t MemoryScanner::FirstScan(ScanValueType type, const unsigned char* valueBy
 
 	while (address < USER_SPACE_END)
 	{
+		if (m_cancelRequested)
+			return; // keep previous results untouched
+
+		m_scanProgress = static_cast<float>(static_cast<double>(address) / USER_SPACE_END);
+
 		if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &regionInfo, sizeof(regionInfo)))
 			break;
 
 		uintptr_t regionBase = reinterpret_cast<uintptr_t>(regionInfo.BaseAddress);
 		uintptr_t regionEnd = regionBase + regionInfo.RegionSize;
+		if (regionEnd > USER_SPACE_END)
+			regionEnd = USER_SPACE_END;
 
 		bool scannable = regionInfo.State == MEM_COMMIT && IsScannableProtection(regionInfo.Protect);
 
@@ -122,6 +227,9 @@ size_t MemoryScanner::FirstScan(ScanValueType type, const unsigned char* valueBy
 			// boundary are still found.
 			for (uintptr_t chunk = regionBase; chunk < regionEnd; chunk += SCAN_CHUNK_SIZE - (valueSize - 1))
 			{
+				if (m_cancelRequested)
+					return;
+
 				size_t bytesToRead = (regionEnd - chunk < SCAN_CHUNK_SIZE)
 					? static_cast<size_t>(regionEnd - chunk)
 					: SCAN_CHUNK_SIZE;
@@ -137,19 +245,17 @@ size_t MemoryScanner::FirstScan(ScanValueType type, const unsigned char* valueBy
 					if (valueSize > 1 && ((chunk + i) & (valueSize - 1)) != 0)
 						continue;
 
-					if (memcmp(buffer.data() + i, valueBytes, valueSize) == 0)
+					if (memcmp(buffer.data() + i, m_pendingValue, valueSize) == 0)
 					{
 						ScanMatch match;
 						match.address = chunk + i;
 						memset(match.previousValue, 0, sizeof(match.previousValue));
 						memcpy(match.previousValue, buffer.data() + i, valueSize);
-						m_matches.push_back(match);
+						results.push_back(match);
+						m_liveMatchCount = results.size();
 
-						if (m_matches.size() >= MAX_MATCHES)
-						{
-							m_hasResults = true;
-							return m_matches.size();
-						}
+						if (results.size() >= MAX_MATCHES)
+							goto scanComplete;
 					}
 				}
 			}
@@ -160,36 +266,193 @@ size_t MemoryScanner::FirstScan(ScanValueType type, const unsigned char* valueBy
 		address = regionEnd;
 	}
 
+scanComplete:
+	m_snapshot.clear();
+	m_snapshot.shrink_to_fit();
+	m_matches.swap(results);
+	m_unknownValueMode = false;
 	m_hasResults = true;
-	return m_matches.size();
+	m_liveMatchCount = m_matches.size();
 }
 
-size_t MemoryScanner::NextScan(ScanCompareType compare, const unsigned char* valueBytes)
+void MemoryScanner::DoFirstScanUnknown()
 {
-	if (!m_hasResults)
-		return 0;
-
 	const size_t valueSize = ScanValueTypeSize(m_valueType);
-	std::vector<ScanMatch> filtered;
-	filtered.reserve(m_matches.size());
+	std::vector<SnapshotRegion> snapshot;
+	size_t totalBytes = 0;
+	size_t candidateCount = 0;
 
-	for (size_t i = 0; i < m_matches.size(); i++)
+	uintptr_t address = 0x10000;
+	MEMORY_BASIC_INFORMATION regionInfo;
+
+	while (address < USER_SPACE_END)
 	{
-		unsigned char currentValue[8] = {};
-		if (!SafeReadMemory(m_matches[i].address, currentValue, valueSize))
-			continue;
+		if (m_cancelRequested)
+			return;
 
-		if (CompareDispatch(m_valueType, compare, currentValue, m_matches[i].previousValue, valueBytes))
+		m_scanProgress = static_cast<float>(static_cast<double>(address) / USER_SPACE_END);
+
+		if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &regionInfo, sizeof(regionInfo)))
+			break;
+
+		uintptr_t regionBase = reinterpret_cast<uintptr_t>(regionInfo.BaseAddress);
+		uintptr_t regionEnd = regionBase + regionInfo.RegionSize;
+		if (regionEnd > USER_SPACE_END)
+			regionEnd = USER_SPACE_END;
+
+		bool scannable = regionInfo.State == MEM_COMMIT && IsScannableProtection(regionInfo.Protect);
+
+		if (scannable && regionEnd > regionBase)
 		{
-			ScanMatch match;
-			match.address = m_matches[i].address;
-			memcpy(match.previousValue, currentValue, sizeof(match.previousValue));
-			filtered.push_back(match);
+			size_t regionSize = static_cast<size_t>(regionEnd - regionBase);
+
+			if (totalBytes + regionSize > MAX_SNAPSHOT_BYTES)
+			{
+				m_snapshotTooLarge = true;
+				return; // keep previous results untouched
+			}
+
+			SnapshotRegion region;
+			region.baseAddress = regionBase;
+			region.data.resize(regionSize);
+
+			// Copy the region in chunks. Chunks that vanish mid-copy are left
+			// as zeros so offsets inside the snapshot stay consistent.
+			for (size_t offset = 0; offset < regionSize; offset += SCAN_CHUNK_SIZE)
+			{
+				if (m_cancelRequested)
+					return;
+
+				size_t bytesToRead = (regionSize - offset < SCAN_CHUNK_SIZE)
+					? (regionSize - offset)
+					: SCAN_CHUNK_SIZE;
+				SafeReadMemory(regionBase + offset, region.data.data() + offset, bytesToRead);
+			}
+
+			totalBytes += regionSize;
+			candidateCount += regionSize / valueSize;
+			m_liveMatchCount = candidateCount;
+			snapshot.push_back(std::move(region));
 		}
+
+		if (regionEnd <= regionBase)
+			break;
+		address = regionEnd;
 	}
 
-	m_matches.swap(filtered);
-	return m_matches.size();
+	m_matches.clear();
+	m_snapshot.swap(snapshot);
+	m_unknownValueMode = true;
+	m_unknownCandidateCount = candidateCount;
+	m_hasResults = false;
+	m_liveMatchCount = candidateCount;
+}
+
+void MemoryScanner::DoNextScan()
+{
+	const size_t valueSize = ScanValueTypeSize(m_valueType);
+	std::vector<ScanMatch> filtered;
+
+	if (m_unknownValueMode)
+	{
+		// Filter the snapshot against live memory, producing a compact
+		// match list; the snapshot is then discarded to free memory.
+		size_t totalBytes = 0;
+		for (size_t r = 0; r < m_snapshot.size(); r++)
+			totalBytes += m_snapshot[r].data.size();
+
+		size_t processedBytes = 0;
+		std::vector<unsigned char> liveBuffer;
+		liveBuffer.reserve(SCAN_CHUNK_SIZE);
+
+		for (size_t r = 0; r < m_snapshot.size(); r++)
+		{
+			const SnapshotRegion& region = m_snapshot[r];
+
+			for (size_t offset = 0; offset < region.data.size(); offset += SCAN_CHUNK_SIZE)
+			{
+				if (m_cancelRequested)
+					return; // keep the snapshot so the user can retry
+
+				size_t bytesToRead = (region.data.size() - offset < SCAN_CHUNK_SIZE)
+					? (region.data.size() - offset)
+					: SCAN_CHUNK_SIZE;
+
+				liveBuffer.resize(bytesToRead);
+				if (!SafeReadMemory(region.baseAddress + offset, liveBuffer.data(), bytesToRead))
+				{
+					processedBytes += bytesToRead;
+					continue;
+				}
+
+				for (size_t i = 0; i + valueSize <= bytesToRead; i++)
+				{
+					if (valueSize > 1 && ((region.baseAddress + offset + i) & (valueSize - 1)) != 0)
+						continue;
+
+					if (CompareDispatch(m_valueType, m_pendingCompare,
+						liveBuffer.data() + i, region.data.data() + offset + i, m_pendingValue))
+					{
+						ScanMatch match;
+						match.address = region.baseAddress + offset + i;
+						memset(match.previousValue, 0, sizeof(match.previousValue));
+						memcpy(match.previousValue, liveBuffer.data() + i, valueSize);
+						filtered.push_back(match);
+
+						if (filtered.size() >= MAX_MATCHES)
+							goto nextScanComplete;
+					}
+				}
+
+				processedBytes += bytesToRead;
+				if (totalBytes > 0)
+					m_scanProgress = static_cast<float>(static_cast<double>(processedBytes) / totalBytes);
+				m_liveMatchCount = filtered.size();
+			}
+		}
+
+	nextScanComplete:
+		m_snapshot.clear();
+		m_snapshot.shrink_to_fit();
+		m_matches.swap(filtered);
+		m_unknownValueMode = false;
+		m_hasResults = true;
+		m_liveMatchCount = m_matches.size();
+	}
+	else
+	{
+		// Refine the existing compact match list.
+		const size_t matchCount = m_matches.size();
+		filtered.reserve(matchCount);
+
+		for (size_t i = 0; i < matchCount; i++)
+		{
+			if (m_cancelRequested)
+				return;
+
+			if ((i & 0x3FFF) == 0)
+			{
+				m_scanProgress = matchCount > 0 ? static_cast<float>(static_cast<double>(i) / matchCount) : 1.0f;
+				m_liveMatchCount = filtered.size();
+			}
+
+			unsigned char currentValue[8] = {};
+			if (!SafeReadMemory(m_matches[i].address, currentValue, valueSize))
+				continue;
+
+			if (CompareDispatch(m_valueType, m_pendingCompare,
+				currentValue, m_matches[i].previousValue, m_pendingValue))
+			{
+				ScanMatch match;
+				match.address = m_matches[i].address;
+				memcpy(match.previousValue, currentValue, sizeof(match.previousValue));
+				filtered.push_back(match);
+			}
+		}
+
+		m_matches.swap(filtered);
+		m_liveMatchCount = m_matches.size();
+	}
 }
 
 bool MemoryScanner::ReadValue(uintptr_t address, unsigned char* outValue, size_t size)
@@ -220,8 +483,19 @@ bool MemoryScanner::WriteValue(uintptr_t address, const unsigned char* valueByte
 
 void MemoryScanner::Reset()
 {
+	CancelScan();
+	JoinScanThread();
+
 	m_matches.clear();
+	m_snapshot.clear();
+	m_snapshot.shrink_to_fit();
 	m_hasResults = false;
+	m_unknownValueMode = false;
+	m_unknownCandidateCount = 0;
+	m_cancelRequested = false;
+	m_snapshotTooLarge = false;
+	m_scanProgress = 0.0f;
+	m_liveMatchCount = 0;
 }
 
 void MemoryScanner::ApplyFrozenValues()
@@ -316,13 +590,39 @@ void RenderMemoryScannerInterface()
 	static char valueInput[64] = "0";
 	static char writeInput[64] = "0";
 	static int selectedMatch = -1;
-	static char statusText[160] = "Pick a type, enter a value, press First Scan.";
+	static bool wasScanning = false;
+	static char statusText[192] = "Pick a type, enter a value, press First Scan (or Unknown Value).";
 
 	static const char* valueTypes[] = { "Int32", "UInt32", "Float", "Double", "Byte", "Int16", "Int64" };
 	static const char* compareTypes[] = { "Exact Value", "Changed Value", "Unchanged Value", "Increased Value", "Decreased Value" };
 
 	ScanValueType valueType = static_cast<ScanValueType>(valueTypeIndex);
 	size_t valueSize = ScanValueTypeSize(valueType);
+	bool scanInProgress = g_memoryScanner.IsScanInProgress();
+
+	// Detect scan completion and refresh the status line.
+	if (wasScanning && !scanInProgress)
+	{
+		if (g_memoryScanner.WasSnapshotTooLarge())
+		{
+			sprintf_s(statusText, "Snapshot exceeded the 512 MB limit. Scan was aborted.");
+		}
+		else if (g_memoryScanner.IsUnknownValueSnapshot())
+		{
+			sprintf_s(statusText, "Snapshot complete: %u candidates. Change the value in-game, pick a comparison, press Next Scan.",
+				static_cast<unsigned int>(g_memoryScanner.GetMatchCount()));
+		}
+		else if (g_memoryScanner.HasScanResults())
+		{
+			sprintf_s(statusText, "Scan complete: %u matches.",
+				static_cast<unsigned int>(g_memoryScanner.GetMatchCount()));
+		}
+		else
+		{
+			sprintf_s(statusText, "Scan cancelled.");
+		}
+	}
+	wasScanning = scanInProgress;
 
 	ImGui::PushItemWidth(110);
 	int previousTypeIndex = valueTypeIndex;
@@ -332,7 +632,7 @@ void RenderMemoryScannerInterface()
 	ImGui::PopItemWidth();
 
 	// Changing the value type invalidates previous results (sizes differ).
-	if (valueTypeIndex != previousTypeIndex)
+	if (valueTypeIndex != previousTypeIndex && !scanInProgress)
 	{
 		g_memoryScanner.Reset();
 		selectedMatch = -1;
@@ -344,143 +644,170 @@ void RenderMemoryScannerInterface()
 	ImGui::InputText("Value", valueInput, sizeof(valueInput));
 	ImGui::PopItemWidth();
 
-	if (ImGui::Button("First Scan"))
+	if (!scanInProgress)
 	{
-		unsigned char valueBytes[8];
-		if (!ParseValueText(valueInput, valueType, valueBytes))
+		if (ImGui::Button("First Scan"))
 		{
-			sprintf_s(statusText, "Invalid value for type %s.", valueTypes[valueTypeIndex]);
-		}
-		else
-		{
-			selectedMatch = -1;
-			size_t found = g_memoryScanner.FirstScan(valueType, valueBytes);
-			sprintf_s(statusText, "First scan: %u matches%s.", static_cast<unsigned int>(found),
-				found >= MAX_MATCHES ? " (capped, refine with Next Scan)" : "");
-		}
-	}
-	ImGui::SameLine();
-
-	if (ImGui::Button("Next Scan"))
-	{
-		if (!g_memoryScanner.HasScanResults())
-		{
-			sprintf_s(statusText, "Run a First Scan first.");
-		}
-		else
-		{
-			unsigned char valueBytes[8] = {};
-			if (static_cast<ScanCompareType>(compareTypeIndex) == ScanCompareType::Exact &&
-				!ParseValueText(valueInput, valueType, valueBytes))
+			unsigned char valueBytes[8];
+			if (!ParseValueText(valueInput, valueType, valueBytes))
 			{
 				sprintf_s(statusText, "Invalid value for type %s.", valueTypes[valueTypeIndex]);
 			}
 			else
 			{
 				selectedMatch = -1;
-				size_t found = g_memoryScanner.NextScan(static_cast<ScanCompareType>(compareTypeIndex), valueBytes);
-				sprintf_s(statusText, "Next scan: %u matches.", static_cast<unsigned int>(found));
+				g_memoryScanner.StartFirstScan(valueType, valueBytes);
+				sprintf_s(statusText, "First scan running...");
 			}
 		}
-	}
-	ImGui::SameLine();
+		ImGui::SameLine();
 
-	if (ImGui::Button("New Scan"))
+		if (ImGui::Button("Unknown Value"))
+		{
+			selectedMatch = -1;
+			g_memoryScanner.StartFirstScanUnknown(valueType);
+			sprintf_s(statusText, "Taking memory snapshot...");
+		}
+		ImGui::SameLine();
+
+		if (ImGui::Button("Next Scan"))
+		{
+			if (!g_memoryScanner.HasScanResults() && !g_memoryScanner.IsUnknownValueSnapshot())
+			{
+				sprintf_s(statusText, "Run a First Scan (or Unknown Value) first.");
+			}
+			else
+			{
+				unsigned char valueBytes[8] = {};
+				if (static_cast<ScanCompareType>(compareTypeIndex) == ScanCompareType::Exact &&
+					!ParseValueText(valueInput, valueType, valueBytes))
+				{
+					sprintf_s(statusText, "Invalid value for type %s.", valueTypes[valueTypeIndex]);
+				}
+				else
+				{
+					selectedMatch = -1;
+					g_memoryScanner.StartNextScan(static_cast<ScanCompareType>(compareTypeIndex), valueBytes);
+					sprintf_s(statusText, "Next scan running...");
+				}
+			}
+		}
+		ImGui::SameLine();
+
+		if (ImGui::Button("New Scan"))
+		{
+			g_memoryScanner.Reset();
+			selectedMatch = -1;
+			sprintf_s(statusText, "Scan reset. Enter a value and press First Scan.");
+		}
+	}
+	else
 	{
-		g_memoryScanner.Reset();
-		selectedMatch = -1;
-		sprintf_s(statusText, "Scan reset. Enter a value and press First Scan.");
+		if (ImGui::Button("Cancel Scan"))
+			g_memoryScanner.CancelScan();
+
+		char overlay[96];
+		float progress = g_memoryScanner.GetScanProgress();
+		sprintf_s(overlay, "%.0f%% (%u found)", progress * 100.0f,
+			static_cast<unsigned int>(g_memoryScanner.GetLiveMatchCount()));
+		ImGui::ProgressBar(progress, ImVec2(-1, 0), overlay);
 	}
 
 	ImGui::TextWrapped("%s", statusText);
 
 	// ---- Results list -----------------------------------------------------
-	const std::vector<ScanMatch>& matches = g_memoryScanner.GetMatches();
-	const size_t displayLimit = 2000; // keep the list UI responsive
-	int displayCount = static_cast<int>(matches.size() < displayLimit ? matches.size() : displayLimit);
-
-	if (matches.size() > displayLimit)
-		ImGui::TextWrapped("Showing first %u results. Refine with Next Scan.", static_cast<unsigned int>(displayLimit));
-
-	ImGui::BeginChild("ScanResults", ImVec2(0, 150), true);
-
-	ImGuiListClipper clipper;
-	clipper.Begin(displayCount);
-	while (clipper.Step())
+	if (!scanInProgress && !g_memoryScanner.IsUnknownValueSnapshot())
 	{
-		for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+		const std::vector<ScanMatch>& matches = g_memoryScanner.GetMatches();
+		const size_t displayLimit = 2000; // keep the list UI responsive
+		int displayCount = static_cast<int>(matches.size() < displayLimit ? matches.size() : displayLimit);
+
+		if (matches.size() > displayLimit)
+			ImGui::TextWrapped("Showing first %u results. Refine with Next Scan.", static_cast<unsigned int>(displayLimit));
+
+		if (displayCount > 0)
 		{
-			ImGui::PushID(i);
+			ImGui::BeginChild("ScanResults", ImVec2(0, 150), true);
 
-			unsigned char currentValue[8] = {};
-			g_memoryScanner.ReadValue(matches[i].address, currentValue, valueSize);
-
-			char label[128];
-			sprintf_s(label, "0x%08X = %s", static_cast<unsigned int>(matches[i].address),
-				FormatValue(currentValue, valueType).c_str());
-
-			if (ImGui::Selectable(label, selectedMatch == i))
+			ImGuiListClipper clipper;
+			clipper.Begin(displayCount);
+			while (clipper.Step())
 			{
-				selectedMatch = i;
-				std::string current = FormatValue(currentValue, valueType);
-				sprintf_s(writeInput, "%s", current.c_str());
+				for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+				{
+					ImGui::PushID(i);
+
+					unsigned char currentValue[8] = {};
+					g_memoryScanner.ReadValue(matches[i].address, currentValue, valueSize);
+
+					char label[128];
+					sprintf_s(label, "0x%08X = %s", static_cast<unsigned int>(matches[i].address),
+						FormatValue(currentValue, valueType).c_str());
+
+					if (ImGui::Selectable(label, selectedMatch == i))
+					{
+						selectedMatch = i;
+						std::string current = FormatValue(currentValue, valueType);
+						sprintf_s(writeInput, "%s", current.c_str());
+					}
+
+					ImGui::PopID();
+				}
 			}
+			clipper.End();
 
-			ImGui::PopID();
+			ImGui::EndChild();
 		}
-	}
-	clipper.End();
 
-	ImGui::EndChild();
-
-	// ---- Write / freeze controls ------------------------------------------
-	bool hasSelection = selectedMatch >= 0 && selectedMatch < static_cast<int>(matches.size());
-	if (hasSelection)
-		ImGui::Text("Selected: 0x%08X", static_cast<unsigned int>(matches[selectedMatch].address));
-	else
-		ImGui::Text("Selected: (click a result above)");
-
-	ImGui::PushItemWidth(180);
-	ImGui::InputText("New Value", writeInput, sizeof(writeInput));
-	ImGui::PopItemWidth();
-
-	if (ImGui::Button("Write") && hasSelection)
-	{
-		unsigned char valueBytes[8];
-		if (ParseValueText(writeInput, valueType, valueBytes) &&
-			g_memoryScanner.WriteValue(matches[selectedMatch].address, valueBytes, valueSize))
-		{
-			sprintf_s(statusText, "Wrote %s to 0x%08X.", FormatValue(valueBytes, valueType).c_str(),
-				static_cast<unsigned int>(matches[selectedMatch].address));
-		}
+		// ---- Write / freeze controls ----------------------------------------
+		bool hasSelection = selectedMatch >= 0 && selectedMatch < static_cast<int>(matches.size());
+		if (hasSelection)
+			ImGui::Text("Selected: 0x%08X", static_cast<unsigned int>(matches[selectedMatch].address));
 		else
-		{
-			sprintf_s(statusText, "Write failed (bad value or unreadable address).");
-		}
-	}
-	ImGui::SameLine();
+			ImGui::Text("Selected: (click a result above)");
 
-	if (ImGui::Button("Freeze") && hasSelection)
-	{
-		unsigned char valueBytes[8];
-		if (ParseValueText(writeInput, valueType, valueBytes))
-		{
-			FrozenValue frozen;
-			frozen.address = matches[selectedMatch].address;
-			frozen.size = valueSize;
-			memset(frozen.value, 0, sizeof(frozen.value));
-			memcpy(frozen.value, valueBytes, valueSize);
-			g_memoryScanner.frozenValues.push_back(frozen);
-			sprintf_s(statusText, "Froze 0x%08X (%u frozen total).",
-				static_cast<unsigned int>(frozen.address),
-				static_cast<unsigned int>(g_memoryScanner.frozenValues.size()));
-		}
-	}
-	ImGui::SameLine();
+		ImGui::PushItemWidth(180);
+		ImGui::InputText("New Value", writeInput, sizeof(writeInput));
+		ImGui::PopItemWidth();
 
-	if (ImGui::Button("Unfreeze All"))
-	{
-		g_memoryScanner.frozenValues.clear();
-		sprintf_s(statusText, "Cleared all frozen values.");
+		if (ImGui::Button("Write") && hasSelection)
+		{
+			unsigned char valueBytes[8];
+			if (ParseValueText(writeInput, valueType, valueBytes) &&
+				g_memoryScanner.WriteValue(matches[selectedMatch].address, valueBytes, valueSize))
+			{
+				sprintf_s(statusText, "Wrote %s to 0x%08X.", FormatValue(valueBytes, valueType).c_str(),
+					static_cast<unsigned int>(matches[selectedMatch].address));
+			}
+			else
+			{
+				sprintf_s(statusText, "Write failed (bad value or unreadable address).");
+			}
+		}
+		ImGui::SameLine();
+
+		if (ImGui::Button("Freeze") && hasSelection)
+		{
+			unsigned char valueBytes[8];
+			if (ParseValueText(writeInput, valueType, valueBytes))
+			{
+				FrozenValue frozen;
+				frozen.address = matches[selectedMatch].address;
+				frozen.size = valueSize;
+				memset(frozen.value, 0, sizeof(frozen.value));
+				memcpy(frozen.value, valueBytes, valueSize);
+				g_memoryScanner.frozenValues.push_back(frozen);
+				sprintf_s(statusText, "Froze 0x%08X (%u frozen total).",
+					static_cast<unsigned int>(frozen.address),
+					static_cast<unsigned int>(g_memoryScanner.frozenValues.size()));
+			}
+		}
+		ImGui::SameLine();
+
+		if (ImGui::Button("Unfreeze All"))
+		{
+			g_memoryScanner.frozenValues.clear();
+			sprintf_s(statusText, "Cleared all frozen values.");
+		}
 	}
 }
