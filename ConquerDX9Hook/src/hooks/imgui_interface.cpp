@@ -1,5 +1,6 @@
 #include "imgui.h"
 #include "common.h"
+#include "memory_scanner.h"
 
 extern GameWindowInfo g_gameWindow;
 extern bool g_isAlwaysJumpEnabled;
@@ -11,10 +12,14 @@ extern void UpdateRainbowColors();
 
 void RenderImGuiInterface() 
 {
+	// Frozen values must be re-applied every frame, even while the
+	// menu is closed, so this runs before the visibility check.
+	g_memoryScanner.ApplyFrozenValues();
+
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
 
-	ImGui::SetNextWindowSize(ImVec2(350, 400), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(420, 700), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_FirstUseEver);
 	
 	ImGui::Begin("ConquerDX9.Hook by Carniato", nullptr, ImGuiWindowFlags_None);
@@ -61,6 +66,12 @@ void RenderImGuiInterface()
 		ImGui::PopID();
 	}
 	ImGui::EndChild();
+
+	ImGui::Spacing();
+
+	ImGui::Text("Memory Scanner");
+	ImGui::Separator();
+	RenderMemoryScannerInterface();
 	
 	ImGui::End();
 }
