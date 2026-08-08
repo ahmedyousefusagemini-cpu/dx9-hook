@@ -25,6 +25,10 @@ extern void DrawStringBackgroundRectangle(LPDIRECT3DDEVICE9 device, int x1, int 
 extern const StringConfiguration* FindItemStringConfiguration(const std::string& matchedString);
 extern LPVOID g_originalShowStringExAddress;
 
+// Original window procedure of the child (render) window. The parent's
+// original procedure lives in g_gameWindow.originalWindowProcedure.
+static WNDPROC g_originalChildWindowProcedure = NULL;
+
 HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device) 
 {
 
@@ -150,7 +154,7 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 			case WM_LBUTTONUP:        
 			case WM_LBUTTONDBLCLK:    
 			case WM_RBUTTONDOWN:      
-			case WM_RBUTTONUP:       
+			case WM_RBUTTONUP:        
 			case WM_RBUTTONDBLCLK:    
 			case WM_MBUTTONDOWN:      
 			case WM_MBUTTONUP:        
@@ -170,20 +174,34 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 		}
 	}
 	
-	return CallWindowProcA(g_gameWindow.originalWindowProcedure, windowHandle, message, wParam, lParam);
+	// Forward to the correct original procedure for THIS window.
+	WNDPROC originalProcedure = (windowHandle == g_gameWindow.gameWindowHandle && g_originalChildWindowProcedure)
+		? g_originalChildWindowProcedure
+		: g_gameWindow.originalWindowProcedure;
+
+	return CallWindowProcA(originalProcedure, windowHandle, message, wParam, lParam);
 }
 
 void InstallWindowProcedureHook() 
 {
-	while (!g_gameWindow.gameWindowHandle) 
+	while (!g_gameWindow.parentWindowHandle) 
 	{
-		g_gameWindow.gameWindowHandle = FindGameWindowHandle();
-		
-		if (g_gameWindow.gameWindowHandle && !g_gameWindow.originalWindowProcedure) 
-		{
-			g_gameWindow.originalWindowProcedure = (WNDPROC)SetWindowLongA(g_gameWindow.gameWindowHandle, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
-		}
+		FindGameWindowHandle();
 		Sleep(100);  
 	}
-}
 
+	// Hook the PARENT window: keyboard input (WM_CHAR/WM_KEYDOWN) goes to the
+	// top-level window with focus, which is what feeds typing into ImGui.
+	if (!g_gameWindow.originalWindowProcedure) 
+	{
+		g_gameWindow.originalWindowProcedure = (WNDPROC)SetWindowLongA(
+			g_gameWindow.parentWindowHandle, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
+	}
+
+	// Hook the CHILD (render) window too: mouse input goes to it.
+	if (g_gameWindow.gameWindowHandle && !g_originalChildWindowProcedure) 
+	{
+		g_originalChildWindowProcedure = (WNDPROC)SetWindowLongA(
+			g_gameWindow.gameWindowHandle, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
+	}
+}
