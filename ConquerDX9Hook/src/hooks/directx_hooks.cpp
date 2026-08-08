@@ -29,6 +29,11 @@ extern LPVOID g_originalShowStringExAddress;
 // original procedure lives in g_gameWindow.originalWindowProcedure.
 static WNDPROC g_originalChildWindowProcedure = NULL;
 
+// Diagnostics: live counters of messages reaching the WndProc hook,
+// displayed at the top of the overlay window.
+unsigned long g_debugMouseMessageCount = 0;
+unsigned long g_debugKeyboardMessageCount = 0;
+
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam);
 
 // Hooks the exact window the D3D9 device renders into (plus its root
@@ -198,6 +203,20 @@ HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* pres
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam) 
 {
+	// Diagnostics: count input messages reaching the hook.
+	switch (message) 
+	{
+	case WM_MOUSEMOVE:
+	case WM_LBUTTONDOWN:
+	case WM_RBUTTONDOWN:
+	case WM_MBUTTONDOWN:
+		g_debugMouseMessageCount++;
+		break;
+	case WM_CHAR:
+	case WM_KEYDOWN:
+		g_debugKeyboardMessageCount++;
+		break;
+	}
 
 	if (g_isImGuiInitialized && g_gameWindow.isGuiWindowOpen) 
 	{
