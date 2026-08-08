@@ -21,6 +21,19 @@ extern HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device);
 extern HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* presentationParameters);
 
 
+void StringHookInstallThread() 
+{
+	// graphic.dll can load late (or be absent/renamed on some game versions),
+	// so this wait runs in its own thread and never blocks the overlay or
+	// the INSERT toggle below.
+	while (!GetModuleHandleA("graphic.dll")) 
+	{
+		Sleep(100);
+	}
+	InstallShowStringExHook();
+}
+
+
 void HookInitializationThread() 
 {
 	HMODULE direct3D9ModuleHandle = nullptr;
@@ -83,11 +96,9 @@ void HookInitializationThread()
 	}
 	InstallDrawIndexedPrimitiveHook();
 
-	while (!GetModuleHandleA("graphic.dll")) 
-	{
-		Sleep(100);
-	}
-	InstallShowStringExHook();
+	// Run in the background so the INSERT toggle below keeps working even on
+	// game versions where graphic.dll never loads.
+	CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)StringHookInstallThread, NULL, 0, NULL);
 
 	while (true) 
 	{
