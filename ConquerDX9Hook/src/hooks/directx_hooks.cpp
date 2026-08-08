@@ -48,7 +48,9 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 		ImGuiIO& io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;  
 		
-		ImGui_ImplWin32_Init(g_gameWindow.parentWindowHandle);
+		// Use the render (child) window: mouse messages arrive there, so this
+		// keeps ImGui's input coordinates and display size in the same space.
+		ImGui_ImplWin32_Init(g_gameWindow.gameWindowHandle);
 		ImGui_ImplDX9_Init(g_gameWindow.direct3DDevice);
 		g_isImGuiInitialized = true;
 	}
