@@ -25,9 +25,63 @@ extern void DrawStringBackgroundRectangle(LPDIRECT3DDEVICE9 device, int x1, int 
 extern const StringConfiguration* FindItemStringConfiguration(const std::string& matchedString);
 extern LPVOID g_originalShowStringExAddress;
 
-// Original window procedure of the child (render) window. The parent's
+// Original window procedure of the render window. The root window's
 // original procedure lives in g_gameWindow.originalWindowProcedure.
 static WNDPROC g_originalChildWindowProcedure = NULL;
+
+LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam);
+
+// Hooks the exact window the D3D9 device renders into (plus its root
+// window for keyboard input). Far more reliable than searching window
+// titles, which can match a launcher/updater window instead.
+void InstallInputHooksFromDevice(LPDIRECT3DDEVICE9 device)
+{
+	if (!device)
+		return;
+
+	HWND renderWindow = NULL;
+
+	// Preferred: the swap chain's device window (the actual render target).
+	IDirect3DSwapChain9* swapChain = NULL;
+	if (SUCCEEDED(device->GetSwapChain(0, &swapChain)) && swapChain)
+	{
+		D3DPRESENT_PARAMETERS presentParams;
+		if (SUCCEEDED(swapChain->GetPresentParameters(&presentParams)))
+			renderWindow = presentParams.hDeviceWindow;
+		swapChain->Release();
+	}
+
+	// Fallback: the focus window from creation parameters.
+	if (!renderWindow)
+	{
+		D3DDEVICE_CREATION_PARAMETERS creationParams;
+		if (SUCCEEDED(device->GetCreationParameters(&creationParams)))
+			renderWindow = creationParams.hFocusWindow;
+	}
+
+	if (!renderWindow)
+		return;
+
+	g_gameWindow.gameWindowHandle = renderWindow;
+	g_gameWindow.parentWindowHandle = GetAncestor(renderWindow, GA_ROOT);
+
+	// Hook the root window: keyboard input (WM_CHAR/WM_KEYDOWN) goes to the
+	// top-level window with focus.
+	if (g_gameWindow.parentWindowHandle &&
+		g_gameWindow.parentWindowHandle != renderWindow &&
+		!g_gameWindow.originalWindowProcedure)
+	{
+		g_gameWindow.originalWindowProcedure = (WNDPROC)SetWindowLongPtrA(
+			g_gameWindow.parentWindowHandle, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
+	}
+
+	// Hook the render window: mouse input goes to it.
+	if (!g_originalChildWindowProcedure)
+	{
+		g_originalChildWindowProcedure = (WNDPROC)SetWindowLongPtrA(
+			renderWindow, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
+	}
+}
 
 HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device) 
 {
@@ -39,7 +93,9 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 
 	if (!g_isImGuiInitialized) 
 	{
-		if (!g_gameWindow.gameWindowHandle) 
+		InstallInputHooksFromDevice(device);
+
+		if (!g_gameWindow.gameWindowHandle)
 		{
 			g_gameWindow.gameWindowHandle = FindGameWindowHandle();
 		}
@@ -48,8 +104,8 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 		ImGuiIO& io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;  
 		
-		// Use the render (child) window: mouse messages arrive there, so this
-		// keeps ImGui's input coordinates and display size in the same space.
+		// Use the render window: mouse messages arrive there, so this keeps
+		// ImGui's input coordinates and display size in the same space.
 		ImGui_ImplWin32_Init(g_gameWindow.gameWindowHandle);
 		ImGui_ImplDX9_Init(g_gameWindow.direct3DDevice);
 		g_isImGuiInitialized = true;
@@ -182,28 +238,4 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 		: g_gameWindow.originalWindowProcedure;
 
 	return CallWindowProcA(originalProcedure, windowHandle, message, wParam, lParam);
-}
-
-void InstallWindowProcedureHook() 
-{
-	while (!g_gameWindow.parentWindowHandle) 
-	{
-		FindGameWindowHandle();
-		Sleep(100);  
-	}
-
-	// Hook the PARENT window: keyboard input (WM_CHAR/WM_KEYDOWN) goes to the
-	// top-level window with focus, which is what feeds typing into ImGui.
-	if (!g_gameWindow.originalWindowProcedure) 
-	{
-		g_gameWindow.originalWindowProcedure = (WNDPROC)SetWindowLongA(
-			g_gameWindow.parentWindowHandle, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
-	}
-
-	// Hook the CHILD (render) window too: mouse input goes to it.
-	if (g_gameWindow.gameWindowHandle && !g_originalChildWindowProcedure) 
-	{
-		g_originalChildWindowProcedure = (WNDPROC)SetWindowLongA(
-			g_gameWindow.gameWindowHandle, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
-	}
 }

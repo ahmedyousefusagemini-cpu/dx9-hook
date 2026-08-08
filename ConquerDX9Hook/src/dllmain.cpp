@@ -11,7 +11,6 @@ extern EndSceneFunc g_originalEndSceneFunction;
 extern ResetFunc g_originalResetFunction;
 extern LPVOID g_originalEndSceneAddress;
 extern LPVOID g_originalResetAddress;
-extern void InstallWindowProcedureHook();
 extern void InstallGetKeyboardStateHook();
 extern void InstallDrawIndexedPrimitiveHook();
 extern void InstallShowStringExHook();
@@ -82,8 +81,8 @@ void HookInitializationThread()
 	MH_CreateHook(g_originalEndSceneAddress, (LPVOID)HookedEndScene, (LPVOID*)&g_originalEndSceneFunction);
 	MH_CreateHook(g_originalResetAddress, (LPVOID)HookedReset, (LPVOID*)&g_originalResetFunction);
 	
-	InstallWindowProcedureHook();
-	
+	// Input hooks are installed from HookedEndScene once the D3D device is
+	// known (InstallInputHooksFromDevice), so no window title search needed.
 	MH_EnableHook(g_originalEndSceneAddress);
 	MH_EnableHook(g_originalResetAddress);
 	
