@@ -11,6 +11,7 @@ extern bool g_serverNameUseRainbow;
 extern void UpdateRainbowColors();
 extern void RenderAutoHuntInterface();
 extern void ApplyAutoHuntClientState();
+extern void RenderXpSkillInterface();
 extern void RenderSpeedInterface();
 extern void ApplySpeedClientState();
 
@@ -56,6 +57,10 @@ void RenderImGuiInterface()
 	
 	RenderAutoHuntInterface();
 	
+	ImGui::Spacing();
+
+	RenderXpSkillInterface();
+
 	ImGui::Spacing();
 	
 	RenderSpeedInterface();

@@ -9,6 +9,43 @@ Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plu
 
 ---
 
+## ✅ XP skills while auto-hunting (2026-08-10, night) — client block removed
+
+**Problem:** with auto-hunt engaged, activating an XP skill was refused with
+"[System] Unable to use XP skills when auto-fighting"
+(string key `STR_CANNOT_USE_XP_WHEN_HANGUP` @ `0x01741FA4`).
+
+**Root cause — three gates, all reading `IsHunting` (`FUN_0111621f`):**
+
+1. `FUN_011154f5` (XP charge-bar fill): the 0-100 XP bar (object `+0xaec`) is only
+   incremented when NOT hunting — while hunting the bar never charges client-side.
+   Callers: `FUN_011354b1` (kill/combo tick, `FUN_011154f5(1)`) and `FUN_00d3fb0f`
+   (projectile-complete on self → GreenGlow effect → `FUN_011154f5(1)` + notify 0x40f).
+2. `FUN_011b1ec9` (use skill on target) and 3. `FUN_011b3503` (use skill at position):
+   `if (IsHunting && currentSkill->field_0x30 == 1)` → show the string and bail.
+   `currentSkill` = `FUN_00d9612c(client)` = `client + 0x70` (`LEA EAX,[ECX+0x70]; RET`);
+   its `+0x30` dword == 1 marks an XP-type skill. `find_undocumented_by_string`
+   confirms exactly these two functions reference the block string.
+
+**Fix — three 2-byte code patches applied live by the overlay** (new
+`src/hooks/xp_skill.cpp`, "Allow XP skills while hunting" checkbox):
+
+| Site | Function | Original | Patched | Effect |
+|---|---|---|---|---|
+| `0x01115514` | FUN_011154f5 | `75 49` JNZ | `90 90` NOPs | XP bar charges while hunting |
+| `0x011B21D8` | FUN_011b1ec9 | `74 59` JZ | `EB 59` JMP | block never fires (target skills) |
+| `0x011B3B21` | FUN_011b3503 | `74 4A` JZ | `EB 4A` JMP | block never fires (position skills) |
+
+Each site is guarded by an original-byte check (same pattern as
+`AutoHunt::IsClientSupported`) so the feature self-disables on a different build.
+Server side needs nothing: the 0x855 packet stays withheld, so the server treats the
+XP pop as normal gameplay.
+
+Note: the hunt brain (`FUN_00f54058`) itself calls `FUN_011b1ec9` / `FUN_011b3503`,
+so brain-driven XP skills are unblocked too.
+
+---
+
 ## ✅ WORKING STATE (2026-08-10, late PM) — auto-hunt fully working
 
 The breakthrough was realizing the hunting is **client-driven** and the 0x855 packet is
@@ -153,7 +190,7 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
   event (FUN_00de457e when turning off / FUN_00ddbf64 when turning on) then writes the byte.
   No direct callers (called via vtable).
 - Read every frame by the action dispatcher FUN_0112ef9d (calls FUN_00482705 + FUN_00f4761f).
-- Hunting-active check: FUN_0111621f = `client+0x5385 != 0 && mgr && mgr+0x11 != 0`.
+- Hunting-active check: FUN_0111621f = `client+0x5385 != 0 && mgr+0x11 != 0`.
 
 ### Other leads
 
@@ -211,8 +248,10 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
 2. ~~Fix XP reset~~ — **done**: withholding the 0x855 packet keeps the server out of
    auto-hunt mode so XP fills normally.
 3. ~~VIP unlock~~ — **done**: force `client+0x9e4`/`+0x9ec` = 6 (jump-search + auto-pick).
-4. Optional: set auto-pick directly from the overlay (currently enabled via the client
+4. ~~XP skills while hunting~~ — **done** (2026-08-10 night): patch the three
+   `IsHunting` gates (see the top section). New module `src/hooks/xp_skill.cpp`.
+5. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
-5. Verify jump-search (VIP3) engages while hunting.
-6. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
+6. Verify jump-search (VIP3) engages while hunting.
+7. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
    anchors) to re-locate every value.

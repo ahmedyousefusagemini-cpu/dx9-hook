@@ -99,6 +99,45 @@ Two adjacent getters: `return *(byte*)(mgr+0x11)` then `return *(byte*)(mgr+0x12
 8A 41 11 C3 8A 41 12 C3
 ```
 
+### XP-skill gates ("cannot use XP when hangup" block)
+
+The client refuses XP skills while the hunting state is active with
+`STR_CANNOT_USE_XP_WHEN_HANGUP`. Three gates, all driven by `FUN_0111621f`;
+the overlay patches all three (see `src/hooks/xp_skill.cpp`).
+
+**XP charge-bar fill gate — `FUN_011154f5` @ `0x011154F5`**  
+Adds to the 0-100 XP bar (object `+0xaec`) only when NOT hunting. Callers:
+`FUN_011354b1` (kill tick) and `FUN_00d3fb0f` (projectile complete on self).
+Patch site `0x01115514`: `75 49` (JNZ skip-fill) → `90 90` (NOPs).
+```
+E8 ?? ?? ?? ?? 6A 64 5B 84 C0 75 ?? 68 96 00 00 00
+```
+(`6A 64 5B` = `PUSH 0x64; POP EBX` right after the IsHunting call; `68 96`
+starts the 0x96 status-flag check that follows — the rest of the fill logic
+is unchanged, so those status gates still apply.)
+
+**Use-skill-on-target gate — `FUN_011b1ec9` @ `0x011B1EC9`**  
+If hunting AND the current skill is XP-type (`[FUN_00d9612c(client)+0x30] == 1`),
+shows `STR_CANNOT_USE_XP_WHEN_HANGUP` and bails. Patch site `0x011B21D8`:
+`74 59` (JZ skip-block) → `EB 59` (JMP — block never runs).
+```
+E8 ?? ?? ?? ?? 84 C0 74 ?? 8B 4D B8 E8 ?? ?? ?? ?? 83 78 30 01 75 ?? 68 ?? ?? ?? ??
+```
+(the trailing `68` pushes the string-key address — the anchor to the block.)
+
+**Use-skill-at-position gate — `FUN_011b3503` @ `0x011B3503`**  
+Same block as above. Patch site `0x011B3B21`: `74 4A` (JZ) → `EB 4A` (JMP).
+```
+E8 ?? ?? ?? ?? 84 C0 74 ?? 8B 4D 9C E8 ?? ?? ?? ?? 83 78 30 01 75 ?? 68 ?? ?? ?? ??
+```
+
+**Current-skill accessor — `FUN_00d9612c` @ `0x00D9612C`**  
+`return client + 0x70` — the current-magic-info struct; its `+0x30` dword == 1
+marks an XP-type skill.
+```
+8D 41 70 C3
+```
+
 ### Hunt brain
 
 **Per-frame hunt brain — `FUN_00f54058` @ `0x00F54058`**  
@@ -219,6 +258,8 @@ withholds this packet by default so the server treats kills as normal gameplay.
   VIP4+). Client-side only — server-enforced VIP features (shop, teleport) still fail.
 - **Auto-pick (loot):** a separate VIP4-gated option. Enable it in the client's
   auto-hunt dialog (the VIP spoof unlocks the checkbox).
+- **XP skills while hunting:** three 2-byte code patches (see "XP-skill gates"
+  above) applied by `xp_skill.cpp`. Server unaffected (0x855 stays withheld).
 
 ---
 
@@ -235,6 +276,7 @@ Use these to locate the code after an update when signatures fail:
 | `"AutoHangUpIconBtn"` | `0x01646F90` | the auto-hunt toolbar icon handler |
 | `"VipLev"` | `0x0163AA70` | VIP-level handling |
 | `"nVipLev >= 0 && nVipLev <= 6"` | `0x016160F8` | dlgvipquery.cpp — confirms VIP range 0–6 |
+| `"STR_CANNOT_USE_XP_WHEN_HANGUP"` | `0x01741FA4` | the two use-skill gates (FUN_011b1ec9 / FUN_011b3503) |
 | `"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %d"` | (search the string) | the message factory `FUN_00f36f4e` |
 | `"CQMain_OnNetMsg"` | (search the string) | the incoming-message → Lua dispatch |
 | `msghangup.cpp` path string | `0x017012F8` | CMsgHangUp source module |
@@ -248,4 +290,6 @@ Use these to locate the code after an update when signatures fail:
 - [ ] Packet builder contains `B9 55 08 00 00` (`MOV ECX,0x855`).
 - [ ] VIP getter's field offsets match the two dwords it returns.
 - [ ] CMsgHangUp ctor contains `8D B? 08 04 00 00` (`LEA ...,+0x408` buffer).
+- [ ] Each XP-skill gate signature matches: fill `6A 64 5B 84 C0 75`, use-skill
+      `84 C0 74 ?? 8B 4D ?? E8 ?? ?? ?? ?? 83 78 30 01`.
 - [ ] Confirm each AOB match is unique before trusting it.
