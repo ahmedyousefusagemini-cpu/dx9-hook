@@ -11,13 +11,12 @@
 //     FUN_0111621f == (client+0x5385 != 0 && mgr+0x11 != 0).
 //
 // The in-game toggle (FUN_00bd7355) only sends the 0x855 "CMsgHangUp" notify
-// packet - it never writes the client-side hunting flag mgr+0x11. That is why a
-// bare packet toggle played the activation effect but never actually hunted: the
-// client brain stayed disengaged.
+// packet - it never writes either client-side flag. That is why a bare packet
+// toggle played the activation effect but never actually hunted.
 //
-// This feature therefore asserts the client-side hunting flag directly, every
-// frame while enabled (so a server state update can't knock it back off), and
-// still sends the notify packet so the server stays in sync.
+// This feature therefore asserts BOTH client-side flags directly, every frame
+// while enabled (so a server state update can't knock them back off), and still
+// sends the notify packet so the server stays in sync.
 // ============================================================================
 
 namespace AutoHunt
@@ -76,12 +75,17 @@ namespace AutoHunt
 		return *(int*)CLIENT_GLOBAL_ADDRESS;
 	}
 
+	bool IsClientValid(int client)
+	{
+		return client != 0 && !IsBadReadPtr((const void*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET), 1);
+	}
+
 	// Mirrors the game's own is-hunting check (FUN_0111621f):
 	// client+0x5385 != 0 && mgr+0x11 != 0.
 	bool IsHunting()
 	{
 		int client = GetClientObject();
-		if (!client || IsBadReadPtr((const void*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET), 1))
+		if (!IsClientValid(client))
 			return false;
 		if (*(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) == 0)
 			return false;
@@ -101,18 +105,20 @@ namespace AutoHunt
 	}
 
 	// Runs every frame (even with the menu closed), like the memory scanner's
-	// frozen-value pass. While the user wants hunting, keep the client-side
-	// hunting flag set so the per-frame hunt brain stays engaged.
+	// frozen-value pass. While the user wants hunting, keep BOTH client-side flags
+	// set so the per-frame hunt brain stays engaged.
 	void ApplyClientSideState()
 	{
 		if (!g_clientSideHunting)
 			return;
 
-		int manager = GetOrCreateManager();
-		if (!IsManagerValid(manager))
-			return;
+		int client = GetClientObject();
+		if (IsClientValid(client))
+			*(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) = 1;  // auto-battle on
 
-		*(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) = 1;
+		int manager = GetOrCreateManager();
+		if (IsManagerValid(manager))
+			*(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) = 1;      // hunting on
 	}
 
 	void Start()
@@ -133,6 +139,10 @@ namespace AutoHunt
 		int manager = GetManagerObject();
 		if (IsManagerValid(manager))
 			*(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) = 0;
+
+		int client = GetClientObject();
+		if (IsClientValid(client))
+			*(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) = 0;
 
 		Toggle();  // notify the server
 	}
@@ -165,7 +175,7 @@ void RenderAutoHuntInterface()
 		ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Idle");
 
 	// Buttons reflect what the user asked for; the status text reflects the live
-	// manager state so we can see if the assertion is actually engaging the brain.
+	// client state so we can see if the assertion is actually engaging the brain.
 	if (AutoHunt::g_clientSideHunting)
 	{
 		if (ImGui::Button("Stop Auto Hunt"))
@@ -184,7 +194,7 @@ void RenderAutoHuntInterface()
 
 		ImGui::Text("Client: 0x%08X", (unsigned int)client);
 
-		if (client && !IsBadReadPtr((const void*)(client + AutoHunt::CLIENT_AUTO_BATTLE_BYTE_OFFSET), 1))
+		if (AutoHunt::IsClientValid(client))
 		{
 			ImGui::Text("AutoBattle byte (client+0x5385): %u",
 				(unsigned int)*(unsigned char*)(client + AutoHunt::CLIENT_AUTO_BATTLE_BYTE_OFFSET));
