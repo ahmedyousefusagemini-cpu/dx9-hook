@@ -1,153 +1,11 @@
 # Reverse Engineering Notes — Conquer.exe (client 7937)
 
 **Current status: auto-hunt FULLY WORKING from the ImGui overlay** (kills, loots
-gold/items, XP + skill bars fill normally) — and the overlay now **auto-pops the
-XP skill** (Superman / Fatal Strike / any class) when the bar fills. See the
-"WORKING STATE" section for the auto-hunt solution; the detailed research follows.
+gold/items, XP + skill bars fill normally). See the "WORKING STATE" section below for
+the final solution; the detailed research follows.
 
 Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll imported).
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
-
----
-
-## ✅ Auto XP skill activation (2026-08-11) — Superman / Fatal Strike auto-pop
-
-**Goal:** while auto-hunting, automatically activate the character's XP skill
-the moment the XP bar fills (no manual click).
-
-**Research trail:**
-
-- **XP bar value** is `*(uint*)(client + 0xaec)`, 0–100. `FUN_011154f5` (the fill
-  function, called with the client object) clamps to 100 and treats `99 < bar` as
-  full → fire condition is `bar >= 100`. The fill patch from 2026-08-10 already
-  lets the bar charge while hunting.
-- **Activation path:** the hunt brain `FUN_00f54058` and the XP hotkey dispatcher
-  `FUN_00a1d6bc` both activate skills with the same call:
-  `FUN_011b1ec9  __thiscall(ECX = client, magicId, targetUid, 0, 1)`.
-  For the seven XP skills the dispatcher fires them **self-cast** at
-  `*(uint*)(client + 0x268)` (the own role/UID).
-- **XP skill ids:** `FUN_00a1d6bc` compares the current skill's `+0x5c` field
-  against exactly seven ids — `0x2845, 0x2B34, 0x2B2A, 0x2D5A, 0x3002, 0x323C,
-  0x3DA4` — and fires the match. These are the class XP skills (Superman,
-  Fatal Strike, etc.). Skill names live in the GameData files, not the exe, so
-  the overlay doesn't hardcode a per-class table — it auto-detects instead.
-- **Which one does the character know?** `FUN_011a92b4(client, &out, magicId)`
-  is the client's own learned-magic lookup (scans the smart-pointer vector at
-  `client+0x1d88..+0x1d8c`): `out[0] != 0` = learned. `out[1]` is an intrusive
-  refcount block released with `FUN_00420f03` (`__fastcall`, ECX = block) —
-  same smart-pointer pattern used at every call site (dispatcher, queue
-  processor `FUN_011b4477`).
-- **Why the direct call (not PostMessage 0x464/0xe65):** the hotkey posts
-  `FUN_00df9561(0xe65, !hunting)` to the main window, but the direct call is
-  exactly what the hunt brain itself runs on the same thread (HookedEndScene),
-  needs no window-proc spelunking, and skips the current-skill swap the UI
-  path does. The use-skill gates were already patched, and note the gate reads
-  the *current* skill's `+0x30` — during hunting that's the attack skill, so
-  the direct call wouldn't trip it anyway.
-
-**Implementation (`src/hooks/xp_skill.cpp`, "Auto XP skill when bar is full"):**
-
-1. Per-frame tick (`ApplyXpSkillClientState()`, called from
-   `RenderImGuiInterface` like the auto-hunt assertion — runs with the menu
-   closed, on the game thread).
-2. Every 3s re-scan the seven ids with `FUN_011a92b4` and cache the first the
-   character knows (handles relog / class change).
-3. When `client+0xaec >= 100`, call `FUN_011b1ec9(client, xpSkillId,
-   *(client+0x268), 0, 1)` — max once per second; the server resets the bar
-   after a pop, which throttles the next one naturally.
-4. Optional "Only while auto-hunting" gate (default ON) using the same
-   `client+0x5385 && mgr+0x11` check as the game.
-5. Enabling auto-pop force-enables the gate patches (the fill patch is what
-   lets the bar charge during hunting at all).
-
-UI shows the live bar value and the auto-detected skill id.
-
----
-
-## 🔧 Auto-XP debug (2026-08-11, late) — "does not activate automatically"
-
-**Symptom:** with "Auto XP skill when bar is full" enabled, the skill never pops.
-
-**Verified this session (call-site level):**
-
-- `client+0xaec` IS the XP bar on the `DAT_01a52960` client object — in
-  `FUN_00d3fb0f` (projectile-complete tick): `FUN_0043e481()` → ECX=client →
-  `FUN_011154f5(1)`. The same function also confirms `client+0x268` = own role
-  UID: `if (*(int*)(client+0x268) == projectile->targetId)` → the "self" branch
-  (GreenGlow + bar fill + notify `0x40f`).
-- `FUN_011354b1` (kill tick) also feeds the bar: `FUN_011154f5(1)` with ECX =
-  its own `this` (reads `+0xb00` combo counter, `+0x16d0` vtable object).
-- Ruled out for the 0xe65 handler search: `FUN_00c2c6c3` (generic CWnd base
-  window proc — mouse/paint/WM_COMMAND only) and `FUN_00a51357` (dialog
-  handler, 0x464/0x200 only). The real `0x464/0xe65` handler is still
-  unlocated — main-window-proc candidate `FUN_00a518e1` decompile timed out
-  (bridge flaky; retry when stable). Other unexamined `CMP [EBP+8],0x464`
-  candidates: FUN_004eee90, FUN_00571d16, FUN_006175f8, FUN_006e29b9,
-  FUN_00720124, FUN_007c4e30, FUN_009527df, FUN_00953044, FUN_009b0c3c,
-  FUN_00af8bc6, FUN_00af8ded, FUN_00c2c54f.
-- `DAT_01a584c0` = main game controller object (fields `+0x2420d41` etc.);
-  `FUN_00a1d6bc` (skill dispatcher) and `FUN_00a37356` (hotkey dispatcher) are
-  its methods — the 0xe65 handler likely lives in the same class's window proc.
-
-**Failure hypotheses (ranked):**
-
-1. DLL not rebuilt / new checkbox never enabled (the feature is new code).
-2. Detection fails → UI stuck on "XP skill: scanning..." (lookup contract or
-   id-space mismatch).
-3. Bar never reads 100 → unlock patches off (bar can't charge while hunting),
-   or a different object than expected.
-4. Fire call executes but the server silently rejects it (server-side bar not
-   full, or the skill must be the *current* skill for the packet to be accepted).
-
-**Next debug steps:**
-
-- Read the overlay's live XP values: what does "XP bar: X / 100" show while
-  hunting, and does it show a detected id or "scanning..."? (Pinpoints the
-  failing stage: bar vs detection vs fire.)
-- Add an "XP debug" tree (bar value, detected id, last fire tick, fire count)
-  plus a manual "Fire XP skill now" test button to exercise the call on demand.
-- Alternative activation path to evaluate: `PostMessageA(DAT_01a5a9cc, 0x464,
-  0xe65, 1)` — exactly what the XP hotkey sends when NOT hunting (flag=1).
-  Must first locate the 0xe65 handler and confirm it selects + fires the skill.
-- Or find the HUD XP-button click handler (it must reference the seven XP ids
-  to draw the right icon) and mimic it exactly.
-
----
-
-## ✅ XP skills while auto-hunting (2026-08-10, night) — client block removed
-
-**Problem:** with auto-hunt engaged, activating an XP skill was refused with
-"[System] Unable to use XP skills when auto-fighting"
-(string key `STR_CANNOT_USE_XP_WHEN_HANGUP` @ `0x01741FA4`).
-
-**Root cause — three gates, all reading `IsHunting` (`FUN_0111621f`):**
-
-1. `FUN_011154f5` (XP charge-bar fill): the 0-100 XP bar (object `+0xaec`) is only
-   incremented when NOT hunting — while hunting the bar never charges client-side.
-   Callers: `FUN_011354b1` (kill/combo tick, `FUN_011154f5(1)`) and `FUN_00d3fb0f`
-   (projectile-complete on self → GreenGlow effect → `FUN_011154f5(1)` + notify 0x40f).
-2. `FUN_011b1ec9` (use skill on target) and 3. `FUN_011b3503` (use skill at position):
-   `if (IsHunting && currentSkill->field_0x30 == 1)` → show the string and bail.
-   `currentSkill` = `FUN_00d9612c(client)` = `client + 0x70` (`LEA EAX,[ECX+0x70]; RET`);
-   its `+0x30` dword == 1 marks an XP-type skill. `find_undocumented_by_string`
-   confirms exactly these two functions reference the block string.
-
-**Fix — three 2-byte code patches applied live by the overlay** (new
-`src/hooks/xp_skill.cpp`, "Allow XP skills while hunting" checkbox):
-
-| Site | Function | Original | Patched | Effect |
-|---|---|---|---|---|
-| `0x01115514` | FUN_011154f5 | `75 49` JNZ | `90 90` NOPs | XP bar charges while hunting |
-| `0x011B21D8` | FUN_011b1ec9 | `74 59` JZ | `EB 59` JMP | block never fires (target skills) |
-| `0x011B3B21` | FUN_011b3503 | `74 4A` JZ | `EB 4A` JMP | block never fires (position skills) |
-
-Each site is guarded by an original-byte check (same pattern as
-`AutoHunt::IsClientSupported`) so the feature self-disables on a different build.
-Server side needs nothing: the 0x855 packet stays withheld, so the server treats the
-XP pop as normal gameplay.
-
-Note: the hunt brain (`FUN_00f54058`) itself calls `FUN_011b1ec9` / `FUN_011b3503`,
-so brain-driven XP skills are unblocked too.
 
 ---
 
@@ -206,8 +64,6 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `824ebfb` | VIP spoof |
 | `a93cb41` | don't send the 0x855 packet by default (fixed XP reset) |
 | `f7605b5` | added `OFFSETS.md` (durable signatures/offsets for re-finding after updates) |
-| `5127d6c` | XP-skill gates patched (bar charges + can pop while hunting) |
-| `06321b3` | auto XP skill activation (bar-full → auto-detect + fire Superman/Fatal Strike) |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -297,7 +153,7 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
   event (FUN_00de457e when turning off / FUN_00ddbf64 when turning on) then writes the byte.
   No direct callers (called via vtable).
 - Read every frame by the action dispatcher FUN_0112ef9d (calls FUN_00482705 + FUN_00f4761f).
-- Hunting-active check: FUN_0111621f = `client+0x5385 != 0 && mgr+0x11 != 0`.
+- Hunting-active check: FUN_0111621f = `client+0x5385 != 0 && mgr && mgr+0x11 != 0`.
 
 ### Other leads
 
@@ -355,13 +211,105 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
 2. ~~Fix XP reset~~ — **done**: withholding the 0x855 packet keeps the server out of
    auto-hunt mode so XP fills normally.
 3. ~~VIP unlock~~ — **done**: force `client+0x9e4`/`+0x9ec` = 6 (jump-search + auto-pick).
-4. ~~XP skills while hunting~~ — **done** (2026-08-10 night): patch the three
-   `IsHunting` gates (see the top section). New module `src/hooks/xp_skill.cpp`.
-5. ⚠️ ~~Auto XP skill~~ — **shipped** (2026-08-11) but **in debugging**: user reports
-   it never fires in-game. See the "Auto-XP debug" section for hypotheses and
-   next steps (live UI values, debug tree, 0xe65 handler / XP-button path).
-6. Optional: set auto-pick directly from the overlay (currently enabled via the client
+4. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
-7. Verify jump-search (VIP3) engages while hunting.
-8. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
+5. Verify jump-search (VIP3) engages while hunting.
+6. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
    anchors) to re-locate every value.
+
+---
+
+## 2026-08-11 — Speed control (movement / attack / looting) — `src/hooks/speed.cpp`
+
+### The interval system (ONE function controls every action speed)
+
+Every role action (walk / run / attack / pickup / skill) gets its duration from the
+per-role **action-interval virtual `FUN_010afd05`** (ECX = role, one stack arg = time
+delta, `RET 4`; verified at instruction level). It forwards to the master computation
+**`FUN_00de86b2`** (3drole\role.cpp) unless an override component at `role+0x8f8`
+handles it (vtable call `[obj+0x80]`). Smaller interval = faster action.
+
+`FUN_00de86b2` pipeline (for the role's current action state `role+0xb4`, states < 0xD):
+1. base interval from `RoleDataQuery()` vtable+0x30
+2. assorted buff/debuff percent modifiers
+3. **`FUN_00deb537` — the nSpeedPercent path** (gated; move-ish states):
+   `interval = interval * 100 / min(100 + role+0xc0, capTable[role+0xb4])`
+   - cap table `0x016F7E44` (13 dwords) = {100,105,110,115,120,130,140,150,165,185,190,195,200}
+   - mount (type 0x2c9) extra scaling from tables `0x016F7E78` / `0x016F7EAC`
+   - transform states 0x78–0x7B get a baked ×5/4
+   - NEVER let nSpeedPercent drop below 1 (`role+0xc0 <= -100`): the
+     `CHECKF "nSpeedPercent > 0"` assert (role.cpp:0x1ae9) forces interval = 0.
+4. **final generic divisor (ALL actions)**: `interval = ceil(interval*100 / (100 +
+   role+0x44/100))` when `role+0x48 != 0` (and `role+0xf4` adds percent in the
+   `FUN_00efb7f9` branch). `role+0x44` is in 1/100-% units: 10000 → divisor 200 → 2x.
+   **No cap table on this path.**
+5. final clamp: interval >= 1 (can't hit 0 from these paths).
+`role+0x4a` byte = set to 1 whenever the computed interval is below base (client-side
+"faster than normal" marker).
+
+### LIVE finding: the interval virtual is hooked at runtime (server anti-cheat)
+
+On the live server, `FUN_010afd05`'s first 5 bytes were observed overwritten with
+`E9 66 3D 26 73` = `JMP 0x74313A70` (a dynamically allocated trampoline page) —
+something (server anti-cheat / launcher patch) detours the classic speed-hack spot.
+It comes and goes (pristine `55 8B EC ...` bytes seen both at the login screen and
+in-game later). **Conclusion: no code hooks on our side.** The overlay drives speed
+with data writes only, feeding the computation that runs inside the
+(sometimes-)hooked function.
+
+### My-role discovery (no hooks)
+
+- Client object global: `DAT_01a52960` (accessor `FUN_0043e481`).
+- The game's own my-role lookup is **`FUN_00d3203a`** (called by the brain via the thunk
+  `FUN_00d3244a`): it walks the role list (`manager+0x4` = std::list sentinel,
+  node+0x10 → role via `FUN_00d22860`) and accepts the candidate whose
+  **`role+0x54` == `client+0x268`**. The list-owner singleton is `DAT_01a526bc`
+  (accessor `FUN_0041f76c`, creator `FUN_0041f8f9`).
+- Second id placement: `FUN_00fcd1e8` = `CALL FUN_0043e481; MOV ECX,EAX; JMP
+  FUN_0098c58d` → returns `client+0x26c`; and `FUN_01000e06` compares a role's `+0x268`
+  against it for message type 0x186ad. **This server leaves `client+0x26c` = 0 even
+  in-game** — the scan therefore tries both variants plus a cross rule. What actually
+  hit live: `role+0x268 == client+0x268` (my id was `1206741`).
+- Candidate class validation: the object's vtable must contain `FUN_010afd05` or
+  `FUN_00de86b2` (only role classes carry them; vtables are unaffected by the E9 hook),
+  plus vtable-in-image and `role+0xb4 < 13` sanity. (First-hit rule-3 objects turned out
+  to be non-roles carrying the same id — the vtable content check rejects them.)
+
+### What speed.cpp writes every frame
+
+- `role+0x48 = 1`, `role+0x44 = (percent-100)*100`   (uncapped final divisor)
+- `role+0xc0 = percent-100`                           (nSpeedPercent / move states)
+- cap table at `0x016F7E44` raised to 500 while enabled (VirtualProtect on the
+  read-only page; originals restored on disable). Only affects entities with a
+  positive +0xc0 — i.e. just the local role.
+- Fast loot tick: `DAT_01a5cdb4 = 0` every frame → hunt brain `FUN_00f54058` ticks at
+  frame rate instead of once per second (only the brain reads/writes that global —
+  xref-verified).
+
+### Pickup flow (loot speed rides on movement + interval)
+
+`FUN_00f93854` (roleaction.cpp, `_COMMAND_PICKUP` processor on the role): state
+machine — 0 = init (if already on the item cell → `FUN_00fa240d` then finish), 2/3 =
+walk to the item cell (movement speed applies), then `FUN_00fa252b(0x118, itemId)`
+performs the pick. Target coords are XOR-obfuscated at role+0x468..+0x478.
+
+### Open / verify
+
+- Whether visible WALK speed responds to the interval scaling on this server or is
+  animation-driven + server-corrected (rubber-band). Attack/pickup go through the
+  interval system regardless — verify in-game.
+- Conditions gating the +0xc0 path (`FUN_00efb7f9` / `FUN_00deeaf0`) are not fully
+  mapped; the +0x44 path is unconditional apart from `role+0xf4 == 0`.
+- If the binary updates: re-find via `OFFSETS.md` (AOBs + the "nSpeedPercent > 0" and
+  role-list anchors).
+
+### Commits (speed control)
+
+| Commit | Change |
+|---|---|
+| `caeec46` | speed.cpp v1: MinHook interval-scaling hook + fast loot tick |
+| `461a7b1` | diagnostic byte dump at 0x010AFD05 in the unsupported-build message |
+| `7810102` | v3: hook-free field writes + background my-role scan (after the E9 finding) |
+| `be5468b` | no hard gate on login; auto-retry scan; scan diagnostics |
+| `bd244f52` | dual-variant id matching (role+0x54/client+0x268 is the game's own pair) |
+| `dede331` | vtable class validation + role+0xc0 path + raised cap table |
