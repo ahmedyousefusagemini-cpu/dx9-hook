@@ -11,6 +11,8 @@ extern bool g_serverNameUseRainbow;
 extern void UpdateRainbowColors();
 extern void RenderAutoHuntInterface();
 extern void ApplyAutoHuntClientState();
+extern void RenderSpeedInterface();
+extern void ApplySpeedClientState();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -25,6 +27,9 @@ void RenderImGuiInterface()
 	// Auto-hunt's client-side hunting flag is asserted every frame too, so the
 	// hunt brain stays engaged even after the overlay is closed.
 	ApplyAutoHuntClientState();
+
+	// Speed control's fast-loot tick gate reset runs every frame as well.
+	ApplySpeedClientState();
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
@@ -50,6 +55,10 @@ void RenderImGuiInterface()
 	ImGui::Spacing();
 	
 	RenderAutoHuntInterface();
+	
+	ImGui::Spacing();
+	
+	RenderSpeedInterface();
 	
 	ImGui::Spacing();
 	
