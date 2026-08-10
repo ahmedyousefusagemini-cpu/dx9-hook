@@ -1,0 +1,209 @@
+# RE Offsets & Signatures — Conquer.exe (client 7937)
+
+Durable reverse-engineering reference for the auto-hunt / VIP work. **Absolute
+addresses shift on every recompile** — the byte signatures (AOB) and the unique
+string/RTTI anchors below are what let you re-locate each value after a binary
+update.
+
+Image base for all addresses below: `0x00400000`. Build analyzed: client 7937.
+
+---
+
+## How to re-find a value after a binary update
+
+1. **Byte signature (AOB)** — pattern-scan the new binary for the signature
+   (`??` = wildcard byte). Verify the match is unique.
+2. **String / RTTI anchor** — find a unique string (e.g. `"AutoHangUpFlag"`,
+   `".?AVCAutoHangUpMgr@@"`), then follow the code xref to the function.
+3. **Call graph** — reach a known function from a found one (e.g. the toggle
+   handler calls the manager accessor; the accessor reads the manager global).
+
+---
+
+## Globals
+
+| What | Address | Found via |
+|---|---|---|
+| Client object | `DAT_01a52960` = `0x01A52960` | read by the client accessor `FUN_0043e481` |
+| CAutoHangUpMgr singleton | `DAT_01a531e0` = `0x01A531E0` | read by the manager accessor `FUN_00482705` |
+
+---
+
+## Functions
+
+> Addresses are this build. Signatures are the re-find mechanism.
+
+### Accessors
+
+**Client accessor — `FUN_0043e481` @ `0x0043E481`**
+Returns the client object (`DAT_01a52960`), lazy-creating it. Almost every
+auto-hunt call starts here.
+```
+83 3D ?? ?? ?? ?? 00 75 05 E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? C3
+```
+The client global address is the dword right after `83 3D` (and after `A1`).
+
+**Manager accessor — `FUN_00482705` @ `0x00482705`**
+Returns the CAutoHangUpMgr singleton (`DAT_01a531e0`), lazy-creating it.
+```
+83 3D ?? ?? ?? ?? 00 75 05 E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? C3
+```
+(Same code shape as the client accessor — disambiguate by which global it
+reads: this one reads the manager singleton.)
+
+### Auto-hunt toggle / packet
+
+**Toggle handler — `FUN_00bd7355` @ `0x00BD7355`**  
+Exactly what the in-game dialog Begin/Stop buttons and the icon run:
+`GetManager()` then `mgr->Toggle(0)`. No args, plain `RET`.
+```
+6A 00 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? C3
+```
+
+**Toggle impl — `FUN_00f2fcd5` @ `0x00F2FCD5`**  
+`void __thiscall Toggle(CAutoHangUpMgr* this, int flag)` (`RET 4`). Stamps
+`mgr+0x14 = timeGetTime()` when flag==0, builds CMsgHangUp, sends it. **Does
+NOT write the hunting state — it only notifies the server.**
+```
+68 ?? ?? ?? ?? B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F1 80 7D 08 00 75 ?? E8 ?? ?? ?? ?? 89 46 14
+```
+(`89 46 14` = `MOV [ESI+0x14],EAX` is the `mgr+0x14` timestamp write — the anchor.)
+
+**Packet builder — `FUN_00e6a590` @ `0x00E6A590`**  
+Fills the CMsgHangUp packet: `[0]=0x16`, `[2]=0x855` (type 2133),
+`[4]=(arg^1)*2+1` (=3 for the toggle). Notify only — no config payload.
+```
+55 8B EC 56 8B F1 E8 ?? ?? ?? ?? 8B 86 ?? ?? ?? ?? 6A 16 59 66 89 08 B9 55 08 00 00
+```
+(contains `B9 55 08 00 00` = `MOV ECX,0x855` = the packet type — very unique.)
+
+### State checks
+
+**Is-hunting — `FUN_0111621f` @ `0x0111621F`**  
+Returns true while hunting: `client+0x5385 != 0 && mgr && mgr+0x11 != 0`.
+**Takes the client in ECX with no null check — don't call it bare; replicate
+with plain reads.**
+```
+E8 ?? ?? ?? ?? 84 C0 74 13 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 03 B0 01 C3 32 C0 C3
+```
+
+**Client auto-battle byte getter — `FUN_0111524b` @ `0x0111524B`**  
+`return *(byte*)(client+0x5385)`. The offset `0x5385` is embedded in the bytes.
+```
+8A 81 85 53 00 00 C3
+```
+
+**Manager hunting/gate getters — `FUN_00f4761b` / `FUN_00f4761f` @ `0x00F4761B`**  
+Two adjacent getters: `return *(byte*)(mgr+0x11)` then `return *(byte*)(mgr+0x12)`.
+```
+8A 41 11 C3 8A 41 12 C3
+```
+
+### Hunt brain
+
+**Per-frame hunt brain — `FUN_00f54058` @ `0x00F54058`**  
+The client-side auto-hunt loop: gates on `IsHunting`, rate-limits to 1s, then
+finds targets / walks / attacks / loots. Each phase is gated by an
+`AutoHangUpFlag<N>` ini bit and (for jump/loot) a VIP gate.
+```
+6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0
+```
+Called once per frame from `FUN_01128c86` (the big per-frame updater).
+
+### VIP
+
+**VIP level getter — `FUN_00fd3271` @ `0x00FD3271`**  
+Returns the VIP level (0–6) from the client object: `client+0x9e4` normally,
+`client+0x9ec` if the `FUN_01118b17` branch flag is set.
+```
+56 8B F1 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 08 8B 86 ?? ?? ?? ??
+```
+
+**VIP branch check — `FUN_01118b17` @ `0x01118B17`**  
+`return (client+0x57f4 >> 10) & 1` — selects which VIP field the getter reads.
+```
+8B 81 F4 57 00 00 C1 E8 0A 24 01 C3
+```
+
+**VIP feature gates — `FUN_00f3314b` @ `0x00F3314B`, `FUN_00f3316c` @ `0x00F3316C`**  
+Both return `requiredLevel <= vipLevel` (the auto-hunt jump-search / auto-pick
+gates). Adjacent and identically shaped — tell them apart by order.
+```
+56 57 8B F9 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 8B CF 8B F0
+```
+
+---
+
+## Object maps
+
+### Client object (from `DAT_01a52960`)
+
+| Offset | Type | Meaning |
+|---|---|---|
+| `+0x9e4` | dword | VIP level (FUN_00fd3271 default branch) |
+| `+0x9ec` | dword | VIP level (FUN_00fd3271 alt branch, when the 0x57f4 flag is set) |
+| `+0x1da0` | dword | hunt brain gate — must be 0 (checked by FUN_011ae8b7) |
+| `+0x5385` | byte | auto-battle flag (read by FUN_0111524b) |
+| `+0x57f4` | dword | source of the VIP-field branch flag (FUN_01118b17) |
+
+### CAutoHangUpMgr (from `DAT_01a531e0`, size `0x44`)
+
+| Offset | Type | Meaning |
+|---|---|---|
+| `+0x00` | ptr | vtable (only virtual = dtor) |
+| `+0x10` | word | state: `0x001` idle / `0x101` hunting |
+| `+0x11` | byte | hunting-active flag (the brain's gate; read by FUN_00f4761b) |
+| `+0x12` | byte | per-frame gate flag (read by FUN_00f4761f; brain skips while nonzero) |
+| `+0x14` | dword | `timeGetTime()` of last toggle (written by FUN_00f2fcd5) |
+| `+0x18`/`+0x1c` | int | hunt anchor X/Y (the brain re-sets these each tick) |
+| `+0x04` | int | hunt radius (the brain re-computes it each tick) |
+
+---
+
+## Packet
+
+**`0x855` (2133) = CMsgHangUp** — the auto-hunt start/stop *notification*.
+Fields written by the builder: `[0]=0x16`, `[2]=0x855`, `[4]=(arg^1)*2+1`.
+Both Begin and Stop send `[4]=3` — it's a pure toggle; the server flips state.
+**It carries no configuration** — activation/config is client-side.
+
+---
+
+## Feature logic (how the overlay drives it)
+
+- **Is-hunting gate:** `client+0x5385 != 0 && mgr+0x11 != 0`.
+- **Start (client-side):** set `client+0x5385 = 1` and `mgr+0x11 = 1`, then send
+  the toggle packet (`FUN_00bd7355`) to notify the server. The overlay asserts
+  the two flags every frame so a server update can't knock them off.
+- **Stop:** clear both flags, send the toggle.
+- **VIP unlock:** force `client+0x9e4` and `client+0x9ec` to `6` every frame.
+  Passes every `requiredLevel <= vipLevel` gate (jump-search VIP3+, auto-pick
+  VIP4+). Client-side only — server-enforced VIP features (shop, teleport)
+  still fail.
+
+---
+
+## Re-find anchors (unique strings / RTTI)
+
+Use these to locate the code after an update when signatures fail:
+
+| Anchor | Address (this build) | Leads to |
+|---|---|---|
+| `"AutoHangUpFlag"` | `0x0172A648` | the ini phase-flag reader (FUN_010630e9) used by the brain |
+| `".?AVCAutoHangUpMgr@@"` | `0x01A498B8` | manager RTTI → manager methods |
+| `".?AVCDlgAutoHangUp@@"` | `0x019F3648` | the auto-hunt settings dialog |
+| `".?AVCMsgHangUp@@"` | `0x01A46AE8` | the CMsgHangUp message class |
+| `"AutoHangUpIconBtn"` | `0x01646F90` | the auto-hunt toolbar icon handler |
+| `"VipLev"` | `0x0163AA70` | VIP-level handling |
+| `"nVipLev >= 0 && nVipLev <= 6"` | `0x016160F8` | dlgvipquery.cpp — confirms VIP range 0–6 |
+| `msghangup.cpp` path string | `0x017012F8` | CMsgHangUp source module |
+
+---
+
+## Verification checklist (after re-finding on a new build)
+
+- [ ] Manager accessor signature resolves to the singleton that IsHunting reads.
+- [ ] Toggle handler is the 5-instruction `PUSH 0; CALL; MOV ECX,EAX; CALL; RET`.
+- [ ] Packet builder contains `B9 55 08 00 00` (`MOV ECX,0x855`).
+- [ ] VIP getter's field offsets match the two dwords it returns.
+- [ ] Confirm each AOB match is unique before trusting it.
