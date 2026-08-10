@@ -10,15 +10,16 @@
 // runs while  FUN_0111621f == (client+0x5385 != 0 && mgr+0x11 != 0).
 //
 // The in-game toggle (FUN_00bd7355) only sends the 0x855 "CMsgHangUp" notify
-// packet - it never writes either client-side flag. So a bare packet toggle
-// played the effect but never hunted. This feature asserts BOTH client-side
-// flags directly, every frame while enabled, and still sends the notify packet.
+// packet - it never writes either client-side flag. Worse, telling the server
+// "I'm auto-hunting" makes it handle XP/loot differently (the user observed the
+// XP bar resetting to zero). Since the hunting is client-driven, this feature
+// now drives the client state DIRECTLY and does NOT send the notify packet by
+// default, so the server treats the kills as normal gameplay.
 //
 // VIP spoof (2026-08-10): the VIP level is read from the client object by
 // FUN_00fd3271 -> client+0x9e4 (or client+0x9ec). The auto-hunt feature gates
-// (jump-search VIP3+, auto-pick VIP4+) are FUN_00f3314b / FUN_00f3316c which
-// just do  requiredLevel <= vipLevel. So forcing the client VIP field to 6
-// (max, per "nVipLev >= 0 && nVipLev <= 6") passes every client-side gate.
+// (jump-search VIP3+, auto-pick VIP4+) just do  requiredLevel <= vipLevel. So
+// forcing the client VIP field to 6 (max) passes every client-side gate.
 // ============================================================================
 
 namespace AutoHunt
@@ -47,6 +48,12 @@ namespace AutoHunt
 	// VIP spoof state (independent of hunting so it can stay on for the features).
 	bool g_spoofVipLevel = false;
 	int  g_vipLevel = 6;  // max, per "nVipLev >= 0 && nVipLev <= 6"
+
+	// Whether to send the 0x855 notify packet to the server. Default OFF - the
+	// packet tells the server the character is auto-hunting, which makes it reset
+	// the XP bar / change loot handling. The hunting itself is client-driven, so
+	// the packet is not needed for the overlay to work.
+	bool g_notifyServer = false;
 
 	typedef void (*ToggleFunc)();
 	typedef int  (*ManagerAccessorFunc)();
@@ -113,7 +120,7 @@ namespace AutoHunt
 		return *(int*)(client + CLIENT_VIP_LEVEL_FIELD_A);
 	}
 
-	// Sends the same notify packet the in-game auto-hunt button sends.
+	// Sends the 0x855 notify packet (only when the user opts in).
 	void Toggle()
 	{
 		if (!IsClientSupported())
@@ -152,8 +159,9 @@ namespace AutoHunt
 		if (g_clientSideHunting)
 			return;
 		g_clientSideHunting = true;
-		ApplyClientSideState();  // engage the brain right away
-		Toggle();                // notify the server (same packet as the in-game button)
+		ApplyClientSideState();      // engage the brain right away
+		if (g_notifyServer)
+			Toggle();                // optionally tell the server
 	}
 
 	void Stop()
@@ -170,7 +178,8 @@ namespace AutoHunt
 		if (IsClientValid(client))
 			*(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) = 0;
 
-		Toggle();  // notify the server
+		if (g_notifyServer)
+			Toggle();                // optionally tell the server
 	}
 }
 
@@ -210,6 +219,11 @@ void RenderAutoHuntInterface()
 		if (ImGui::Button("Start Auto Hunt"))
 			AutoHunt::Start();
 	}
+
+	// The 0x855 packet tells the server the character is auto-hunting (which made
+	// it reset the XP bar). Off by default so the server treats kills as normal.
+	ImGui::Checkbox("Notify server (0x855 packet)", &AutoHunt::g_notifyServer);
+	ImGui::TextDisabled("Leave OFF so the server keeps filling XP normally");
 
 	// VIP level spoof - unlocks the client-side VIP-gated auto-hunt features
 	// (jump-search VIP3+, auto-pick VIP4+).
