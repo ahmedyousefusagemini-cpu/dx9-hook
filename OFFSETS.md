@@ -26,6 +26,7 @@ Image base for all addresses below: `0x00400000`. Build analyzed: client 7937.
 |---|---|---|
 | Client object | `DAT_01a52960` = `0x01A52960` | read by the client accessor `FUN_0043e481` |
 | CAutoHangUpMgr singleton | `DAT_01a531e0` = `0x01A531E0` | read by the manager accessor `FUN_00482705` |
+| Main window handle | `DAT_01a5a9cc` = `0x01A5A9CC` | `FUN_00df9561` posts `0x464` game-command messages to it |
 
 ---
 
@@ -106,9 +107,11 @@ The client refuses XP skills while the hunting state is active with
 the overlay patches all three (see `src/hooks/xp_skill.cpp`).
 
 **XP charge-bar fill gate — `FUN_011154f5` @ `0x011154F5`**  
-Adds to the 0-100 XP bar (object `+0xaec`) only when NOT hunting. Callers:
+Adds to the 0-100 XP bar (client `+0xaec`) only when NOT hunting. Callers:
 `FUN_011354b1` (kill tick) and `FUN_00d3fb0f` (projectile complete on self).
-Patch site `0x01115514`: `75 49` (JNZ skip-fill) → `90 90` (NOPs).
+Also refuses to refill while an XP-skill buff status is active
+(`FUN_00f1a1d8(0x96/0xc0/0xeb)`). Patch site `0x01115514`: `75 49` (JNZ
+skip-fill) → `90 90` (NOPs).
 ```
 E8 ?? ?? ?? ?? 6A 64 5B 84 C0 75 ?? 68 96 00 00 00
 ```
@@ -133,21 +136,64 @@ E8 ?? ?? ?? ?? 84 C0 74 ?? 8B 4D 9C E8 ?? ?? ?? ?? 83 78 30 01 75 ?? 68 ?? ?? ??
 
 **Current-skill accessor — `FUN_00d9612c` @ `0x00D9612C`**  
 `return client + 0x70` — the current-magic-info struct; its `+0x30` dword == 1
-marks an XP-type skill.
+marks an XP-type skill; `+0x5c` is the current magic type id; `+0x10` the
+cooldown ms.
 ```
 8D 41 70 C3
 ```
+
+### XP-skill auto-activation (auto Superman / Fatal Strike)
+
+How the overlay pops the character's XP skill when the bar is full
+(`src/hooks/xp_skill.cpp`, "Auto XP skill when bar is full").
+
+**Use-skill-on-target — `FUN_011b1ec9` @ `0x011B1EC9`**  
+The activation entry point. Call signature (verified at the hunt brain and
+the hotkey dispatcher call sites):
+`char __thiscall FUN_011b1ec9(client /*ECX*/, int magicId, int targetUid, int unk /*0*/, int showErr /*1*/)`.
+XP skills are self-cast: `targetUid = *(uint*)(client+0x268)`.
+
+**Learned-magic lookup — `FUN_011a92b4` @ `0x011A92B4`**  
+`void __thiscall FUN_011a92b4(client /*ECX*/, void* out[2], int magicId)`.
+Scans the learned-magic vector (`client+0x1d88` begin / `client+0x1d8c` end,
+8-byte smart-pointer entries). `out[0] != 0` = the character knows the magic;
+`out[1]` is an intrusive refcount block — release it with `FUN_00420f03`.
+Re-find via its callers: the hotkey dispatcher `FUN_00a1d6bc` and the skill
+queue processor `FUN_011b4477`.
+
+**Smart-pointer release — `FUN_00420f03` @ `0x00420F03`**  
+`int __fastcall FUN_00420f03(void* refBlock /*ECX*/)` — decrements the use
+count at `block+4`, virtual-destroys on zero, then the weak count at `block+8`.
+
+**XP skill ids (self-cast)** — the hotkey dispatcher `FUN_00a1d6bc` compares
+the current skill's `+0x5c` against exactly seven ids and fires the match at
+the self UID: `0x2845, 0x2B34, 0x2B2A, 0x2D5A, 0x3002, 0x323C, 0x3DA4`
+(the class XP skills: Superman, Fatal Strike, etc.). The overlay probes them
+with the learned-magic lookup and uses the first the character knows — no
+per-class table needed. Re-find: dispatcher = the function that posts
+`FUN_00df9561(0xc1f, 0)` and switches on command ids `0x10/0x6c..0x72`.
+
+**Game-command poster — `FUN_00df9561` @ `0x00DF9561`**  
+`PostMessageA(DAT_01a5a9cc, 0x464, wParam, lParam)`. The XP hotkey
+(`FUN_00a37356` case `0x38b`) posts `0xe65` with `lParam = !IsHunting`.
 
 ### Hunt brain
 
 **Per-frame hunt brain — `FUN_00f54058` @ `0x00F54058`**  
 The client-side auto-hunt loop: gates on `IsHunting`, rate-limits to 1s, then
 finds targets / walks / attacks / loots. Each phase is gated by an
-`AutoHangUpFlag<N>` ini bit and (for jump/loot) a VIP gate.
+`AutoHangUpFlag<N>` ini bit and (for jump/loot) a VIP gate. Uses skills via
+`FUN_011b1ec9(currentSkill+0x5c, *(client+0x268), 0, 1)` /
+`FUN_011b3503(currentSkill+0x5c, x, y, 1)`.
 ```
 6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0
 ```
 Called once per frame from `FUN_01128c86` (the big per-frame updater).
+
+**Skill queue processor — `FUN_011b4477` @ `0x011B4477`**  
+Iterates the client's skill queue (`client+0x1b10` list; entries: `+0x10`
+magic id, `+0x14` active flag, `+0x18` last-used `timeGetTime`), honors the
+current skill's cooldown (`+0x10`), fires via `FUN_011b1ec9`.
 
 ### VIP
 
@@ -213,8 +259,13 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 
 | Offset | Type | Meaning |
 |---|---|---|
+| `+0x268` | dword | own role/UID (the target arg the hunt brain / XP dispatcher pass to `FUN_011b1ec9`) |
 | `+0x9e4` | dword | VIP level (FUN_00fd3271 default branch) |
 | `+0x9ec` | dword | VIP level (FUN_00fd3271 alt branch, when the 0x57f4 flag is set) |
+| `+0xaec` | dword | XP charge bar 0–100 (full = 100; read/written by FUN_011154f5) |
+| `+0x1868` | dword | learned-magic list count (index getter FUN_00fcc707; entry `+0x1c` = magic id) |
+| `+0x1b10` | list | skill queue head (processed by FUN_011b4477) |
+| `+0x1d88`/`+0x1d8c` | ptr | learned-magic vector begin/end (8-byte smart-ptr entries; scanned by FUN_011a92b4) |
 | `+0x1da0` | dword | hunt brain gate — must be 0 (checked by FUN_011ae8b7) |
 | `+0x5385` | byte | auto-battle flag (read by FUN_0111524b) |
 | `+0x57f4` | dword | source of the VIP-field branch flag (FUN_01118b17) |
@@ -260,6 +311,12 @@ withholds this packet by default so the server treats kills as normal gameplay.
   auto-hunt dialog (the VIP spoof unlocks the checkbox).
 - **XP skills while hunting:** three 2-byte code patches (see "XP-skill gates"
   above) applied by `xp_skill.cpp`. Server unaffected (0x855 stays withheld).
+- **Auto XP skill (Superman / Fatal Strike):** every frame: if `client+0xaec >= 100`,
+  find the character's XP skill by probing the seven dispatcher ids with the
+  learned-magic lookup `FUN_011a92b4`, then call
+  `FUN_011b1ec9(client, xpSkillId, *(client+0x268), 0, 1)` — the same call the
+  hunt brain and the XP hotkey dispatcher make. Fire max 1/s; re-scan learned
+  magics every 3s. Requires the XP gates patched (auto-enables them).
 
 ---
 
@@ -292,4 +349,6 @@ Use these to locate the code after an update when signatures fail:
 - [ ] CMsgHangUp ctor contains `8D B? 08 04 00 00` (`LEA ...,+0x408` buffer).
 - [ ] Each XP-skill gate signature matches: fill `6A 64 5B 84 C0 75`, use-skill
       `84 C0 74 ?? 8B 4D ?? E8 ?? ?? ?? ?? 83 78 30 01`.
+- [ ] XP-skill ids: re-derive from the XP hotkey dispatcher (the function that
+      posts `FUN_00df9561(0xc1f, 0)` and switches on `0x10/0x6c..0x72`).
 - [ ] Confirm each AOB match is unique before trusting it.

@@ -12,6 +12,7 @@ extern void UpdateRainbowColors();
 extern void RenderAutoHuntInterface();
 extern void ApplyAutoHuntClientState();
 extern void RenderXpSkillInterface();
+extern void ApplyXpSkillClientState();
 extern void RenderSpeedInterface();
 extern void ApplySpeedClientState();
 
@@ -31,6 +32,9 @@ void RenderImGuiInterface()
 
 	// Speed control's fast-loot tick gate reset runs every frame as well.
 	ApplySpeedClientState();
+
+	// Auto XP pop ticks every frame too (it must run with the menu closed).
+	ApplyXpSkillClientState();
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;

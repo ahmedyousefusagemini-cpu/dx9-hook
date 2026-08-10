@@ -1,11 +1,66 @@
 # Reverse Engineering Notes — Conquer.exe (client 7937)
 
 **Current status: auto-hunt FULLY WORKING from the ImGui overlay** (kills, loots
-gold/items, XP + skill bars fill normally). See the "WORKING STATE" section below for
-the final solution; the detailed research follows.
+gold/items, XP + skill bars fill normally) — and the overlay now **auto-pops the
+XP skill** (Superman / Fatal Strike / any class) when the bar fills. See the
+"WORKING STATE" section for the auto-hunt solution; the detailed research follows.
 
 Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll imported).
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
+
+---
+
+## ✅ Auto XP skill activation (2026-08-11) — Superman / Fatal Strike auto-pop
+
+**Goal:** while auto-hunting, automatically activate the character's XP skill
+the moment the XP bar fills (no manual click).
+
+**Research trail:**
+
+- **XP bar value** is `*(uint*)(client + 0xaec)`, 0–100. `FUN_011154f5` (the fill
+  function, called with the client object) clamps to 100 and treats `99 < bar` as
+  full → fire condition is `bar >= 100`. The fill patch from 2026-08-10 already
+  lets the bar charge while hunting.
+- **Activation path:** the hunt brain `FUN_00f54058` and the XP hotkey dispatcher
+  `FUN_00a1d6bc` both activate skills with the same call:
+  `FUN_011b1ec9  __thiscall(ECX = client, magicId, targetUid, 0, 1)`.
+  For the seven XP skills the dispatcher fires them **self-cast** at
+  `*(uint*)(client + 0x268)` (the own role/UID).
+- **XP skill ids:** `FUN_00a1d6bc` compares the current skill's `+0x5c` field
+  against exactly seven ids — `0x2845, 0x2B34, 0x2B2A, 0x2D5A, 0x3002, 0x323C,
+  0x3DA4` — and fires the match. These are the class XP skills (Superman,
+  Fatal Strike, etc.). Skill names live in the GameData files, not the exe, so
+  the overlay doesn't hardcode a per-class table — it auto-detects instead.
+- **Which one does the character know?** `FUN_011a92b4(client, &out, magicId)`
+  is the client's own learned-magic lookup (scans the smart-pointer vector at
+  `client+0x1d88..+0x1d8c`): `out[0] != 0` = learned. `out[1]` is an intrusive
+  refcount block released with `FUN_00420f03` (`__fastcall`, ECX = block) —
+  same smart-pointer pattern used at every call site (dispatcher, queue
+  processor `FUN_011b4477`).
+- **Why the direct call (not PostMessage 0x464/0xe65):** the hotkey posts
+  `FUN_00df9561(0xe65, !hunting)` to the main window, but the direct call is
+  exactly what the hunt brain itself runs on the same thread (HookedEndScene),
+  needs no window-proc spelunking, and skips the current-skill swap the UI
+  path does. The use-skill gates were already patched, and note the gate reads
+  the *current* skill's `+0x30` — during hunting that's the attack skill, so
+  the direct call wouldn't trip it anyway.
+
+**Implementation (`src/hooks/xp_skill.cpp`, "Auto XP skill when bar is full"):**
+
+1. Per-frame tick (`ApplyXpSkillClientState()`, called from
+   `RenderImGuiInterface` like the auto-hunt assertion — runs with the menu
+   closed, on the game thread).
+2. Every 3s re-scan the seven ids with `FUN_011a92b4` and cache the first the
+   character knows (handles relog / class change).
+3. When `client+0xaec >= 100`, call `FUN_011b1ec9(client, xpSkillId,
+   *(client+0x268), 0, 1)` — max once per second; the server resets the bar
+   after a pop, which throttles the next one naturally.
+4. Optional "Only while auto-hunting" gate (default ON) using the same
+   `client+0x5385 && mgr+0x11` check as the game.
+5. Enabling auto-pop force-enables the gate patches (the fill patch is what
+   lets the bar charge during hunting at all).
+
+UI shows the live bar value and the auto-detected skill id.
 
 ---
 
@@ -101,6 +156,7 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `824ebfb` | VIP spoof |
 | `a93cb41` | don't send the 0x855 packet by default (fixed XP reset) |
 | `f7605b5` | added `OFFSETS.md` (durable signatures/offsets for re-finding after updates) |
+| `5127d6c` | XP-skill gates patched (bar charges + can pop while hunting) |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -250,8 +306,11 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
 3. ~~VIP unlock~~ — **done**: force `client+0x9e4`/`+0x9ec` = 6 (jump-search + auto-pick).
 4. ~~XP skills while hunting~~ — **done** (2026-08-10 night): patch the three
    `IsHunting` gates (see the top section). New module `src/hooks/xp_skill.cpp`.
-5. Optional: set auto-pick directly from the overlay (currently enabled via the client
+5. ~~Auto XP skill~~ — **done** (2026-08-11): auto-pop Superman / Fatal Strike /
+   any class XP skill when the bar is full (auto-detects the learned XP skill
+   via `FUN_011a92b4`, fires via `FUN_011b1ec9` like the hunt brain).
+6. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
-6. Verify jump-search (VIP3) engages while hunting.
-7. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
+7. Verify jump-search (VIP3) engages while hunting.
+8. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
    anchors) to re-locate every value.
