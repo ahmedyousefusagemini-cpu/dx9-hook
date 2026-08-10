@@ -10,6 +10,7 @@ extern bool g_serverNameEnabled;
 extern bool g_serverNameUseRainbow;
 extern void UpdateRainbowColors();
 extern void RenderAutoHuntInterface();
+extern void ApplyAutoHuntClientState();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -20,6 +21,10 @@ void RenderImGuiInterface()
 	// Frozen values must be re-applied every frame, even while the
 	// menu is closed, so this runs before the visibility check.
 	g_memoryScanner.ApplyFrozenValues();
+
+	// Auto-hunt's client-side hunting flag is asserted every frame too, so the
+	// hunt brain stays engaged even after the overlay is closed.
+	ApplyAutoHuntClientState();
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;

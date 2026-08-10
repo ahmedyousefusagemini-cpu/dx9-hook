@@ -5,64 +5,50 @@
 // ============================================================================
 // Auto Hunt (CAutoHangUpMgr) - Conquer.exe client 7937 (image base 0x400000)
 // ----------------------------------------------------------------------------
-// Reverse-engineered entry points (see RESEARCH_NOTES.md):
+// Finding (2026-08-10): the auto-hunt BEHAVIOR is client-driven. Every frame the
+// hunt brain (FUN_00f54058) reads local game state (player position, nearby
+// monsters, distances) and issues walk/attack calls. It only runs while
+//     FUN_0111621f == (client+0x5385 != 0 && mgr+0x11 != 0).
 //
-//   FUN_00bd7355 (0x00BD7355) - exactly what the auto-hunt dialog's Begin
-//     (0x201) and Stop (0x202) buttons both run:
-//         PUSH 0
-//         CALL FUN_00482705        ; EAX = CAutoHangUpMgr singleton (lazy init)
-//         MOV  ECX, EAX
-//         CALL FUN_00f2fcd5        ; mgr->Toggle(0): stamps mgr+0x14 with
-//                                  ; timeGetTime(), builds a CMsgHangUp packet
-//                                  ; (type 0x855 / 2133) and sends it through
-//                                  ; the legitimate send path (FUN_010ce686)
-//         RET
-//     Begin and Stop send the SAME packet; the server performs the actual
-//     toggle, so callers must gate on the current state (see IsHunting).
+// The in-game toggle (FUN_00bd7355) only sends the 0x855 "CMsgHangUp" notify
+// packet - it never writes the client-side hunting flag mgr+0x11. That is why a
+// bare packet toggle played the activation effect but never actually hunted: the
+// client brain stayed disengaged.
 //
-//   FUN_0111621f (0x0111621F) - the game's own "is hunting" check:
-//     client+0x5385 != 0 && mgr+0x11 != 0. It expects the client object in
-//     ECX (FUN_0111524b is `MOV AL,[ECX+0x5385]; RET`, no null check), so
-//     instead of calling it we replicate it with plain memory reads.
-//
-//   DAT_01a52960 (0x01A52960) - client object global (null outside the game).
-//   DAT_01a531e0 (0x01A531E0) - CAutoHangUpMgr singleton (null until 1st use).
+// This feature therefore asserts the client-side hunting flag directly, every
+// frame while enabled (so a server state update can't knock it back off), and
+// still sends the notify packet so the server stays in sync.
 // ============================================================================
 
 namespace AutoHunt
 {
-	const uintptr_t TOGGLE_HANDLER_ADDRESS = 0x00BD7355;  // FUN_00bd7355
-	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A52960;  // DAT_01a52960
-	const uintptr_t MANAGER_GLOBAL_ADDRESS = 0x01A531E0;  // DAT_01a531e0
+	const uintptr_t TOGGLE_HANDLER_ADDRESS = 0x00BD7355;  // FUN_00bd7355 - notify packet
+	const uintptr_t MANAGER_GLOBAL_ADDRESS = 0x01A531E0;  // DAT_01a531e0 - CAutoHangUpMgr*
+	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A52960;  // DAT_01a52960 - client object*
+	const uintptr_t MANAGER_ACCESSOR_FUNC  = 0x00482705;  // FUN_00482705 - get/lazy-create mgr
 
-	// client+0x5385: auto-battle byte (read by FUN_0111524b)
-	const size_t CLIENT_AUTO_BATTLE_BYTE_OFFSET = 0x5385;
+	const size_t CLIENT_AUTO_BATTLE_BYTE_OFFSET = 0x5385;  // client auto-battle byte
+	const size_t CLIENT_HUNT_GATE_OFFSET        = 0x1da0;  // brain gate (FUN_011ae8b7)
 
-	// CAutoHangUpMgr fields
-	const size_t MANAGER_STATE_WORD_OFFSET   = 0x10;  // 0x100 idle / 0x101 transition
-	const size_t MANAGER_HUNTING_BYTE_OFFSET = 0x11;  // read by FUN_00f4761b
-	const size_t MANAGER_GATE_BYTE_OFFSET    = 0x12;  // read by FUN_00f4761f
+	const size_t MANAGER_STATE_WORD_OFFSET   = 0x10;  // 0x001 idle / 0x101 hunting
+	const size_t MANAGER_HUNTING_BYTE_OFFSET = 0x11;  // hunting-active flag
+	const size_t MANAGER_GATE_BYTE_OFFSET    = 0x12;  // per-frame gate byte
 	const size_t MANAGER_TIMESTAMP_OFFSET    = 0x14;  // timeGetTime() of last toggle
 	const size_t MANAGER_STRUCT_SIZE         = 0x44;
 
-	typedef void (*ToggleAutoHuntFunc)();
+	// User intent - whether the hunt brain should be engaged. The per-frame
+	// assertion (ApplyClientSideState) enforces it on the client.
+	bool g_clientSideHunting = false;
 
-	// The addresses above only match client 7937. FUN_00bd7355 starts with
-	// 6A 00 E8 (PUSH 0; CALL ...) - verify before ever calling into it.
+	typedef void (*ToggleFunc)();
+	typedef int  (*ManagerAccessorFunc)();
+
 	bool IsClientSupported()
 	{
 		if (IsBadReadPtr((const void*)TOGGLE_HANDLER_ADDRESS, 3))
 			return false;
-
 		const unsigned char* code = (const unsigned char*)TOGGLE_HANDLER_ADDRESS;
 		return code[0] == 0x6A && code[1] == 0x00 && code[2] == 0xE8;
-	}
-
-	int GetClientObject()
-	{
-		if (IsBadReadPtr((const void*)CLIENT_GLOBAL_ADDRESS, sizeof(int)))
-			return 0;
-		return *(int*)CLIENT_GLOBAL_ADDRESS;
 	}
 
 	int GetManagerObject()
@@ -72,38 +58,90 @@ namespace AutoHunt
 		return *(int*)MANAGER_GLOBAL_ADDRESS;
 	}
 
-	bool IsClientAutoBattleEnabled(int client)
+	// The game's own accessor - lazy-creates the manager on first use.
+	int GetOrCreateManager()
 	{
-		if (!client || IsBadReadPtr((const void*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET), 1))
-			return false;
-		return *(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) != 0;
+		return ((ManagerAccessorFunc)MANAGER_ACCESSOR_FUNC)();
 	}
 
-	// Same condition as the game's FUN_0111621f, but with null/bad-pointer
-	// guards instead of the undocumented ECX=this calling convention.
+	bool IsManagerValid(int manager)
+	{
+		return manager != 0 && !IsBadReadPtr((const void*)manager, MANAGER_STRUCT_SIZE);
+	}
+
+	int GetClientObject()
+	{
+		if (IsBadReadPtr((const void*)CLIENT_GLOBAL_ADDRESS, sizeof(int)))
+			return 0;
+		return *(int*)CLIENT_GLOBAL_ADDRESS;
+	}
+
+	// Mirrors the game's own is-hunting check (FUN_0111621f):
+	// client+0x5385 != 0 && mgr+0x11 != 0.
 	bool IsHunting()
 	{
 		int client = GetClientObject();
-		if (!IsClientAutoBattleEnabled(client))
+		if (!client || IsBadReadPtr((const void*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET), 1))
+			return false;
+		if (*(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) == 0)
 			return false;
 
 		int manager = GetManagerObject();
-		if (!manager || IsBadReadPtr((const void*)manager, MANAGER_STRUCT_SIZE))
+		if (!IsManagerValid(manager))
 			return false;
-
 		return *(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) != 0;
 	}
 
-	// Sends the same CMsgHangUp toggle packet the dialog buttons send.
-	// Runs inside HookedEndScene, i.e. the game thread on this client -
-	// the same context the in-game dialog buttons execute in.
+	// Sends the same notify packet the in-game auto-hunt button sends.
 	void Toggle()
 	{
 		if (!IsClientSupported())
 			return;
-
-		((ToggleAutoHuntFunc)TOGGLE_HANDLER_ADDRESS)();
+		((ToggleFunc)TOGGLE_HANDLER_ADDRESS)();
 	}
+
+	// Runs every frame (even with the menu closed), like the memory scanner's
+	// frozen-value pass. While the user wants hunting, keep the client-side
+	// hunting flag set so the per-frame hunt brain stays engaged.
+	void ApplyClientSideState()
+	{
+		if (!g_clientSideHunting)
+			return;
+
+		int manager = GetOrCreateManager();
+		if (!IsManagerValid(manager))
+			return;
+
+		*(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) = 1;
+	}
+
+	void Start()
+	{
+		if (g_clientSideHunting)
+			return;
+		g_clientSideHunting = true;
+		ApplyClientSideState();  // engage the brain right away
+		Toggle();                // notify the server (same packet as the in-game button)
+	}
+
+	void Stop()
+	{
+		if (!g_clientSideHunting)
+			return;
+		g_clientSideHunting = false;
+
+		int manager = GetManagerObject();
+		if (IsManagerValid(manager))
+			*(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) = 0;
+
+		Toggle();  // notify the server
+	}
+}
+
+// Free wrapper so imgui_interface.cpp can run the per-frame assertion.
+void ApplyAutoHuntClientState()
+{
+	AutoHunt::ApplyClientSideState();
 }
 
 void RenderAutoHuntInterface()
@@ -121,26 +159,24 @@ void RenderAutoHuntInterface()
 
 	ImGui::Text("Status: ");
 	ImGui::SameLine(0.0f, 0.0f);
-
 	if (isHunting)
 		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "HUNTING");
 	else
 		ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Idle");
 
-	// Begin and Stop are the same request server-side, so one state-aware
-	// button covers both directions.
-	if (isHunting)
+	// Buttons reflect what the user asked for; the status text reflects the live
+	// manager state so we can see if the assertion is actually engaging the brain.
+	if (AutoHunt::g_clientSideHunting)
 	{
 		if (ImGui::Button("Stop Auto Hunt"))
-			AutoHunt::Toggle();
+			AutoHunt::Stop();
 	}
 	else
 	{
 		if (ImGui::Button("Start Auto Hunt"))
-			AutoHunt::Toggle();
+			AutoHunt::Start();
 	}
 
-	// Live state dump for in-game verification of the toggle semantics.
 	if (ImGui::TreeNode("Auto Hunt Debug"))
 	{
 		int client = AutoHunt::GetClientObject();
@@ -152,6 +188,12 @@ void RenderAutoHuntInterface()
 		{
 			ImGui::Text("AutoBattle byte (client+0x5385): %u",
 				(unsigned int)*(unsigned char*)(client + AutoHunt::CLIENT_AUTO_BATTLE_BYTE_OFFSET));
+		}
+
+		if (client && !IsBadReadPtr((const void*)(client + AutoHunt::CLIENT_HUNT_GATE_OFFSET), 4))
+		{
+			ImGui::Text("Client gate (client+0x1da0): %u",
+				(unsigned int)*(unsigned int*)(client + AutoHunt::CLIENT_HUNT_GATE_OFFSET));
 		}
 
 		ImGui::Text("Manager: 0x%08X", (unsigned int)manager);
