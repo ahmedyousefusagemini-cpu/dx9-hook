@@ -43,8 +43,14 @@ namespace Speed
 	const uintptr_t HUNT_BRAIN_TICK_GLOBAL = 0x01A5CDB4;  // DAT_01a5cdb4 - last brain tick (timeGetTime)
 	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010AFD05;  // FUN_010afd05 - for the info line only
 
-	const size_t CLIENT_MY_ID_OFFSET     = 0x26c;  // client+0x26c: local player id (FUN_0098c58d)
-	const size_t ROLE_ENTITY_ID_OFFSET   = 0x268;  // role+0x268: entity id (players < 1000000)
+	// Two id placements seen in the wild (this server leaves client+0x26c = 0):
+	//  A: client+0x268 <-> role+0x54   (the game's own my-role match in FUN_00d3203a:
+	//     "skip candidate unless role+0x54 == client+0x268")
+	//  B: client+0x26c <-> role+0x268  (FUN_0098c58d getter / msg filter FUN_01000e06)
+	const size_t CLIENT_MY_ID_A_OFFSET = 0x268;  // client+0x268: my id (variant A)
+	const size_t CLIENT_MY_ID_B_OFFSET = 0x26c;  // client+0x26c: my id (variant B)
+	const size_t ROLE_ID_A_OFFSET      = 0x54;   // role+0x54: entity id (variant A)
+	const size_t ROLE_ID_B_OFFSET      = 0x268;  // role+0x268: entity id (variant B)
 	const size_t ROLE_ACTION_STATE       = 0xb4;   // role+0xb4: action state dword (< 13)
 	const size_t ROLE_SPEED_BOOST_OFFSET = 0x44;   // role+0x44: boost in 1/100 % (needs +0x48)
 	const size_t ROLE_SPEED_BOOST_FLAG   = 0x48;   // role+0x48: byte, enables the +0x44 divisor
@@ -65,6 +71,7 @@ namespace Speed
 	volatile long g_scanState = 0;      // 0 idle, 1 scanning, 2 done
 	volatile unsigned long g_lastScanTick = 0;
 	volatile unsigned int g_scanIdMatches = 0;  // id hits before strict checks
+	volatile int g_matchedRule = 0;             // which id rule hit (0 none, 1 A, 2 B, 3 cross)
 
 	int GetClientObject()
 	{
@@ -73,11 +80,15 @@ namespace Speed
 		return *(int*)CLIENT_GLOBAL_ADDRESS;
 	}
 
-	unsigned int GetMyEntityId(int client)
+	void GetClientIds(int client, unsigned int* idA, unsigned int* idB)
 	{
-		if (client == 0 || IsBadReadPtr((const void*)(client + CLIENT_MY_ID_OFFSET), sizeof(unsigned int)))
-			return 0;
-		return *(unsigned int*)(client + CLIENT_MY_ID_OFFSET);
+		*idA = 0;
+		*idB = 0;
+		// One 8-byte read at +0x268 covers both id fields.
+		if (client == 0 || IsBadReadPtr((const void*)(client + CLIENT_MY_ID_A_OFFSET), 8))
+			return;
+		*idA = *(unsigned int*)(client + CLIENT_MY_ID_A_OFFSET);
+		*idB = *(unsigned int*)(client + CLIENT_MY_ID_B_OFFSET);
 	}
 
 	bool IsMyRoleWritable(uintptr_t role)
@@ -96,13 +107,11 @@ namespace Speed
 			enabled ? (g_speedPercent - MIN_SPEED_PERCENT) * 100 : 0;
 	}
 
-	// Candidate check: object at base looks like a CRole instance and its entity
-	// id matches the local player.
-	bool LooksLikeMyRole(uintptr_t base, unsigned int myEntityId)
+	// Cheap object sanity check: vtable points into the exe image and the action
+	// state is in range. Callers guarantee the +0x00..+0xB8 span is readable.
+	bool LooksLikeRoleObject(uintptr_t base)
 	{
-		if (*(unsigned int*)(base + ROLE_ENTITY_ID_OFFSET) != myEntityId)
-			return false;
-		uintptr_t vtable = *(uintptr_t*)base;  // vtable must point into the exe image
+		uintptr_t vtable = *(uintptr_t*)base;
 		if (vtable < IMAGE_BASE || vtable >= IMAGE_TOP)
 			return false;
 		return *(unsigned int*)(base + ROLE_ACTION_STATE) < 13;
@@ -113,8 +122,9 @@ namespace Speed
 	// memory scanner, but targeted at one dword so it's quick.
 	DWORD WINAPI FindMyRoleThread(LPVOID)
 	{
-		unsigned int myEntityId = GetMyEntityId(GetClientObject());
-		if (myEntityId == 0)
+		unsigned int idA = 0, idB = 0;
+		GetClientIds(GetClientObject(), &idA, &idB);
+		if (idA == 0 && idB == 0)
 		{
 			g_scanState = 2;
 			return 0;
@@ -138,18 +148,25 @@ namespace Speed
 			if (readable)
 			{
 				// The whole object span (base .. base+0x26C) must stay in-region.
-				for (uintptr_t p = start; p + ROLE_ENTITY_ID_OFFSET + 4 <= end; p += 4)
+				for (uintptr_t p = start; p + ROLE_ID_B_OFFSET + 4 <= end; p += 4)
 				{
-					if (*(unsigned int*)(p + ROLE_ENTITY_ID_OFFSET) == myEntityId)
-					{
-						g_scanIdMatches++;  // id hit before the strict checks
-						if (LooksLikeMyRole(p, myEntityId))
-						{
-							g_myRoleAddress = p;
-							g_scanState = 2;
-							return 0;
-						}
-					}
+					int rule = 0;
+					if (idA != 0 && *(unsigned int*)(p + ROLE_ID_A_OFFSET) == idA)
+						rule = 1;  // the game's own my-role match (FUN_00d3203a)
+					else if (idB != 0 && *(unsigned int*)(p + ROLE_ID_B_OFFSET) == idB)
+						rule = 2;
+					else if (idA != 0 && *(unsigned int*)(p + ROLE_ID_B_OFFSET) == idA)
+						rule = 3;  // cross-variant safety net
+
+					if (rule == 0)
+						continue;
+					g_scanIdMatches++;  // id hit before the strict checks
+					if (!LooksLikeRoleObject(p))
+						continue;
+					g_matchedRule = rule;
+					g_myRoleAddress = p;
+					g_scanState = 2;
+					return 0;
 				}
 			}
 			address = end;
@@ -165,6 +182,7 @@ namespace Speed
 		g_myRoleAddress = 0;
 		g_scanState = 1;
 		g_scanIdMatches = 0;
+		g_matchedRule = 0;
 		g_lastScanTick = GetTickCount();
 		CreateThread(NULL, 0, FindMyRoleThread, NULL, 0, NULL);
 	}
@@ -243,17 +261,18 @@ void RenderSpeedInterface()
 	ImGui::Separator();
 
 	int client = Speed::GetClientObject();
-	unsigned int myEntityId = Speed::GetMyEntityId(client);
+	unsigned int idA = 0, idB = 0;
+	Speed::GetClientIds(client, &idA, &idB);
 
 	bool enabled = Speed::g_speedEnabled;
 	if (ImGui::Checkbox("Enable speed control (move + attack)", &enabled))
 		Speed::SetSpeedEnabled(enabled);
 
-	// The id is only populated once the character is in the game world.
+	// The ids are only populated once the character is in the game world.
 	if (client == 0)
 		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Client object not found - game still loading?");
-	else if (myEntityId == 0)
-		ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Enter the game world first - id is 0 at login");
+	else if (idA == 0 && idB == 0)
+		ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Enter the game world first - ids are 0 at login");
 
 	if (Speed::g_speedEnabled)
 	{
@@ -279,11 +298,13 @@ void RenderSpeedInterface()
 	if (ImGui::TreeNode("Speed Debug"))
 	{
 		ImGui::Text("Client: 0x%08X", (unsigned int)client);
-		ImGui::Text("My entity id (client+0x26c): %u", myEntityId);
+		ImGui::Text("Client id A (client+0x268): %u", idA);
+		ImGui::Text("Client id B (client+0x26c): %u", idB);
 		ImGui::Text("My role: 0x%08X", (unsigned int)Speed::g_myRoleAddress);
 		ImGui::Text("Scan state: %s", Speed::g_scanState == 1 ? "scanning" :
 			(Speed::g_scanState == 2 ? "done" : "idle"));
 		ImGui::Text("Id matches last scan: %u", Speed::g_scanIdMatches);
+		ImGui::Text("Matched rule: %d (1=A 2=B 3=cross)", Speed::g_matchedRule);
 		if (Speed::g_myRoleAddress != 0 && !IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_BOOST_OFFSET), 8))
 		{
 			ImGui::Text("role+0x44: %d  role+0x48: %u",
