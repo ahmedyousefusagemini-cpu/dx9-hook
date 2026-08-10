@@ -132,6 +132,40 @@ gates). Adjacent and identically shaped — tell them apart by order.
 56 57 8B F9 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 8B CF 8B F0
 ```
 
+### Packet / message system (the 0x855 flow)
+
+**CMsgHangUp constructor — `FUN_00e5e50d` @ `0x00E5E50D`**  
+Sets the vtable and inits the 0x408-byte message buffer.
+```
+6A 04 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F9 89 7D F0 E8 ?? ?? ?? ?? 83 65 FC 00 8D B7 08 04 00 00
+```
+(`8D B7 08 04 00 00` = `LEA ESI,[EDI+0x408]` — the buffer offset.)
+
+**CMsgHangUp Process / send — `FUN_010ce686` @ `0x010CE686`**  
+Transmits the built message. This is vtable[5] — the method the toggle calls.
+```
+56 68 ?? ?? ?? ?? 8B F1 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 75 ?? 0F B7 46 06
+```
+(`0F B7 46 06` = `MOVZX EAX, word [ESI+6]` — reads the packet-type field.)
+
+**Message factory — `FUN_00f36f4e` @ `0x00F36F4E` (`CNetMsg::CreateNetMsg`)**  
+Giant switch mapping packet type → message ctor (`case 0x855` → `FUN_00e5e50d`).
+Too large to signature reliably — re-find via the anchor string
+`"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %d"`.
+
+**Incoming dispatch → Lua — `FUN_0103ef3e` @ `0x0103EF3E` → `FUN_00ba2d7b` → `FUN_00c3c2d0`**  
+Incoming packets are created via the factory, then routed to the Lua handler
+`CQMain_OnNetMsg`. (This is why there's no C++ manager state-writer — the 0x855
+ack is handled in Lua.)
+```
+FUN_0103ef3e: 89 5F 08 FF 77 70 E8 ?? ?? ?? ?? 59 80 7F 7C 00 74 0A 88 5F 7C 8B CF E8
+FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? ??
+```
+
+**CMsgHangUp vtable** @ `0x017012d8` (7 entries): [0]=dtor `0x00e6388e`,
+[3]=type-check `0x00e69782`, [4]=getter `0x010b3cc3`, [5]=Process/send
+`FUN_010ce686`, [6]=error `0x00e83f56`.
+
 ---
 
 ## Object maps
@@ -151,7 +185,7 @@ gates). Adjacent and identically shaped — tell them apart by order.
 | Offset | Type | Meaning |
 |---|---|---|
 | `+0x00` | ptr | vtable (only virtual = dtor) |
-| `+0x10` | word | state: `0x001` idle / `0x101` hunting |
+| `+0x10` | word | state: `0x001` idle / `0x101` hunting (only byte +0x11 flips; confirmed live) |
 | `+0x11` | byte | hunting-active flag (the brain's gate; read by FUN_00f4761b) |
 | `+0x12` | byte | per-frame gate flag (read by FUN_00f4761f; brain skips while nonzero) |
 | `+0x14` | dword | `timeGetTime()` of last toggle (written by FUN_00f2fcd5) |
@@ -167,19 +201,24 @@ Fields written by the builder: `[0]=0x16`, `[2]=0x855`, `[4]=(arg^1)*2+1`.
 Both Begin and Stop send `[4]=3` — it's a pure toggle; the server flips state.
 **It carries no configuration** — activation/config is client-side.
 
+⚠️ **Do not send it if you want normal XP.** Telling the server the character is
+auto-hunting makes it reset the XP bar and stop counting kills. The overlay
+withholds this packet by default so the server treats kills as normal gameplay.
+
 ---
 
 ## Feature logic (how the overlay drives it)
 
 - **Is-hunting gate:** `client+0x5385 != 0 && mgr+0x11 != 0`.
-- **Start (client-side):** set `client+0x5385 = 1` and `mgr+0x11 = 1`, then send
-  the toggle packet (`FUN_00bd7355`) to notify the server. The overlay asserts
-  the two flags every frame so a server update can't knock them off.
-- **Stop:** clear both flags, send the toggle.
+- **Start (client-side):** set `client+0x5385 = 1` and `mgr+0x11 = 1` every frame.
+  Do NOT send the toggle packet (it causes the server-side XP reset). The overlay
+  asserts the two flags each frame so a server update can't knock them off.
+- **Stop:** clear both flags.
 - **VIP unlock:** force `client+0x9e4` and `client+0x9ec` to `6` every frame.
   Passes every `requiredLevel <= vipLevel` gate (jump-search VIP3+, auto-pick
-  VIP4+). Client-side only — server-enforced VIP features (shop, teleport)
-  still fail.
+  VIP4+). Client-side only — server-enforced VIP features (shop, teleport) still fail.
+- **Auto-pick (loot):** a separate VIP4-gated option. Enable it in the client's
+  auto-hunt dialog (the VIP spoof unlocks the checkbox).
 
 ---
 
@@ -196,6 +235,8 @@ Use these to locate the code after an update when signatures fail:
 | `"AutoHangUpIconBtn"` | `0x01646F90` | the auto-hunt toolbar icon handler |
 | `"VipLev"` | `0x0163AA70` | VIP-level handling |
 | `"nVipLev >= 0 && nVipLev <= 6"` | `0x016160F8` | dlgvipquery.cpp — confirms VIP range 0–6 |
+| `"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %d"` | (search the string) | the message factory `FUN_00f36f4e` |
+| `"CQMain_OnNetMsg"` | (search the string) | the incoming-message → Lua dispatch |
 | `msghangup.cpp` path string | `0x017012F8` | CMsgHangUp source module |
 
 ---
@@ -206,4 +247,5 @@ Use these to locate the code after an update when signatures fail:
 - [ ] Toggle handler is the 5-instruction `PUSH 0; CALL; MOV ECX,EAX; CALL; RET`.
 - [ ] Packet builder contains `B9 55 08 00 00` (`MOV ECX,0x855`).
 - [ ] VIP getter's field offsets match the two dwords it returns.
+- [ ] CMsgHangUp ctor contains `8D B? 08 04 00 00` (`LEA ...,+0x408` buffer).
 - [ ] Confirm each AOB match is unique before trusting it.
