@@ -64,6 +64,7 @@ namespace Speed
 	volatile uintptr_t g_myRoleAddress = 0;
 	volatile long g_scanState = 0;      // 0 idle, 1 scanning, 2 done
 	volatile unsigned long g_lastScanTick = 0;
+	volatile unsigned int g_scanIdMatches = 0;  // id hits before strict checks
 
 	int GetClientObject()
 	{
@@ -139,12 +140,15 @@ namespace Speed
 				// The whole object span (base .. base+0x26C) must stay in-region.
 				for (uintptr_t p = start; p + ROLE_ENTITY_ID_OFFSET + 4 <= end; p += 4)
 				{
-					if (*(unsigned int*)(p + ROLE_ENTITY_ID_OFFSET) == myEntityId &&
-						LooksLikeMyRole(p, myEntityId))
+					if (*(unsigned int*)(p + ROLE_ENTITY_ID_OFFSET) == myEntityId)
 					{
-						g_myRoleAddress = p;
-						g_scanState = 2;
-						return 0;
+						g_scanIdMatches++;  // id hit before the strict checks
+						if (LooksLikeMyRole(p, myEntityId))
+						{
+							g_myRoleAddress = p;
+							g_scanState = 2;
+							return 0;
+						}
 					}
 				}
 			}
@@ -160,6 +164,7 @@ namespace Speed
 			return;
 		g_myRoleAddress = 0;
 		g_scanState = 1;
+		g_scanIdMatches = 0;
 		g_lastScanTick = GetTickCount();
 		CreateThread(NULL, 0, FindMyRoleThread, NULL, 0, NULL);
 	}
@@ -239,15 +244,16 @@ void RenderSpeedInterface()
 
 	int client = Speed::GetClientObject();
 	unsigned int myEntityId = Speed::GetMyEntityId(client);
-	if (client == 0 || myEntityId == 0)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Game not ready - log in first");
-		return;
-	}
 
 	bool enabled = Speed::g_speedEnabled;
 	if (ImGui::Checkbox("Enable speed control (move + attack)", &enabled))
 		Speed::SetSpeedEnabled(enabled);
+
+	// The id is only populated once the character is in the game world.
+	if (client == 0)
+		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Client object not found - game still loading?");
+	else if (myEntityId == 0)
+		ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Enter the game world first - id is 0 at login");
 
 	if (Speed::g_speedEnabled)
 	{
@@ -277,6 +283,7 @@ void RenderSpeedInterface()
 		ImGui::Text("My role: 0x%08X", (unsigned int)Speed::g_myRoleAddress);
 		ImGui::Text("Scan state: %s", Speed::g_scanState == 1 ? "scanning" :
 			(Speed::g_scanState == 2 ? "done" : "idle"));
+		ImGui::Text("Id matches last scan: %u", Speed::g_scanIdMatches);
 		if (Speed::g_myRoleAddress != 0 && !IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_BOOST_OFFSET), 8))
 		{
 			ImGui::Text("role+0x44: %d  role+0x48: %u",
