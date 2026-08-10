@@ -79,6 +79,26 @@ namespace Speed
 		return memcmp((const void*)ACTION_INTERVAL_FUNC, expectedBytes, sizeof(expectedBytes)) == 0;
 	}
 
+	// Diagnostics: formats the first maxBytes bytes at the hook target so the
+	// overlay can show what the live client ACTUALLY has there when the build
+	// check fails (e.g. "E9 xx xx xx xx" = something else already hooked it).
+	void GetTargetBytesHex(char* outBuffer, int maxBytes)
+	{
+		static const char* hexDigits = "0123456789ABCDEF";
+		const unsigned char* code = (const unsigned char*)ACTION_INTERVAL_FUNC;
+		int pos = 0;
+		for (int i = 0; i < maxBytes; i++)
+		{
+			bool readable = !IsBadReadPtr(code + i, 1);
+			unsigned char byteValue = readable ? code[i] : (unsigned char)0;
+			if (i > 0)
+				outBuffer[pos++] = ' ';
+			outBuffer[pos++] = readable ? hexDigits[byteValue >> 4] : '?';
+			outBuffer[pos++] = readable ? hexDigits[byteValue & 15] : '?';
+		}
+		outBuffer[pos] = 0;
+	}
+
 	int GetClientObject()
 	{
 		if (IsBadReadPtr((const void*)CLIENT_GLOBAL_ADDRESS, sizeof(int)))
@@ -168,6 +188,11 @@ void RenderSpeedInterface()
 	if (!Speed::IsClientSupported())
 	{
 		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Unsupported client build - speed control unavailable");
+		char bytesText[64];
+		Speed::GetTargetBytesHex(bytesText, 16);
+		ImGui::TextDisabled("Bytes at 0x010AFD05: %s", bytesText);
+		ImGui::TextDisabled("Expected:        55 8B EC 56 8B F1 83 BE F8 08 00 00 00");
+		ImGui::TextDisabled("Client global: 0x%08X", (unsigned int)Speed::GetClientObject());
 		return;
 	}
 
