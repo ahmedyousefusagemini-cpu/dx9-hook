@@ -18,13 +18,12 @@
 // role+0x44 is in 1/100-percent units: 10000 -> divisor 200 -> 2x speed.
 // This path has NO per-state cap (that cap table only gates role+0xc0).
 //
-// My-role discovery without hooks: a role is ours when its entity id
-// (role+0x268; player ids < 1000000) equals the client object's local id
-// (client+0x26c, the game's own getter FUN_0098c58d). We scan committed
-// writable memory once (background thread) for a dword == myId at offset
-// 0x268 of an object whose vtable points into the Conquer.exe image and whose
-// action state (role+0xb4) is < 13, then cache the pointer and rewrite the
-// speed fields every frame (same pattern as the VIP spoof).
+// My-role discovery without hooks: the scan matches the client id fields
+// against the role's id fields (two placements seen in the wild - this server
+// leaves client+0x26c = 0 and uses client+0x268), then VALIDATES the
+// candidate's class: its vtable must contain one of the interval functions
+// (FUN_010afd05 / FUN_00de86b2 - only role classes have them), so a random
+// object carrying the same id can't win the scan.
 //
 // Looting speed: unchanged from before - the hunt brain (FUN_00f54058) only
 // ticks when  timeGetTime() >= DAT_01a5cdb4 + 1000. Only the brain reads or
@@ -35,13 +34,22 @@
 // divisors to >= 1 and the final interval to >= 1. All speed-up is
 // client-side: the server may rubber-band movement or drop loot requests at
 // extreme values, so the slider tops out at 500%.
+//
+// Two write paths feed the interval math every frame (same assert pattern as
+// the VIP spoof):  role+0x48=1 & role+0x44=(percent-100)*100  (the uncapped
+// final divisor)  and  role+0xc0=percent-100  (the nSpeedPercent path in
+// FUN_00deb537, which IS capped per action-state by the 13-dword table at
+// 0x016F7E44 - so while enabled we raise that table to 500; it only affects
+// entities with a positive +0xc0, i.e. just us).
 // ============================================================================
 
 namespace Speed
 {
 	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A52960;  // DAT_01a52960 - client object*
 	const uintptr_t HUNT_BRAIN_TICK_GLOBAL = 0x01A5CDB4;  // DAT_01a5cdb4 - last brain tick (timeGetTime)
-	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010AFD05;  // FUN_010afd05 - for the info line only
+	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010AFD05;  // FUN_010afd05 - interval virtual (vtable check)
+	const uintptr_t ACTION_INTERVAL_CORE   = 0x00DE86B2;  // FUN_00de86b2 - master computation (vtable check)
+	const uintptr_t SPEED_CAP_TABLE        = 0x016F7E44;  // per-state nSpeedPercent caps (13 dwords)
 
 	// Two id placements seen in the wild (this server leaves client+0x26c = 0):
 	//  A: client+0x268 <-> role+0x54   (the game's own my-role match in FUN_00d3203a:
@@ -54,6 +62,7 @@ namespace Speed
 	const size_t ROLE_ACTION_STATE       = 0xb4;   // role+0xb4: action state dword (< 13)
 	const size_t ROLE_SPEED_BOOST_OFFSET = 0x44;   // role+0x44: boost in 1/100 % (needs +0x48)
 	const size_t ROLE_SPEED_BOOST_FLAG   = 0x48;   // role+0x48: byte, enables the +0x44 divisor
+	const size_t ROLE_SPEED_DELTA_OFFSET = 0xc0;   // role+0xc0: nSpeedPercent delta (FUN_00deb537)
 
 	const int MIN_SPEED_PERCENT = 100;  // 100% = normal speed
 	const int MAX_SPEED_PERCENT = 500;  // beyond this the server rubber-bands hard
@@ -72,6 +81,9 @@ namespace Speed
 	volatile unsigned long g_lastScanTick = 0;
 	volatile unsigned int g_scanIdMatches = 0;  // id hits before strict checks
 	volatile int g_matchedRule = 0;             // which id rule hit (0 none, 1 A, 2 B, 3 cross)
+	volatile int g_vtableHasIntervalFn = 0;     // candidate's vtable passed the class check
+	unsigned int g_originalCaps[13] = {0};      // saved SPEED_CAP_TABLE contents
+	bool g_capsRaised = false;
 
 	int GetClientObject()
 	{
@@ -95,26 +107,80 @@ namespace Speed
 	{
 		return role != 0 &&
 			!IsBadReadPtr((const void*)(role + ROLE_SPEED_BOOST_OFFSET), 8) &&
-			!IsBadWritePtr((void*)(role + ROLE_SPEED_BOOST_OFFSET), 8);
+			!IsBadWritePtr((void*)(role + ROLE_SPEED_BOOST_OFFSET), 8) &&
+			!IsBadWritePtr((void*)(role + ROLE_SPEED_DELTA_OFFSET), 4);
 	}
 
 	// Writes (or clears) the speed-boost fields on my role. Runs every frame so
 	// a game-side rewrite can't knock them off (same pattern as the VIP spoof).
 	void WriteSpeedFields(uintptr_t role, bool enabled)
 	{
+		// Path 1 (uncapped): the final divisor in FUN_00de86b2.
 		*(unsigned char*)(role + ROLE_SPEED_BOOST_FLAG) = enabled ? 1 : 0;
 		*(int*)(role + ROLE_SPEED_BOOST_OFFSET) =
 			enabled ? (g_speedPercent - MIN_SPEED_PERCENT) * 100 : 0;
+		// Path 2 (nSpeedPercent, move states): the role+0xc0 delta, capped by the
+		// (raised) cap table. Never write <= -100: the "nSpeedPercent > 0" assert
+		// in FUN_00deb537 would force a zero interval.
+		*(int*)(role + ROLE_SPEED_DELTA_OFFSET) =
+			enabled ? g_speedPercent - MIN_SPEED_PERCENT : 0;
 	}
 
-	// Cheap object sanity check: vtable points into the exe image and the action
-	// state is in range. Callers guarantee the +0x00..+0xB8 span is readable.
+	// Raises/restores the per-state speed caps used by the role+0xc0 path.
+	// The table sits in read-only data, so VirtualProtect it first.
+	void RaiseSpeedCaps()
+	{
+		if (g_capsRaised)
+			return;
+		DWORD oldProtect = 0;
+		if (!VirtualProtect((void*)SPEED_CAP_TABLE, 13 * 4, PAGE_READWRITE, &oldProtect))
+			return;
+		unsigned int* caps = (unsigned int*)SPEED_CAP_TABLE;
+		for (int i = 0; i < 13; i++)
+		{
+			g_originalCaps[i] = caps[i];
+			caps[i] = (unsigned int)MAX_SPEED_PERCENT;
+		}
+		g_capsRaised = true;
+	}
+
+	void RestoreSpeedCaps()
+	{
+		if (!g_capsRaised)
+			return;
+		unsigned int* caps = (unsigned int*)SPEED_CAP_TABLE;
+		if (!IsBadWritePtr(caps, 13 * 4))
+		{
+			for (int i = 0; i < 13; i++)
+				caps[i] = g_originalCaps[i];
+		}
+		g_capsRaised = false;
+	}
+
+	// Candidate class check: the vtable must point into the exe image, the action
+	// state must be in range, and the vtable must contain one of the interval
+	// functions - only role classes carry them. (Vtables hold code addresses;
+	// the server's E9 hook patches code bytes, not vtable entries, so this
+	// check works whether the hook is present or not.)
 	bool LooksLikeRoleObject(uintptr_t base)
 	{
 		uintptr_t vtable = *(uintptr_t*)base;
 		if (vtable < IMAGE_BASE || vtable >= IMAGE_TOP)
 			return false;
-		return *(unsigned int*)(base + ROLE_ACTION_STATE) < 13;
+		if (*(unsigned int*)(base + ROLE_ACTION_STATE) >= 13)
+			return false;
+		if (IsBadReadPtr((const void*)vtable, 64 * 4))
+			return false;
+		const uintptr_t* entry = (const uintptr_t*)vtable;
+		for (int i = 0; i < 64; i++)
+		{
+			if (entry[i] == ACTION_INTERVAL_FUNC || entry[i] == ACTION_INTERVAL_CORE)
+			{
+				g_vtableHasIntervalFn = 1;
+				return true;
+			}
+		}
+		return false;
 	}
 
 	// Background scan: walk committed writable regions looking for the role
@@ -183,6 +249,7 @@ namespace Speed
 		g_scanState = 1;
 		g_scanIdMatches = 0;
 		g_matchedRule = 0;
+		g_vtableHasIntervalFn = 0;
 		g_lastScanTick = GetTickCount();
 		CreateThread(NULL, 0, FindMyRoleThread, NULL, 0, NULL);
 	}
@@ -193,6 +260,10 @@ namespace Speed
 			WriteSpeedFields(g_myRoleAddress, false);  // restore stock behavior
 
 		g_speedEnabled = enabled;
+		if (enabled)
+			RaiseSpeedCaps();
+		else
+			RestoreSpeedCaps();
 
 		if (enabled && g_myRoleAddress == 0)
 			StartRoleScan();
@@ -305,12 +376,19 @@ void RenderSpeedInterface()
 			(Speed::g_scanState == 2 ? "done" : "idle"));
 		ImGui::Text("Id matches last scan: %u", Speed::g_scanIdMatches);
 		ImGui::Text("Matched rule: %d (1=A 2=B 3=cross)", Speed::g_matchedRule);
-		if (Speed::g_myRoleAddress != 0 && !IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_BOOST_OFFSET), 8))
+		if (Speed::g_myRoleAddress != 0 &&
+			!IsBadReadPtr((const void*)Speed::g_myRoleAddress, 4) &&
+			!IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_DELTA_OFFSET), 4))
 		{
-			ImGui::Text("role+0x44: %d  role+0x48: %u",
+			ImGui::Text("role+0x44: %d  role+0x48: %u  role+0xc0: %d",
 				*(int*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_BOOST_OFFSET),
-				(unsigned int)*(unsigned char*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_BOOST_FLAG));
+				(unsigned int)*(unsigned char*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_BOOST_FLAG),
+				*(int*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_DELTA_OFFSET));
+			ImGui::Text("vtable: 0x%08X (interval fn: %s)",
+				(unsigned int)*(uintptr_t*)Speed::g_myRoleAddress,
+				Speed::g_vtableHasIntervalFn ? "yes" : "no");
 		}
+		ImGui::Text("Speed caps raised: %s", Speed::g_capsRaised ? "yes" : "no");
 		char bytesText[64];
 		Speed::GetTargetBytesHex(bytesText, 16);
 		ImGui::TextDisabled("Interval fn @0x010AFD05: %s", bytesText);
