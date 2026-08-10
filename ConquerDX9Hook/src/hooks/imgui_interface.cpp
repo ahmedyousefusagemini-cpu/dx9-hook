@@ -9,6 +9,7 @@ extern std::vector<StringConfiguration> g_itemStringConfigurations;
 extern bool g_serverNameEnabled;
 extern bool g_serverNameUseRainbow;
 extern void UpdateRainbowColors();
+extern void RenderAutoHuntInterface();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -40,6 +41,10 @@ void RenderImGuiInterface()
 	ImGui::Separator();
 	ImGui::Checkbox("Always Jump", &g_isAlwaysJumpEnabled);        
 	ImGui::Checkbox("Wireframe (Chams)", &g_isWireframeEnabled);   
+	
+	ImGui::Spacing();
+	
+	RenderAutoHuntInterface();
 	
 	ImGui::Spacing();
 	

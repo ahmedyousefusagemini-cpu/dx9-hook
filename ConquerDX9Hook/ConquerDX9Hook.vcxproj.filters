@@ -76,6 +76,9 @@
     <ClCompile Include="src\hooks\always_jump.cpp">
       <Filter>Source Files\hooks</Filter>
     </ClCompile>
+    <ClCompile Include="src\hooks\auto_hunt.cpp">
+      <Filter>Source Files\hooks</Filter>
+    </ClCompile>
     <ClCompile Include="src\hooks\chams.cpp">
       <Filter>Source Files\hooks</Filter>
     </ClCompile>

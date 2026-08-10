@@ -198,6 +198,7 @@
     <ClCompile Include="src\hooks\directx_hooks.cpp" />
     <ClCompile Include="src\hooks\imgui_interface.cpp" />
     <ClCompile Include="src\hooks\always_jump.cpp" />
+    <ClCompile Include="src\hooks\auto_hunt.cpp" />
     <ClCompile Include="src\hooks\chams.cpp" />
     <ClCompile Include="src\hooks\string_editor.cpp" />
     <ClCompile Include="src\hooks\memory_scanner.cpp" />
