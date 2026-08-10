@@ -64,6 +64,56 @@ UI shows the live bar value and the auto-detected skill id.
 
 ---
 
+## 🔧 Auto-XP debug (2026-08-11, late) — "does not activate automatically"
+
+**Symptom:** with "Auto XP skill when bar is full" enabled, the skill never pops.
+
+**Verified this session (call-site level):**
+
+- `client+0xaec` IS the XP bar on the `DAT_01a52960` client object — in
+  `FUN_00d3fb0f` (projectile-complete tick): `FUN_0043e481()` → ECX=client →
+  `FUN_011154f5(1)`. The same function also confirms `client+0x268` = own role
+  UID: `if (*(int*)(client+0x268) == projectile->targetId)` → the "self" branch
+  (GreenGlow + bar fill + notify `0x40f`).
+- `FUN_011354b1` (kill tick) also feeds the bar: `FUN_011154f5(1)` with ECX =
+  its own `this` (reads `+0xb00` combo counter, `+0x16d0` vtable object).
+- Ruled out for the 0xe65 handler search: `FUN_00c2c6c3` (generic CWnd base
+  window proc — mouse/paint/WM_COMMAND only) and `FUN_00a51357` (dialog
+  handler, 0x464/0x200 only). The real `0x464/0xe65` handler is still
+  unlocated — main-window-proc candidate `FUN_00a518e1` decompile timed out
+  (bridge flaky; retry when stable). Other unexamined `CMP [EBP+8],0x464`
+  candidates: FUN_004eee90, FUN_00571d16, FUN_006175f8, FUN_006e29b9,
+  FUN_00720124, FUN_007c4e30, FUN_009527df, FUN_00953044, FUN_009b0c3c,
+  FUN_00af8bc6, FUN_00af8ded, FUN_00c2c54f.
+- `DAT_01a584c0` = main game controller object (fields `+0x2420d41` etc.);
+  `FUN_00a1d6bc` (skill dispatcher) and `FUN_00a37356` (hotkey dispatcher) are
+  its methods — the 0xe65 handler likely lives in the same class's window proc.
+
+**Failure hypotheses (ranked):**
+
+1. DLL not rebuilt / new checkbox never enabled (the feature is new code).
+2. Detection fails → UI stuck on "XP skill: scanning..." (lookup contract or
+   id-space mismatch).
+3. Bar never reads 100 → unlock patches off (bar can't charge while hunting),
+   or a different object than expected.
+4. Fire call executes but the server silently rejects it (server-side bar not
+   full, or the skill must be the *current* skill for the packet to be accepted).
+
+**Next debug steps:**
+
+- Read the overlay's live XP values: what does "XP bar: X / 100" show while
+  hunting, and does it show a detected id or "scanning..."? (Pinpoints the
+  failing stage: bar vs detection vs fire.)
+- Add an "XP debug" tree (bar value, detected id, last fire tick, fire count)
+  plus a manual "Fire XP skill now" test button to exercise the call on demand.
+- Alternative activation path to evaluate: `PostMessageA(DAT_01a5a9cc, 0x464,
+  0xe65, 1)` — exactly what the XP hotkey sends when NOT hunting (flag=1).
+  Must first locate the 0xe65 handler and confirm it selects + fires the skill.
+- Or find the HUD XP-button click handler (it must reference the seven XP ids
+  to draw the right icon) and mimic it exactly.
+
+---
+
 ## ✅ XP skills while auto-hunting (2026-08-10, night) — client block removed
 
 **Problem:** with auto-hunt engaged, activating an XP skill was refused with
@@ -157,6 +207,7 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `a93cb41` | don't send the 0x855 packet by default (fixed XP reset) |
 | `f7605b5` | added `OFFSETS.md` (durable signatures/offsets for re-finding after updates) |
 | `5127d6c` | XP-skill gates patched (bar charges + can pop while hunting) |
+| `06321b3` | auto XP skill activation (bar-full → auto-detect + fire Superman/Fatal Strike) |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -306,9 +357,9 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
 3. ~~VIP unlock~~ — **done**: force `client+0x9e4`/`+0x9ec` = 6 (jump-search + auto-pick).
 4. ~~XP skills while hunting~~ — **done** (2026-08-10 night): patch the three
    `IsHunting` gates (see the top section). New module `src/hooks/xp_skill.cpp`.
-5. ~~Auto XP skill~~ — **done** (2026-08-11): auto-pop Superman / Fatal Strike /
-   any class XP skill when the bar is full (auto-detects the learned XP skill
-   via `FUN_011a92b4`, fires via `FUN_011b1ec9` like the hunt brain).
+5. ⚠️ ~~Auto XP skill~~ — **shipped** (2026-08-11) but **in debugging**: user reports
+   it never fires in-game. See the "Auto-XP debug" section for hypotheses and
+   next steps (live UI values, debug tree, 0xe65 handler / XP-button path).
 6. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 7. Verify jump-search (VIP3) engages while hunting.

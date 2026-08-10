@@ -27,6 +27,7 @@ Image base for all addresses below: `0x00400000`. Build analyzed: client 7937.
 | Client object | `DAT_01a52960` = `0x01A52960` | read by the client accessor `FUN_0043e481` |
 | CAutoHangUpMgr singleton | `DAT_01a531e0` = `0x01A531E0` | read by the manager accessor `FUN_00482705` |
 | Main window handle | `DAT_01a5a9cc` = `0x01A5A9CC` | `FUN_00df9561` posts `0x464` game-command messages to it |
+| Main game controller object | `DAT_01a584c0` | `FUN_00c2c6c3` / `FUN_00a1d6bc` use its `+0x2420xxx` fields; HWND at `+0x20` |
 
 ---
 
@@ -173,9 +174,18 @@ with the learned-magic lookup and uses the first the character knows — no
 per-class table needed. Re-find: dispatcher = the function that posts
 `FUN_00df9561(0xc1f, 0)` and switches on command ids `0x10/0x6c..0x72`.
 
+**Bar/UID confirmation call site — `FUN_00d3fb0f` @ `0x00D3FB0F`**  
+Projectile-complete tick: when the projectile's target id equals
+`*(client+0x268)` (self), it runs the GreenGlow effect, then
+`FUN_0043e481()` → ECX=client → `FUN_011154f5(1)` and posts
+`FUN_00df9561(0x40f, 0)`. This is the call-site proof that `client+0xaec` is
+the XP bar and `client+0x268` is the own role UID.
+
 **Game-command poster — `FUN_00df9561` @ `0x00DF9561`**  
 `PostMessageA(DAT_01a5a9cc, 0x464, wParam, lParam)`. The XP hotkey
 (`FUN_00a37356` case `0x38b`) posts `0xe65` with `lParam = !IsHunting`.
+The `0x464/0xe65` handler itself is still unlocated (see RESEARCH_NOTES.md →
+"Auto-XP debug").
 
 ### Hunt brain
 
@@ -210,7 +220,7 @@ Returns the VIP level (0–6) from the client object: `client+0x9e4` normally,
 8B 81 F4 57 00 00 C1 E8 0A 24 01 C3
 ```
 
-**VIP feature gates — `FUN_00f3314b` @ `0x00F3314B`, `FUN_00f3316c` @ `0x00F3316C`**  
+**VIP feature gates — `FUN_00f3314b` @ `0x00F3314B`, `FUN_00f3316C` @ `0x00F3316C`**  
 Both return `requiredLevel <= vipLevel` (the auto-hunt jump-search / auto-pick
 gates). Adjacent and identically shaped — tell them apart by order.
 ```
@@ -259,10 +269,10 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 
 | Offset | Type | Meaning |
 |---|---|---|
-| `+0x268` | dword | own role/UID (the target arg the hunt brain / XP dispatcher pass to `FUN_011b1ec9`) |
+| `+0x268` | dword | own role/UID (confirmed at FUN_00d3fb0f: projectile-target == self branch; also the target arg the hunt brain / XP dispatcher pass to `FUN_011b1ec9`) |
 | `+0x9e4` | dword | VIP level (FUN_00fd3271 default branch) |
 | `+0x9ec` | dword | VIP level (FUN_00fd3271 alt branch, when the 0x57f4 flag is set) |
-| `+0xaec` | dword | XP charge bar 0–100 (full = 100; read/written by FUN_011154f5) |
+| `+0xaec` | dword | XP charge bar 0–100 (full = 100; read/written by FUN_011154f5; ECX=client confirmed at FUN_00d3fb0f) |
 | `+0x1868` | dword | learned-magic list count (index getter FUN_00fcc707; entry `+0x1c` = magic id) |
 | `+0x1b10` | list | skill queue head (processed by FUN_011b4477) |
 | `+0x1d88`/`+0x1d8c` | ptr | learned-magic vector begin/end (8-byte smart-ptr entries; scanned by FUN_011a92b4) |
@@ -317,6 +327,8 @@ withholds this packet by default so the server treats kills as normal gameplay.
   `FUN_011b1ec9(client, xpSkillId, *(client+0x268), 0, 1)` — the same call the
   hunt brain and the XP hotkey dispatcher make. Fire max 1/s; re-scan learned
   magics every 3s. Requires the XP gates patched (auto-enables them).
+  ⚠️ In debugging: user reports it never fires in-game — see RESEARCH_NOTES.md
+  → "Auto-XP debug" for hypotheses and next steps.
 
 ---
 
