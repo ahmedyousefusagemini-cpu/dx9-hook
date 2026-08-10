@@ -5,18 +5,20 @@
 // ============================================================================
 // Auto Hunt (CAutoHangUpMgr) - Conquer.exe client 7937 (image base 0x400000)
 // ----------------------------------------------------------------------------
-// Finding (2026-08-10): the auto-hunt BEHAVIOR is client-driven. Every frame the
-// hunt brain (FUN_00f54058) reads local game state (player position, nearby
-// monsters, distances) and issues walk/attack calls. It only runs while
-//     FUN_0111621f == (client+0x5385 != 0 && mgr+0x11 != 0).
+// The auto-hunt BEHAVIOR is client-driven: every frame the hunt brain
+// (FUN_00f54058) reads local game state and issues walk/attack calls. It only
+// runs while  FUN_0111621f == (client+0x5385 != 0 && mgr+0x11 != 0).
 //
 // The in-game toggle (FUN_00bd7355) only sends the 0x855 "CMsgHangUp" notify
-// packet - it never writes either client-side flag. That is why a bare packet
-// toggle played the activation effect but never actually hunted.
+// packet - it never writes either client-side flag. So a bare packet toggle
+// played the effect but never hunted. This feature asserts BOTH client-side
+// flags directly, every frame while enabled, and still sends the notify packet.
 //
-// This feature therefore asserts BOTH client-side flags directly, every frame
-// while enabled (so a server state update can't knock them back off), and still
-// sends the notify packet so the server stays in sync.
+// VIP spoof (2026-08-10): the VIP level is read from the client object by
+// FUN_00fd3271 -> client+0x9e4 (or client+0x9ec). The auto-hunt feature gates
+// (jump-search VIP3+, auto-pick VIP4+) are FUN_00f3314b / FUN_00f3316c which
+// just do  requiredLevel <= vipLevel. So forcing the client VIP field to 6
+// (max, per "nVipLev >= 0 && nVipLev <= 6") passes every client-side gate.
 // ============================================================================
 
 namespace AutoHunt
@@ -29,15 +31,22 @@ namespace AutoHunt
 	const size_t CLIENT_AUTO_BATTLE_BYTE_OFFSET = 0x5385;  // client auto-battle byte
 	const size_t CLIENT_HUNT_GATE_OFFSET        = 0x1da0;  // brain gate (FUN_011ae8b7)
 
+	// VIP level fields read by the VIP getter FUN_00fd3271 (default / alt branch).
+	const size_t CLIENT_VIP_LEVEL_FIELD_A = 0x9e4;
+	const size_t CLIENT_VIP_LEVEL_FIELD_B = 0x9ec;
+
 	const size_t MANAGER_STATE_WORD_OFFSET   = 0x10;  // 0x001 idle / 0x101 hunting
 	const size_t MANAGER_HUNTING_BYTE_OFFSET = 0x11;  // hunting-active flag
 	const size_t MANAGER_GATE_BYTE_OFFSET    = 0x12;  // per-frame gate byte
 	const size_t MANAGER_TIMESTAMP_OFFSET    = 0x14;  // timeGetTime() of last toggle
 	const size_t MANAGER_STRUCT_SIZE         = 0x44;
 
-	// User intent - whether the hunt brain should be engaged. The per-frame
-	// assertion (ApplyClientSideState) enforces it on the client.
+	// User intent - whether the hunt brain should be engaged.
 	bool g_clientSideHunting = false;
+
+	// VIP spoof state (independent of hunting so it can stay on for the features).
+	bool g_spoofVipLevel = false;
+	int  g_vipLevel = 6;  // max, per "nVipLev >= 0 && nVipLev <= 6"
 
 	typedef void (*ToggleFunc)();
 	typedef int  (*ManagerAccessorFunc)();
@@ -57,7 +66,6 @@ namespace AutoHunt
 		return *(int*)MANAGER_GLOBAL_ADDRESS;
 	}
 
-	// The game's own accessor - lazy-creates the manager on first use.
 	int GetOrCreateManager()
 	{
 		return ((ManagerAccessorFunc)MANAGER_ACCESSOR_FUNC)();
@@ -96,6 +104,15 @@ namespace AutoHunt
 		return *(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) != 0;
 	}
 
+	// Reads the VIP level exactly like the game's getter (FUN_00fd3271).
+	int GetVipLevel()
+	{
+		int client = GetClientObject();
+		if (!IsClientValid(client))
+			return 0;
+		return *(int*)(client + CLIENT_VIP_LEVEL_FIELD_A);
+	}
+
 	// Sends the same notify packet the in-game auto-hunt button sends.
 	void Toggle()
 	{
@@ -105,20 +122,29 @@ namespace AutoHunt
 	}
 
 	// Runs every frame (even with the menu closed), like the memory scanner's
-	// frozen-value pass. While the user wants hunting, keep BOTH client-side flags
-	// set so the per-frame hunt brain stays engaged.
+	// frozen-value pass. Applies each enabled override independently.
 	void ApplyClientSideState()
 	{
-		if (!g_clientSideHunting)
-			return;
+		if (g_clientSideHunting)
+		{
+			int client = GetClientObject();
+			if (IsClientValid(client))
+				*(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) = 1;  // auto-battle on
 
-		int client = GetClientObject();
-		if (IsClientValid(client))
-			*(unsigned char*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET) = 1;  // auto-battle on
+			int manager = GetOrCreateManager();
+			if (IsManagerValid(manager))
+				*(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) = 1;      // hunting on
+		}
 
-		int manager = GetOrCreateManager();
-		if (IsManagerValid(manager))
-			*(unsigned char*)(manager + MANAGER_HUNTING_BYTE_OFFSET) = 1;      // hunting on
+		if (g_spoofVipLevel)
+		{
+			int client = GetClientObject();
+			if (IsClientValid(client))
+			{
+				*(int*)(client + CLIENT_VIP_LEVEL_FIELD_A) = g_vipLevel;
+				*(int*)(client + CLIENT_VIP_LEVEL_FIELD_B) = g_vipLevel;
+			}
+		}
 	}
 
 	void Start()
@@ -174,8 +200,6 @@ void RenderAutoHuntInterface()
 	else
 		ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Idle");
 
-	// Buttons reflect what the user asked for; the status text reflects the live
-	// client state so we can see if the assertion is actually engaging the brain.
 	if (AutoHunt::g_clientSideHunting)
 	{
 		if (ImGui::Button("Stop Auto Hunt"))
@@ -185,6 +209,16 @@ void RenderAutoHuntInterface()
 	{
 		if (ImGui::Button("Start Auto Hunt"))
 			AutoHunt::Start();
+	}
+
+	// VIP level spoof - unlocks the client-side VIP-gated auto-hunt features
+	// (jump-search VIP3+, auto-pick VIP4+).
+	ImGui::Spacing();
+	ImGui::Checkbox("Spoof VIP level (client-side)", &AutoHunt::g_spoofVipLevel);
+	if (AutoHunt::g_spoofVipLevel)
+	{
+		ImGui::SliderInt("VIP level", &AutoHunt::g_vipLevel, 0, 6);
+		ImGui::TextDisabled("Real level: %d", AutoHunt::GetVipLevel());
 	}
 
 	if (ImGui::TreeNode("Auto Hunt Debug"))
@@ -198,6 +232,8 @@ void RenderAutoHuntInterface()
 		{
 			ImGui::Text("AutoBattle byte (client+0x5385): %u",
 				(unsigned int)*(unsigned char*)(client + AutoHunt::CLIENT_AUTO_BATTLE_BYTE_OFFSET));
+			ImGui::Text("VIP level (client+0x9e4): %d",
+				*(int*)(client + AutoHunt::CLIENT_VIP_LEVEL_FIELD_A));
 		}
 
 		if (client && !IsBadReadPtr((const void*)(client + AutoHunt::CLIENT_HUNT_GATE_OFFSET), 4))
