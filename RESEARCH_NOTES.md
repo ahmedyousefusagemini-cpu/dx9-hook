@@ -1,8 +1,74 @@
 # Reverse Engineering Notes — Conquer.exe (client 7937)
 
-Working state as of 2026-08-10 (PM update: toggle path fully resolved + ImGui integration shipped — see below).
+**Current status: auto-hunt FULLY WORKING from the ImGui overlay** (kills, loots
+gold/items, XP + skill bars fill normally). See the "WORKING STATE" section below for
+the final solution; the detailed research follows.
+
 Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll imported).
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
+
+---
+
+## ✅ WORKING STATE (2026-08-10, late PM) — auto-hunt fully working
+
+The breakthrough was realizing the hunting is **client-driven** and the 0x855 packet is
+the *problem*, not the trigger. Three pieces, all in `src/hooks/auto_hunt.cpp`:
+
+### 1. Client-side activation (don't rely on the packet)
+The in-game toggle `FUN_00bd7355` only *sends* the 0x855 packet — it never sets the
+client hunting state (verified at instruction level). A bare packet toggle played the
+activation effect but never hunted. The overlay instead asserts the client state
+directly **every frame** (so a server update can't knock it off):
+- `mgr+0x11 = 1`   (hunting-active flag)
+- `client+0x5385 = 1` (auto-battle flag)
+
+That is the exact gate the per-frame hunt brain `FUN_00f54058` checks
+(`FUN_0111621f == client+0x5385 != 0 && mgr+0x11 != 0`). Setting both makes the brain
+engage and the character hunt.
+
+### 2. Do NOT send the 0x855 packet (fixes the XP reset)
+Sending 0x855 tells the server "this character is auto-hunting", and the server then
+**reset the XP bar to 0 and stopped counting kills**. The hunting is client-driven, so
+the server doesn't need the packet. Withholding it → the server treats the kills as
+normal gameplay → XP and skill bars fill normally. There's an opt-in "Notify server"
+checkbox (default OFF) in case a server ever needs it.
+
+### 3. VIP level spoof (client-side)
+The VIP getter `FUN_00fd3271` reads the level from the client object (`client+0x9e4`,
+or `+0x9ec` when the `FUN_01118b17` branch flag is set). The auto-hunt feature gates
+`FUN_00f3314b` / `FUN_00f3316c` just do `requiredLevel <= vipLevel`. The overlay forces
+both fields to `6` every frame → passes every gate (jump-search VIP3+, auto-pick VIP4+).
+**Client-side only** — server-enforced VIP features (shop, teleport) still fail.
+
+### Loot (auto-pick)
+Auto-pick is a separate VIP4-gated option. It worked once the option was enabled in the
+client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticked).
+
+### New findings this session
+- **Message factory** `FUN_00f36f4e` = `CNetMsg::CreateNetMsg` — maps packet type →
+  message ctor (`case 0x855` → `CMsgHangUp`).
+- **Incoming messages route to Lua**: dispatch `FUN_0103ef3e` → `FUN_00ba2d7b` →
+  `FUN_00c3c2d0` → `CQMain_OnNetMsg`. So the 0x855 ack is handled in Lua — that's why
+  there's no C++ manager state-writer (the earlier "missing setter" mystery).
+- `CMsgHangUp` vtable @ `0x017012d8`: [0]=dtor, [3]=type-check, [4]=getter,
+  [5]=`FUN_010ce686` (Process/send — what the toggle calls), [6]=error/assert.
+- Manager state confirmed live: idle word `0x001`, hunting word `0x101`
+  (only byte `+0x11` flips).
+
+### Commits (repo `dx9-hook`, branch `master`)
+| Commit | Change |
+|---|---|
+| `b0d7494` | initial auto-hunt (bare toggle) + debug tree |
+| `6e3acde` | client-side state assertion (made the brain engage) |
+| `ddae3cc` | also assert `client+0x5385` (fixed the "shows Idle" gate) |
+| `824ebfb` | VIP spoof |
+| `a93cb41` | don't send the 0x855 packet by default (fixed XP reset) |
+| `f7605b5` | added `OFFSETS.md` (durable signatures/offsets for re-finding after updates) |
+
+### Open / next
+- Auto-pick is currently enabled via the client dialog; could be set directly from the
+  overlay if we want it fully dialog-free (find the auto-pick config flag).
+- Verify jump-search (VIP3) engages while hunting.
 
 ---
 
@@ -38,18 +104,11 @@ Chinese game-dev term for AFK auto-grinding). Its settings window is the dialog 
 +0x04  dword = 0          (ctor)
 +0x08  dword = 0x7fffffff (ctor)
 +0x0c  dword = 0x7fffffff (ctor)
-+0x10  WORD state = 0x100 (256) at creation — manager writers (byte-scan exhaustive):
-         - ctor FUN_00f26499 @ 00f264e2: 0x100 (default)
-         - dtor FUN_00f2a150 @ 00f2a19c: 0x100 (reset on teardown)
-         No immediate 0x101 write to the MANAGER exists. FUN_00c822eb's 0x101 write
-         targets a different 0x14-byte item struct (see PM update below). The runtime
-         0x100<->0x101 flip must be a byte write to +0x10 and/or server-ack driven.
-+0x11  byte  — read by getter FUN_00f4761b; note: after ctor, word +0x10 = 0x100
-         means byte +0x11 = 0x01 already — FUN_0111621f is effectively gated by the
-         client auto-battle byte. Verify live with the overlay debug readouts.
++0x10  WORD state — 0x001 idle / 0x101 hunting (only byte +0x11 flips; confirmed live)
++0x11  byte  — hunting-active flag; read by getter FUN_00f4761b; the brain's gate
 +0x12  byte  — ctor sets 0; read by getter FUN_00f4761f; per-frame dispatcher FUN_0112ef9d checks it
 +0x14  DWORD timestamp — written by FUN_00f2fcd5 (timeGetTime) when called with flag=0
-+0x18..+0x2c assorted lists/flags (ctor zeroes)
++0x18..+0x2c assorted lists/flags (ctor zeroes); +0x18/+0x1c = hunt anchor X/Y, +0x04 = radius
 ```
 
 ### Manager methods identified so far
@@ -99,7 +158,7 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
 ### Other leads
 
 - `FUN_00bd7355` callers: FUN_00bca328, FUN_00be7d0d, and one at 0x00a1665b.
-- Dialog packet handlers cluster: 0x004c1641 ... 0x004c1bd9 (serialize dialog state to/from packets) — likely home of the 0x855 ack handler.
+- Dialog packet handlers cluster: 0x004c1641 ... 0x004c1bd9 (serialize dialog state to/from packets).
 - Conquer.exe: 208,365 functions analyzed; strings are mostly in data files (exe has few UI strings).
 
 ---
@@ -121,23 +180,20 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
   - imm = 0x0100 → 3 hits: manager ctor 00f264e2, manager dtor 00f2a19c, and
     FUN_010a8c39 @ 010a8c4f (different class; sets +0x10=0x100 alongside timeGetTime).
   - **No immediate-write "stop hunting" setter exists for the manager.** The runtime
-    state flip must be a byte write to +0x10 (`C6 4? 10 00/01` candidate lists were
-    collected but untriaged) and/or arrive with the server ack of packet 0x855.
+    state flip is the client-side byte write (which the overlay now performs) — see the
+    WORKING STATE section.
 
-### Overlay integration (shipped in src/hooks/auto_hunt.cpp)
+### Overlay integration (src/hooks/auto_hunt.cpp)
 
-- **Decision (next-step 3): call the game's own toggle `FUN_00bd7355` directly** —
-  no args, plain RET, goes through the legitimate CMsgHangUp/0x855 packet path
-  (encryption/sequencing handled by FUN_010ce686). Rejected: calling the manager
-  method by hand (more setup, same effect) and hand-crafting packet 0x855 (fragile).
-- The ImGui button is state-aware ("Start Auto Hunt" / "Stop Auto Hunt") gated on a
-  guarded replica of FUN_0111621f.
+- Originally called the game's toggle `FUN_00bd7355` directly. **That turned out to be
+  insufficient** — the toggle only sends the notify packet and never sets the client
+  hunting state, and the packet made the server reset XP. See the WORKING STATE section
+  for the final client-side approach that replaced it.
 - Sanity guard: feature self-disables unless bytes at 0x00BD7355 are `6A 00 E8`
   (PUSH 0; CALL) — protects against running on a different client build.
-- A collapsible "Auto Hunt Debug" tree dumps live client+0x5385 and
-  mgr+0x10/+0x11/+0x12/+0x14 for the in-game verification (next-step 4).
-- Calls run inside HookedEndScene (game thread on this client), the same context
-  the dialog buttons execute in.
+- A collapsible "Auto Hunt Debug" tree dumps live client+0x5385 / client+0x9e4 (VIP) and
+  mgr+0x10/+0x11/+0x12/+0x14.
+- Calls run inside HookedEndScene (game thread on this client).
 
 ---
 
@@ -146,15 +202,17 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
 - D3DX9_43 proxy DLL, ImGui overlay (INSERT), memory scanner with background scans + unknown-value
   snapshot scans, input hooked on BOTH parent window (keyboard) and render window (mouse),
   window non-collapsible reverted to collapsible per user request, debug input counters added.
-- Auto Hunt section added: Start/Stop button + status + debug state dump (auto_hunt.cpp).
+- Auto Hunt section: client-side Start/Stop + VIP spoof + optional notify-packet + debug state dump.
 
 ## Next steps
 
-1. ~~Decompile FUN_00c822eb~~ — done: hypothesis corrected (item-struct initializer, not the manager setter).
-2. ~~Find the matching reset (0x100 write)~~ — done: exhaustive scan; no immediate stop-setter exists.
-   Optional: triage `C6 4? 10 00/01` byte-write candidates to find the exact runtime writer.
-3. ~~Decide overlay implementation~~ — done: call FUN_00bd7355 (shipped in auto_hunt.cpp).
-4. Verify semantics in-game: click Start, confirm mgr+0x14 updates immediately (client-side),
-   then watch client+0x5385 / mgr+0x10 / +0x11 / +0x12 for the server-ack transition.
-5. Still open: find the writer of mgr+0x11 / the incoming 0x855 ack handler (dialog packet
-   handler cluster 0x004c1641 ... 0x004c1bd9 is the likely home).
+1. ~~Find the auto-hunt start mechanism~~ — **done**: it's client-side. Assert
+   `mgr+0x11=1` + `client+0x5385=1` every frame; don't send the 0x855 packet.
+2. ~~Fix XP reset~~ — **done**: withholding the 0x855 packet keeps the server out of
+   auto-hunt mode so XP fills normally.
+3. ~~VIP unlock~~ — **done**: force `client+0x9e4`/`+0x9ec` = 6 (jump-search + auto-pick).
+4. Optional: set auto-pick directly from the overlay (currently enabled via the client
+   dialog). Find the auto-pick config flag if we want it dialog-free.
+5. Verify jump-search (VIP3) engages while hunting.
+6. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
+   anchors) to re-locate every value.
