@@ -2,8 +2,9 @@
 
 **Current status: auto-hunt FULLY WORKING from the ImGui overlay** (kills, loots
 gold/items, XP + skill bars fill normally) — and the overlay now **auto-pops the
-XP skill** (Superman / Fatal Strike / any class) when the bar fills. See the
-"WORKING STATE" section for the auto-hunt solution; the detailed research follows.
+XP skill(s)** (Superman / Fatal Strike / any class, rotating through all of them)
+when the bar fills. See the "WORKING STATE" section for the auto-hunt solution;
+the detailed research follows.
 
 Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll imported).
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
@@ -13,69 +14,86 @@ Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plu
 ## ✅ Auto XP skill activation (2026-08-11) — Superman / Fatal Strike auto-pop
 
 **Goal:** while auto-hunting, automatically activate the character's XP skill
-the moment the XP bar fills (no manual click).
+the moment the XP bar fills (no manual click). The game has MANY XP skills and
+every character can know several — so the overlay detects them instead of
+guessing ids.
 
-**Research trail:**
+**Research trail (v3 — the working one):**
 
 - **XP bar value** is `*(uint*)(client + 0xaec)`, 0–100. `FUN_011154f5` (the fill
   function, called with the client object) clamps to 100 and treats `99 < bar` as
   full → fire condition is `bar >= 100`. The fill patch from 2026-08-10 already
   lets the bar charge while hunting.
-- **Activation path — the real one (v2):** `FUN_00b811a4` is the XP-skill icon
-  click handler. When the icon is enabled (`entry+0x1c == 1`) it plays the
-  `"yuanshen_jdt1"` effect (元神 = the XP skill system) and calls:
-  `FUN_011b1ec9  __thiscall(ECX = client, 0x5FDC, *(client+0x268), 0, 1)`.
-  **`0x5FDC` is a generic XP-skill pseudo magic id** — the client sends it
-  as-is and the SERVER maps it to the character's actual XP skill (Superman,
-  Fatal Strike, ...). That's also why the icon only lights up when the server
-  says the bar is full. The same pseudo id appears in the hotkey flow:
-  hotkey command `0x76D` → `FUN_00a1d6bc((0x5FDC << 8), 0x72)`, and the skill
-  dispatcher special-cases `0x4A6/0x4AB/0x5FDC` to fire at self with no
-  learned-magic check.
-- **Why v1 failed (kept for reference):** v1 probed the seven ids
-  `0x2845/0x2B34/0x2B2A/0x2D5A/0x3002/0x323C/0x3DA4` (from the dispatcher's
-  current-skill `+0x5c` comparisons) with the learned-magic lookup
-  `FUN_011a92b4` and fired the first match. In-game the lookup never matched
-  ("scanning..." forever) — those ids are not in the learned-list key space.
-  The pseudo id removes the whole detection problem.
-- **Call details:** `FUN_011b1ec9(client, magicId, targetUid, 0, 1)` — the
-  same signature the hunt brain (`FUN_00f54058`) and dispatcher use; XP skills
-  fire self-cast at `*(uint*)(client + 0x268)` (own role UID, confirmed at
-  `FUN_00d3fb0f`: projectile-target == self → GreenGlow + bar fill + 0x40f).
-- **Why the direct call (not PostMessage 0x464/0xe65):** the hotkey posts
-  `FUN_00df9561(0xe65, !hunting)` to the main window, but the direct call is
-  exactly what the icon handler and the hunt brain run on the same thread
-  (HookedEndScene), and needs no window-proc spelunking. The use-skill gates
-  are patched anyway, and the FUN_011b1ec9 gate reads the *current* skill's
-  `+0x30` (the attack skill while hunting), so it wouldn't trip regardless.
+- **Learned-magic list layout — decoded from the raw disassembly of the client's
+  own lookup `FUN_011a92b4`** (the decompiler had removed these blocks as
+  "unreachable"; `disassemble_bytes` recovered them):
+  - vector begin `client+0x1D88`, end `client+0x1D8C`, **8-byte entries**,
+    `entry[0]` = learned-magic record ptr (`entry[1]` = refcount block).
+  - the record's magic-info struct is `record + 0x70` — the lookup calls
+    `FUN_00d9612c(record)` (= `LEA EAX,[ECX+0x70]; RET`, the same accessor that
+    yields `client+0x70` for the current skill) and then
+    `CMP [info+0x5C], magicId` (@ `0x011A930F`) — so **`info+0x5C` = magic type
+    id**, and **`info+0x30` = 1 marks an XP-type skill** (same struct layout the
+    use-skill gates check on the current skill).
+  - calling convention: `__thiscall(client, out, magicId)`, `RET 8`
+    (callee-cleans) — v1's call contract was actually correct.
+- **Detection (v3):** enumerate the vector with pure memory reads; every entry
+  with `info+0x30 == 1` is an XP skill the character knows. If the generic
+  pseudo id `0x5FDC` (what the XP icon click handler `FUN_00b811a4` fires; the
+  server maps it to the class XP skill) is present, it goes first in the list.
+  No hardcoded per-class table — works with custom server magics and with
+  characters that know several XP skills.
+- **Activation:** `FUN_011b1ec9 __thiscall(ECX = client, magicId, *(client+0x268),
+  0, 1)` — exactly what the XP icon handler (`FUN_00b811a4`, plays
+  `"yuanshen_jdt1"`) and the hotkey dispatcher (`FUN_00a1d6bc`) run.
+  `*(client+0x268)` = own role UID (confirmed at `FUN_00d3fb0f`).
+- **Fire control:** one pop per bar fill — after firing, wait for the bar to
+  drop below 100 (the server consumes it on a pop) before re-arming; if it never
+  drops (pop rejected), re-arm after 5s and retry. Multiple XP skills rotate
+  round-robin, one per fill. Max one attempt per second.
+
+**Why v1/v2 failed (kept for reference):**
+
+- v1 probed seven dispatcher ids (`0x2845/0x2B34/0x2B2A/0x2D5A/0x3002/0x323C/
+  0x3DA4`) one-by-one via `FUN_011a92b4` and never matched in-game
+  ("scanning..." forever). The lookup does compare `info+0x5C` (proven by the
+  disasm), so the contract was fine — the likely causes were a stale DLL build
+  and/or server-custom magic ids. Either way, probing fixed ids was fragile.
+- v2 fired only the pseudo id `0x5FDC`; still no cast in-game — on this server
+  the pseudo entry may not be in the learned list, and v2 had no visibility
+  into why. v3 enumerates the real list and shows it in the UI (XP Debug tree),
+  so detection is observable instead of blind.
 
 **Implementation (`src/hooks/xp_skill.cpp`, "Auto XP skill when bar is full"):**
 
 1. Per-frame tick (`ApplyXpSkillClientState()`, called from
-   `RenderImGuiInterface` like the auto-hunt assertion — runs with the menu
-   closed, on the game thread).
-2. When `client+0xaec >= 100`, call `FUN_011b1ec9(client, 0x5FDC,
-   *(client+0x268), 0, 1)` — max once per second; the server resets the bar
-   after a pop, which throttles the next one naturally.
-3. Optional "Only while auto-hunting" gate (default ON) using the same
-   `client+0x5385 && mgr+0x11` check as the game.
-4. Enabling auto-pop force-enables the gate patches (the fill patch is what
+   `RenderImGuiInterface` — runs with the menu closed, on the game thread).
+2. Every 5s re-enumerate the learned-magic vector → fire list (`0x5FDC` first
+   when known, then every XP-flagged id, deduped).
+3. When `client+0xaec >= 100` and armed, fire the next id in the rotation via
+   `FUN_011b1ec9(client, id, *(client+0x268), 0, 1)`; then latch until the bar
+   drops (or 5s retry timeout).
+4. Optional "Only while auto-hunting" gate (default ON) using the game's own
+   `client+0x5385 && mgr+0x11` check.
+5. Enabling auto-pop force-enables the gate patches (the fill patch is what
    lets the bar charge during hunting at all).
 
-UI shows the live bar value and a pop counter for feedback.
+UI shows the live bar value, a pop counter, the last fired id, and an
+**XP Debug** tree (learned-magic count + the detected XP skill ids) so a
+failure is diagnosable from a screenshot.
 
 ---
 
-## 🔧 Auto-XP debug (2026-08-11, late) — RESOLVED
+## 🔧 Auto-XP debug (2026-08-11, late) — RESOLVED (v3)
 
-**Symptom:** overlay stayed on "XP skill: scanning..." and never popped, even
+**Symptoms seen:** v1 stuck on "scanning..."; v2 (0x5FDC-only) never cast even
 with the bar at 100% and the XP icon lit. (User-confirmed: the icon is
-server-gated — disabled until the bar is full.)
+server-gated — disabled until the bar is full; and characters can know many
+XP skills.)
 
-**Root cause:** the v1 id-probing never matched (wrong key space for
-`FUN_011a92b4`), so detection never completed and nothing fired. Fixed by
-switching to the real XP-icon path (pseudo id `0x5FDC`) — see the section
-above.
+**Resolution:** v3 enumerates the learned-magic vector directly (layout proven
+from the `FUN_011a92b4` disassembly), fires every XP-flagged skill in
+round-robin, and surfaces detection state in the XP Debug tree.
 
 **Other findings from the debug pass (kept as leads):**
 
@@ -88,11 +106,14 @@ above.
 - Ruled out for the 0xe65 handler search: `FUN_00c2c6c3` (generic CWnd base
   window proc) and `FUN_00a51357` (dialog handler, 0x464/0x200 only). The real
   `0x464/0xe65` handler is still unlocated (main-window-proc candidate
-  `FUN_00a518e1` decompile kept timing out) — no longer needed since the
-  direct call bypasses it.
+  `FUN_00a518e1` decompile kept timing out) — not needed; the direct call
+  bypasses it.
 - `DAT_01a584c0` = main game controller object (fields `+0x2420xxx`);
   `FUN_00a1d6bc` (skill dispatcher) and `FUN_00a37356` (hotkey dispatcher)
   are its methods.
+- The `"yuanshen"` UI family (`ui_yuanshen`, `main_yuanshen_*`,
+  `com_yuanshen_*`, `yuanshen_btn35`, ...) = the XP skill system's UI code —
+  leads for future XP UI work.
 
 ---
 
@@ -191,7 +212,8 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `5127d6c` | XP-skill gates patched (bar charges + can pop while hunting) |
 | `06321b3` | auto XP skill v1 (id probing — never matched in-game) |
 | `348e798` | debug progress saved (offset confirmations, investigation state) |
-| `c2bf5aa` | auto XP v2: fire the real XP-icon pseudo id `0x5FDC` (FUN_00b811a4 path) |
+| `c2bf5aa` | auto XP v2: fire the XP-icon pseudo id `0x5FDC` (still no cast in-game) |
+| `d81c8f0` | auto XP v3: enumerate the learned-magic list, fire all XP-type skills (rotating) |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -341,9 +363,10 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
 3. ~~VIP unlock~~ — **done**: force `client+0x9e4`/`+0x9ec` = 6 (jump-search + auto-pick).
 4. ~~XP skills while hunting~~ — **done** (2026-08-10 night): patch the three
    `IsHunting` gates (see the top section). New module `src/hooks/xp_skill.cpp`.
-5. ~~Auto XP skill~~ — **done** (2026-08-11, v2): auto-pop when the bar is full via
-   the real XP-icon path — `FUN_011b1ec9(client, 0x5FDC, *(client+0x268), 0, 1)`.
-   (v1 probed class ids via the learned-magic lookup and never matched — superseded.)
+5. ~~Auto XP skill~~ — **done** (2026-08-11, v3): enumerate the learned-magic list
+   (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
+   round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
+   shows what was detected/fired.
 6. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 7. Verify jump-search (VIP3) engages while hunting.

@@ -136,45 +136,61 @@ E8 ?? ?? ?? ?? 84 C0 74 ?? 8B 4D 9C E8 ?? ?? ?? ?? 83 78 30 01 75 ?? 68 ?? ?? ??
 ```
 
 **Current-skill accessor — `FUN_00d9612c` @ `0x00D9612C`**  
-`return client + 0x70` — the current-magic-info struct; its `+0x30` dword == 1
-marks an XP-type skill; `+0x5c` is the current magic type id; `+0x10` the
-cooldown ms.
+`return this + 0x70` — for the client it's the current-magic-info struct; for a
+learned-magic record it's that record's info struct (the learned-magic lookup
+calls it on the record). Magic-info struct layout:
+
+| Offset | Type | Meaning |
+|---|---|---|
+| `+0x10` | dword | cooldown ms (read by the skill queue processor) |
+| `+0x30` | dword | `1` = XP-type skill (the use-skill gate check) |
+| `+0x5c` | dword | magic type id (what `FUN_011b1ec9` fires) |
+
 ```
 8D 41 70 C3
 ```
 
 ### XP-skill auto-activation (auto Superman / Fatal Strike)
 
-How the overlay pops the character's XP skill when the bar is full
+How the overlay pops the character's XP skill(s) when the bar is full
 (`src/hooks/xp_skill.cpp`, "Auto XP skill when bar is full").
 
+**Learned-magic lookup — `FUN_011a92b4` @ `0x011A92B4`**  
+`void __thiscall FUN_011a92b4(client /*ECX*/, void* out[2], int magicId)` —
+`RET 8` (callee-cleans). Scans the learned-magic vector; `out[0]` = record (0 =
+not learned), `out[1]` = refcount block to release with `FUN_00420f03`.
+Disassembly-verified inner loop (the decompiler hides it as "unreachable"):
+```
+...: MOV ECX,[entry record]; CALL FUN_00d9612c   ; info = record + 0x70
+011A930F: CMP [EAX+0x5C], [EBP+0xC]              ; info->id == magicId?
+```
+The overlay doesn't call it — it enumerates the vector directly:
+`begin = *(client+0x1D88)`, `end = *(client+0x1D8C)`, stride 8,
+`entry[0]` = record; then `id = *(record+0x70+0x5C)`, `isXp = *(record+0x70+0x30)`.
+
 **XP-skill pseudo magic id — `0x5FDC`**  
-What the XP icon actually fires. The client sends it as-is and the SERVER maps
-it to the character's class XP skill (Superman, Fatal Strike, ...) — which is
-why the icon only lights when the server says the bar is full. Also reachable
-via hotkey command `0x76D` → `FUN_00a1d6bc((0x5FDC << 8), 0x72)`; the skill
-dispatcher special-cases `0x4A6/0x4AB/0x5FDC` to fire at self with no
-learned-magic check.
+What the XP icon click handler fires. The client sends it as-is and the SERVER
+maps it to the character's class XP skill (Superman, Fatal Strike, ...) — which
+is why the icon only lights when the server says the bar is full. Also
+reachable via hotkey command `0x76D` → `FUN_00a1d6bc((0x5FDC << 8), 0x72)`; the
+skill dispatcher special-cases `0x4A6/0x4AB/0x5FDC` to fire at self with no
+learned-magic check. When `0x5FDC` appears in the learned list the overlay puts
+it first in the rotation.
 
 **XP icon click handler — `FUN_00b811a4` @ `0x00B811A4`**  
 When the icon entry's enabled flag (`entry+0x1c == 1`) is set: plays the
 `"yuanshen_jdt1"` effect (元神 = the XP skill system — a good re-find anchor),
-then `FUN_011b1ec9(0x5FDC, *(client+0x268), 0, 1)`.
+then `FUN_011b1ec9(0x5FDC, *(client+0x268), 0, 1)`. Referenced by the handler
+table entry at `0x0169A028`.
 
 **Use-skill-on-target — `FUN_011b1ec9` @ `0x011B1EC9`**  
 The activation entry point. Call signature (verified at the hunt brain, the
 hotkey dispatcher, and the XP icon handler call sites):
 `char __thiscall FUN_011b1ec9(client /*ECX*/, int magicId, int targetUid, int unk /*0*/, int showErr /*1*/)`.
-XP skills are self-cast: `targetUid = *(uint*)(client+0x268)`.
-
-**Learned-magic lookup — `FUN_011a92b4` @ `0x011A92B4`**  
-`void __thiscall FUN_011a92b4(client /*ECX*/, void* out[2], int magicId)`.
-Scans the learned-magic vector (`client+0x1d88` begin / `client+0x1d8c` end,
-8-byte smart-pointer entries). `out[0] != 0` = the character knows the magic;
-`out[1]` is an intrusive refcount block — release it with `FUN_00420f03`.
-NOTE: keyed by the learned-list id space — the dispatcher's current-skill ids
-(`0x2845/0x2B34/0x2B2A/0x2D5A/0x3002/0x323C/0x3DA4`) did NOT match here (the
-v1 auto-XP probing failed in-game). Prefer the `0x5FDC` pseudo id.
+XP skills are self-cast: `targetUid = *(uint*)(client+0x268)`. Internally it
+runs the learned lookup on the magicId (unknown id → error `0x186D8` and bail)
+and has an XP special-case when the CURRENT skill's `+0x5c` is one of
+`0x2845/0x2B2A/0x2B34/0x2D5A/0x3002/0x323C/0x3DA4` and target == self.
 
 **Smart-pointer release — `FUN_00420f03` @ `0x00420F03`**  
 `int __fastcall FUN_00420f03(void* refBlock /*ECX*/)` — decrements the use
@@ -191,7 +207,7 @@ the XP bar and `client+0x268` is the own role UID.
 `PostMessageA(DAT_01a5a9cc, 0x464, wParam, lParam)`. The XP hotkey
 (`FUN_00a37356` case `0x38b`) posts `0xe65` with `lParam = !IsHunting`.
 The `0x464/0xe65` handler itself is still unlocated — not needed; the direct
-`FUN_011b1ec9(0x5FDC, ...)` call bypasses it.
+`FUN_011b1ec9(...)` call bypasses it.
 
 ### Hunt brain
 
@@ -287,7 +303,7 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 | `+0xaec` | dword | XP charge bar 0–100 (full = 100; read/written by FUN_011154f5; ECX=client confirmed at FUN_00d3fb0f) |
 | `+0x1868` | dword | learned-magic list count (index getter FUN_00fcc707; entry `+0x1c` = magic id) |
 | `+0x1b10` | list | skill queue head (processed by FUN_011b4477) |
-| `+0x1d88`/`+0x1d8c` | ptr | learned-magic vector begin/end (8-byte smart-ptr entries; scanned by FUN_011a92b4) |
+| `+0x1d88`/`+0x1d8c` | ptr | learned-magic vector begin/end (8-byte smart-ptr entries; `entry[0]` = record; `record+0x70` = magic-info struct — disasm-proven in FUN_011a92b4) |
 | `+0x1da0` | dword | hunt brain gate — must be 0 (checked by FUN_011ae8b7) |
 | `+0x5385` | byte | auto-battle flag (read by FUN_0111524b) |
 | `+0x57f4` | dword | source of the VIP-field branch flag (FUN_01118b17) |
@@ -333,12 +349,14 @@ withholds this packet by default so the server treats kills as normal gameplay.
   auto-hunt dialog (the VIP spoof unlocks the checkbox).
 - **XP skills while hunting:** three 2-byte code patches (see "XP-skill gates"
   above) applied by `xp_skill.cpp`. Server unaffected (0x855 stays withheld).
-- **Auto XP skill (Superman / Fatal Strike):** every frame: if `client+0xaec >= 100`,
-  call `FUN_011b1ec9(client, 0x5FDC, *(client+0x268), 0, 1)` — exactly what
-  clicking the lit XP icon runs (`FUN_00b811a4`). `0x5FDC` is a pseudo id; the
-  server maps it to the character's class XP skill, so no class table or
-  learned-list probing is needed. Fire max 1/s. Requires the XP gates patched
-  (auto-enables them).
+- **Auto XP skill (Superman / Fatal Strike / all of them):** every 5s enumerate
+  the learned-magic vector (`client+0x1D88..+0x1D8C`, stride 8, `entry[0]` =
+  record): fire list = `0x5FDC` (if present) + every record whose
+  `record+0x70+0x30 == 1` (XP-type). Every frame: if `client+0xaec >= 100`,
+  call `FUN_011b1ec9(client, id, *(client+0x268), 0, 1)` — exactly what
+  clicking the lit XP icon runs (`FUN_00b811a4`). One pop per fill (latch until
+  the bar drops, 5s retry), rotating round-robin through the fire list.
+  Requires the XP gates patched (auto-enables them).
 
 ---
 
@@ -354,6 +372,7 @@ Use these to locate the code after an update when signatures fail:
 | `".?AVCMsgHangUp@@"` | `0x01A46AE8` | the CMsgHangUp message class |
 | `"AutoHangUpIconBtn"` | `0x01646F90` | the auto-hunt toolbar icon handler |
 | `"yuanshen_jdt1"` | (search the string) | the XP icon click handler `FUN_00b811a4` (fires `0x5FDC`) |
+| `"ui_yuanshen"` / `"main_yuanshen_*"` | `0x01503220` area | the XP skill system's UI code |
 | `"VipLev"` | `0x0163AA70` | VIP-level handling |
 | `"nVipLev >= 0 && nVipLev <= 6"` | `0x016160F8` | dlgvipquery.cpp — confirms VIP range 0–6 |
 | `"STR_CANNOT_USE_XP_WHEN_HANGUP"` | `0x01741FA4` | the two use-skill gates (FUN_011b1ec9 / FUN_011b3503) |
@@ -372,6 +391,8 @@ Use these to locate the code after an update when signatures fail:
 - [ ] CMsgHangUp ctor contains `8D B? 08 04 00 00` (`LEA ...,+0x408` buffer).
 - [ ] Each XP-skill gate signature matches: fill `6A 64 5B 84 C0 75`, use-skill
       `84 C0 74 ?? 8B 4D ?? E8 ?? ?? ?? ?? 83 78 30 01`.
+- [ ] Learned-magic vector: re-derive from the lookup function (the one whose
+      inner loop does `CALL <this+0x70 getter>` then `CMP [EAX+0x5C],[EBP+0xC]`).
 - [ ] XP pseudo id: find the XP icon handler via the `"yuanshen_jdt1"` string
       xref and take the id it passes to `FUN_011b1ec9` (`0x5FDC` on this build).
 - [ ] Confirm each AOB match is unique before trusting it.
