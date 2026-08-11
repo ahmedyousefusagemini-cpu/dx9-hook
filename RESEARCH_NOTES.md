@@ -82,23 +82,33 @@ UI shows the live bar value, a pop counter, the last fired id, and an
 **XP Debug** tree (learned-magic count + the detected XP skill ids) so a
 failure is diagnosable from a screenshot.
 
+⚠️ Open suspicion (2026-08-11, late): if a client crash ever correlates with
+the XP bar filling while auto-pop is enabled, re-verify the `FUN_011b1ec9`
+call contract (arg count / RET N) at the disassembly level — a callee-clean
+mismatch would corrupt the caller's stack. Not yet implicated; the user
+reportedly does the XP-skill pop MANUALLY.
+
 ---
 
-## ✅ XP skill speed boost (2026-08-11) — speed follows the XP buff
+## ✅ XP skill speed boost (2026-08-11) — the manual swap, automated
 
-**Goal (user's exact ask):** the SAME change-speed function as the base
-control, just with a different preset that turns on automatically while an XP
-skill (Superman / Fatal Strike / ...) is active and off when it isn't — with a
-custom speed anywhere from 100% to 2000%.
+**Goal (user's exact ask, clarified 21:01):** the user ALREADY does this by
+hand and it is stable: hunt at 100%, drag the base speed slider to 500% when
+the XP skill pops, drag it back to 100% when the buff expires. The feature
+just automates that exact swap — same engine, same fields — plus both sliders
+were raised to 100–2000% so maximum movement speed can be tested.
 
-**Final shape (v4):** one speed engine, two presets. Every frame the tick
+**Final shape (v5):** one speed engine, two presets. Every frame the tick
 computes `percent` = boost slider while the XP buff is up, else the base
 slider (or stock 100% when only the boost is enabled), and feeds it to the
 identical `WriteSpeedFields` path the base feature uses (same role, same
 fields, same cap table). The buff poll flips the moment the XP skill ends, so
 the snap-back happens the same frame; the next buff re-applies the boost
 value — fully automatic, every cycle. Slider range 100–2000%, **default 500%
-(the value the base feature was validated at live)**.
+(the user's live-validated stable value)**. A visible **build tag** is
+rendered in the Speed section (`build v5 (2026-08-11)`) so the running DLL
+version can be verified from a screenshot — stale-DLL confusion cost several
+crash rounds.
 
 **Detection — the client's own status flags, read as RAW MEMORY (no calls):**
 an active XP skill shows up as status flags. The disassembly showed the real
@@ -131,11 +141,12 @@ implementation is just a bitmask lookup, replicated with pure reads:
   thread body has its own guard) — a stale pointer becomes a skipped frame
   instead of a crashed client. Full-off transitions restore stock fields and
   the cap table from the tick (`g_anySpeedWasOn`).
-- **v4 (8e6164a):** default boost lowered 1000 → 500 (the proven-stable
-  ceiling the base feature was tested at; the user validated base speed works
-  while the boost crashed, and the old default pushed 10x the instant any
-  buff was active). Slider range unchanged (100–2000%) with a "start at 500
-  or less" note.
+- **v4 (8e6164a):** default boost lowered 1000 → 500 (the old default pushed
+  10x the instant any buff was active).
+- **v5 (a457b0f):** reframed as the automation of the user's proven manual
+  slider swap; BOTH sliders now run 100–2000%; added the visible build tag.
+  (The repeated "it crashes" reports arrived within minutes of each push —
+  stale DLL suspected; the build tag settles that question.)
 
 **Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):**
 `role+0x48` flag + `role+0x44` divisor (uncapped, supports the full 2000% =
@@ -280,11 +291,14 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `d0462c0` | XP speed boost v2: pure-read status bitmask at client+0x138, in-world gated |
 | `66d803e` | XP speed boost v3: flag-only click handlers + SEH-guarded tick/scan (click-crash fix) |
 | `8e6164a` | XP speed boost v4: same-engine preset swap framing, default 500% (validated ceiling) |
+| `a457b0f` | XP speed boost v5: manual-swap automation, both sliders 100–2000%, visible build tag |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
   overlay if we want it fully dialog-free (find the auto-pick config flag).
 - Verify jump-search (VIP3) engages while hunting.
+- If crashes ever correlate with auto-XP pops (not manual pops), re-verify the
+  `FUN_011b1ec9` call contract at the disassembly level.
 
 ---
 
@@ -433,13 +447,14 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. ~~XP skill speed boost~~ — **done** (2026-08-11, v4 after the crash saga): the
-   SAME speed engine as the base control with a preset swap — boost slider
-   (100–2000%, default 500) while the XP buff is up, stock 100% the frame it
-   ends, re-applied on the next buff. Detection = pure-read status bitmask at
+6. ~~XP skill speed boost~~ — **done** (2026-08-11, v5 after the crash saga):
+   automates the user's proven manual swap — boost slider while the XP buff is
+   up, stock 100% the frame it ends, re-applied on the next buff; both sliders
+   100–2000% (default 500). Detection = pure-read status bitmask at
    `client+0x138` (decoded from `FUN_00d4e0ae`; no game-code calls); click
    handlers only flip a flag, all work runs in the SEH-guarded per-frame tick
-   (scan thread guarded too); in-world gated. In `speed.cpp`.
+   (scan thread guarded too); in-world gated; visible build tag in the UI.
+   In `speed.cpp`.
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
