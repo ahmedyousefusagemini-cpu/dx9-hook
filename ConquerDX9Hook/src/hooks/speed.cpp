@@ -33,17 +33,26 @@
 // disconnected the character (confirmed live). The overlay now re-arms the
 // gate at a controlled rate instead (default 250 ms = 4 ticks/sec).
 //
+// XP skill speed boost (2026-08-11): the client tracks an active XP skill
+// (Superman / Fatal Strike / ...) through status flags checked with
+//   FUN_00f1a1d8(client /*ECX*/, statusId)  ->  AL != 0 = active.
+// (Disasm-verified wrapper: CMP [EBP+8],0x23F; JA -> 0; else
+//  ADD ECX,0x138; JMP FUN_00f1eacd - the status manager lives at client+0x138.
+//  RET 4: callee cleans the stack arg.)
+// The flag ids come from the game's own XP code - the bar-fill function
+// FUN_011154f5 refuses to refill while 0x96/0xC0/0xEB are up, and the XP
+// dispatcher FUN_00a1d6bc skips re-casting while the per-skill flags
+// 0x5C/0x79/0x78/0x92/0x9F/0xC0/0xEB are up. Union = the 8 ids polled below.
+// While any of them is active, speed jumps to the XP-boost slider value
+// (up to 2000% = 20x - the role+0x44 path is uncapped; the cap table is
+// raised to match for the role+0xc0 path). The moment the buff ends the
+// poll flips and the fields fall back to stock (or to the base slider value
+// when normal speed control is also enabled).
+//
 // Safety: only data writes, nothing patched. The game's interval math clamps
 // divisors to >= 1 and the final interval to >= 1. All speed-up is
 // client-side: the server may rubber-band movement or drop loot requests at
-// extreme values, so the slider tops out at 500%.
-//
-// Two write paths feed the interval math every frame (same assert pattern as
-// the VIP spoof):  role+0x48=1 & role+0x44=(percent-100)*100  (the uncapped
-// final divisor)  and  role+0xc0=percent-100  (the nSpeedPercent path in
-// FUN_00deb537, which IS capped per action-state by the 13-dword table at
-// 0x016F7E44 - so while enabled we raise that table to 500; it only affects
-// entities with a positive +0xc0, i.e. just us).
+// extreme values, so the base slider tops out at 500%.
 // ============================================================================
 
 namespace Speed
@@ -53,6 +62,7 @@ namespace Speed
 	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010AFD05;  // FUN_010afd05 - interval virtual (vtable check)
 	const uintptr_t ACTION_INTERVAL_CORE   = 0x00DE86B2;  // FUN_00de86b2 - master computation (vtable check)
 	const uintptr_t SPEED_CAP_TABLE        = 0x016F7E44;  // per-state nSpeedPercent caps (13 dwords)
+	const uintptr_t HAS_STATUS_FUNC        = 0x00F1A1D8;  // FUN_00f1a1d8 - client status-flag check
 
 	// Two id placements seen in the wild (this server leaves client+0x26c = 0):
 	//  A: client+0x268 <-> role+0x54   (the game's own my-role match in FUN_00d3203a:
@@ -70,17 +80,27 @@ namespace Speed
 	const int MIN_SPEED_PERCENT = 100;  // 100% = normal speed
 	const int MAX_SPEED_PERCENT = 500;  // beyond this the server rubber-bands hard
 
+	// XP boost slider range (user-requested 20x headroom; the role+0x44 path
+	// is uncapped and the cap table is raised to match for the +0xc0 path).
+	const int MIN_XP_BOOST_PERCENT = 100;
+	const int MAX_XP_BOOST_PERCENT = 2000;
+
 	const int MIN_LOOT_TICK_INTERVAL_MS = 50;    // faster than ~20/sec trips rate limits
 	const int MAX_LOOT_TICK_INTERVAL_MS = 1000;  // 1000 ms = stock brain rate
 
 	const uintptr_t IMAGE_BASE = 0x00400000;   // Conquer.exe image base
 	const uintptr_t IMAGE_TOP  = 0x02000000;   // vtable sanity range upper bound
 
+	// XP-buff status flag ids (see the header comment for provenance).
+	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
+
 	// User settings.
 	bool g_speedEnabled = false;
 	int  g_speedPercent = 200;          // default 2x
 	bool g_fastLootTick = false;        // re-arm the brain tick gate at a safe rate
 	int  g_lootTickIntervalMs = 250;    // default: brain ticks at most every 250 ms (4/sec)
+	bool g_xpBoostEnabled = false;      // speed up while an XP skill buff is active
+	int  g_xpBoostPercent = 1000;       // default 10x while the XP buff runs
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -89,8 +109,10 @@ namespace Speed
 	volatile unsigned int g_scanIdMatches = 0;  // id hits before strict checks
 	volatile int g_matchedRule = 0;             // which id rule hit (0 none, 1 A, 2 B, 3 cross)
 	volatile int g_vtableHasIntervalFn = 0;     // candidate's vtable passed the class check
+	bool g_xpBuffActive = false;                // last status poll (for the UI)
 	unsigned int g_originalCaps[13] = {0};      // saved SPEED_CAP_TABLE contents
 	bool g_capsRaised = false;
+	unsigned int g_raisedCapValue = 0;          // what the table currently holds
 
 	int GetClientObject()
 	{
@@ -118,39 +140,35 @@ namespace Speed
 			!IsBadWritePtr((void*)(role + ROLE_SPEED_DELTA_OFFSET), 4);
 	}
 
-	// Writes (or clears) the speed-boost fields on my role. Runs every frame so
-	// a game-side rewrite can't knock them off (same pattern as the VIP spoof).
-	void WriteSpeedFields(uintptr_t role, bool enabled)
+	// Writes the speed-boost fields on my role for the given percent
+	// (100 = stock/zeroes). Runs every frame so a game-side rewrite can't
+	// knock them off (same pattern as the VIP spoof).
+	void WriteSpeedFields(uintptr_t role, int percent)
 	{
+		bool enabled = percent > MIN_SPEED_PERCENT;
 		// Path 1 (uncapped): the final divisor in FUN_00de86b2.
 		*(unsigned char*)(role + ROLE_SPEED_BOOST_FLAG) = enabled ? 1 : 0;
 		*(int*)(role + ROLE_SPEED_BOOST_OFFSET) =
-			enabled ? (g_speedPercent - MIN_SPEED_PERCENT) * 100 : 0;
+			enabled ? (percent - MIN_SPEED_PERCENT) * 100 : 0;
 		// Path 2 (nSpeedPercent, move states): the role+0xc0 delta, capped by the
 		// (raised) cap table. Never write <= -100: the "nSpeedPercent > 0" assert
 		// in FUN_00deb537 would force a zero interval.
 		*(int*)(role + ROLE_SPEED_DELTA_OFFSET) =
-			enabled ? g_speedPercent - MIN_SPEED_PERCENT : 0;
+			enabled ? percent - MIN_SPEED_PERCENT : 0;
 	}
 
-	// Raises/restores the per-state speed caps used by the role+0xc0 path.
-	// The table sits in read-only data, so VirtualProtect it first.
-	void RaiseSpeedCaps()
+	// The cap the role+0xc0 path needs given which features are enabled.
+	unsigned int NeededCap()
 	{
-		if (g_capsRaised)
-			return;
-		DWORD oldProtect = 0;
-		if (!VirtualProtect((void*)SPEED_CAP_TABLE, 13 * 4, PAGE_READWRITE, &oldProtect))
-			return;
-		unsigned int* caps = (unsigned int*)SPEED_CAP_TABLE;
-		for (int i = 0; i < 13; i++)
-		{
-			g_originalCaps[i] = caps[i];
-			caps[i] = (unsigned int)MAX_SPEED_PERCENT;
-		}
-		g_capsRaised = true;
+		unsigned int needed = 0;
+		if (g_speedEnabled && (unsigned int)g_speedPercent > needed)
+			needed = (unsigned int)g_speedPercent;
+		if (g_xpBoostEnabled && (unsigned int)g_xpBoostPercent > needed)
+			needed = (unsigned int)g_xpBoostPercent;
+		return needed;
 	}
 
+	// Restores the per-state speed caps used by the role+0xc0 path.
 	void RestoreSpeedCaps()
 	{
 		if (!g_capsRaised)
@@ -162,6 +180,66 @@ namespace Speed
 				caps[i] = g_originalCaps[i];
 		}
 		g_capsRaised = false;
+		g_raisedCapValue = 0;
+	}
+
+	// Raises the cap table to what the enabled features need (and keeps it in
+	// sync when the sliders move). The table sits in read-only data, so
+	// VirtualProtect it first. Originals are saved once, on the first raise.
+	void SyncSpeedCaps()
+	{
+		unsigned int needed = NeededCap();
+		if (needed == 0)
+		{
+			RestoreSpeedCaps();
+			return;
+		}
+		if (g_capsRaised && g_raisedCapValue == needed)
+			return;
+
+		DWORD oldProtect = 0;
+		if (!VirtualProtect((void*)SPEED_CAP_TABLE, 13 * 4, PAGE_READWRITE, &oldProtect))
+			return;
+		unsigned int* caps = (unsigned int*)SPEED_CAP_TABLE;
+		if (!g_capsRaised)
+		{
+			for (int i = 0; i < 13; i++)
+				g_originalCaps[i] = caps[i];
+		}
+		for (int i = 0; i < 13; i++)
+			caps[i] = needed;
+		g_capsRaised = true;
+		g_raisedCapValue = needed;
+	}
+
+	// FUN_00f1a1d8(client /*ECX*/, statusId) -> AL != 0: status active.
+	// (RET 4 - callee cleans; verified by disassembly.)
+	bool HasStatus(int client, unsigned int statusId)
+	{
+		if (IsBadReadPtr((const void*)HAS_STATUS_FUNC, 1))
+			return false;
+		uintptr_t hasStatusFunc = HAS_STATUS_FUNC;
+		int result = 0;
+		__asm
+		{
+			push statusId
+			mov  ecx, client
+			call hasStatusFunc
+			movzx eax, al
+			mov  result, eax
+		}
+		return result != 0;
+	}
+
+	// True while any XP-skill buff (Superman / Fatal Strike / ...) is running.
+	bool IsXpSkillActive(int client)
+	{
+		for (int i = 0; i < _countof(XP_STATUS_IDS); i++)
+		{
+			if (HasStatus(client, XP_STATUS_IDS[i]))
+				return true;
+		}
+		return false;
 	}
 
 	// Candidate class check: the vtable must point into the exe image, the action
@@ -211,7 +289,7 @@ namespace Speed
 				break;
 
 			const DWORD readWrite = PAGE_READWRITE | PAGE_WRITECOPY |
-				PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+			PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 			bool readable = (mbi.State == MEM_COMMIT) && (mbi.Protect & readWrite) != 0 &&
 				(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0;
 
@@ -263,14 +341,25 @@ namespace Speed
 
 	void SetSpeedEnabled(bool enabled)
 	{
-		if (!enabled && IsMyRoleWritable(g_myRoleAddress))
-			WriteSpeedFields(g_myRoleAddress, false);  // restore stock behavior
+		if (!enabled && !g_xpBoostEnabled && IsMyRoleWritable(g_myRoleAddress))
+			WriteSpeedFields(g_myRoleAddress, MIN_SPEED_PERCENT);  // restore stock
 
 		g_speedEnabled = enabled;
-		if (enabled)
-			RaiseSpeedCaps();
-		else
-			RestoreSpeedCaps();
+		SyncSpeedCaps();
+
+		if (enabled && g_myRoleAddress == 0)
+			StartRoleScan();
+	}
+
+	void SetXpBoostEnabled(bool enabled)
+	{
+		if (!enabled && !g_speedEnabled && IsMyRoleWritable(g_myRoleAddress))
+			WriteSpeedFields(g_myRoleAddress, MIN_SPEED_PERCENT);  // restore stock
+
+		g_xpBoostEnabled = enabled;
+		if (!enabled)
+			g_xpBuffActive = false;
+		SyncSpeedCaps();
 
 		if (enabled && g_myRoleAddress == 0)
 			StartRoleScan();
@@ -298,12 +387,30 @@ namespace Speed
 			}
 		}
 
-		if (g_speedEnabled)
+		if (g_speedEnabled || g_xpBoostEnabled)
 		{
+			// Effective speed this frame: the XP boost wins while an XP skill buff
+			// is running; otherwise the base slider (or stock when only the boost
+			// is enabled and no buff is up - that is what snaps movement back to
+			// 100% the moment the XP skill ends).
+			int percent = MIN_SPEED_PERCENT;
+			if (g_xpBoostEnabled)
+			{
+				int client = GetClientObject();
+				bool active = client != 0 && IsXpSkillActive(client);
+				g_xpBuffActive = active;
+				if (active)
+					percent = g_xpBoostPercent;
+			}
+			if (percent == MIN_SPEED_PERCENT && g_speedEnabled)
+				percent = g_speedPercent;
+
+			SyncSpeedCaps();  // cheap no-op unless a slider changed
+
 			uintptr_t role = g_myRoleAddress;
 			if (IsMyRoleWritable(role))
 			{
-				WriteSpeedFields(role, true);
+				WriteSpeedFields(role, percent);
 			}
 			else if (g_myRoleAddress != 0)
 			{
@@ -367,17 +474,36 @@ void RenderSpeedInterface()
 	{
 		ImGui::SliderInt("Action speed %", &Speed::g_speedPercent, Speed::MIN_SPEED_PERCENT, Speed::MAX_SPEED_PERCENT);
 		ImGui::TextDisabled("100 = normal, 200 = 2x. Too high may rubber-band (server check).");
+	}
 
-		if (Speed::g_myRoleAddress == 0)
+	ImGui::Spacing();
+
+	// XP boost: speed follows the XP skill buff automatically.
+	bool xpBoost = Speed::g_xpBoostEnabled;
+	if (ImGui::Checkbox("XP skill speed boost", &xpBoost))
+		Speed::SetXpBoostEnabled(xpBoost);
+
+	if (Speed::g_xpBoostEnabled)
+	{
+		ImGui::SliderInt("XP boost speed %", &Speed::g_xpBoostPercent,
+			Speed::MIN_XP_BOOST_PERCENT, Speed::MAX_XP_BOOST_PERCENT);
+		if (Speed::g_xpBuffActive)
+			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "XP buff ACTIVE - boosting");
+		else
+			ImGui::TextDisabled("XP buff inactive - normal speed");
+		ImGui::TextDisabled("While an XP skill (Superman / Fatal Strike / ...) runs, speed jumps");
+		ImGui::TextDisabled("to this value; it snaps back to 100% the moment the buff ends.");
+	}
+
+	if ((Speed::g_speedEnabled || Speed::g_xpBoostEnabled) && Speed::g_myRoleAddress == 0)
+	{
+		if (Speed::g_scanState == 1)
+			ImGui::TextDisabled("Locating my role...");
+		else
 		{
-			if (Speed::g_scanState == 1)
-				ImGui::TextDisabled("Locating my role...");
-			else
-			{
-				ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "My role not found yet");
-				if (ImGui::Button("Rescan"))
-					Speed::StartRoleScan();
-			}
+			ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "My role not found yet");
+			if (ImGui::Button("Rescan"))
+				Speed::StartRoleScan();
 		}
 	}
 
@@ -400,6 +526,7 @@ void RenderSpeedInterface()
 			(Speed::g_scanState == 2 ? "done" : "idle"));
 		ImGui::Text("Id matches last scan: %u", Speed::g_scanIdMatches);
 		ImGui::Text("Matched rule: %d (1=A 2=B 3=cross)", Speed::g_matchedRule);
+		ImGui::Text("XP buff active: %s", Speed::g_xpBuffActive ? "yes" : "no");
 		if (Speed::g_myRoleAddress != 0 &&
 			!IsBadReadPtr((const void*)Speed::g_myRoleAddress, 4) &&
 			!IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_DELTA_OFFSET), 4))
@@ -412,7 +539,8 @@ void RenderSpeedInterface()
 				(unsigned int)*(uintptr_t*)Speed::g_myRoleAddress,
 				Speed::g_vtableHasIntervalFn ? "yes" : "no");
 		}
-		ImGui::Text("Speed caps raised: %s", Speed::g_capsRaised ? "yes" : "no");
+		ImGui::Text("Speed caps: %s (value %u)", Speed::g_capsRaised ? "raised" : "stock",
+			Speed::g_raisedCapValue);
 		char bytesText[64];
 		Speed::GetTargetBytesHex(bytesText, 16);
 		ImGui::TextDisabled("Interval fn @0x010AFD05: %s", bytesText);
