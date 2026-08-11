@@ -54,21 +54,25 @@
 // dispatcher FUN_00a1d6bc skips re-casting while 0x5C/0x79/0x78/0x92/0x9F/
 // 0xC0/0xEB are up. Union = the 8 ids polled below.
 //
-// v9 - the crash catcher (2026-08-11, late): the v8 trace proved the run dies
-// between "render: slider ok" and "render: section complete" - but the code
-// between those markers is nothing but plain ImGui text lines, which cannot
-// crash. Conclusion: the trace FILE is being cut off mid-flight (antivirus
-// interference on the rapidly-opened file) and the real crash happens later,
-// invisibly. v9 therefore adds a REAL crash reporter:
-//   - SetUnhandledExceptionFilter (installed lazily on the first tick)
-//     writes code/address/EIP/ESP/EBP + the module bases of Conquer.exe and
-//     this DLL to speed_boost_crash.txt the moment ANY unhandled exception
-//     kills the client - so the crash site is identified by address, not by
-//     which log line survived.
-//   - A SIGABRT handler covers abort()-style deaths (CRT asserts).
-//   - The tracer auto-disables itself after repeated file-write failures, so
-//     AV interference can never hang the render thread.
-// The v6-v8 diagnostics stay: stage tracer (speed_boost_trace.txt),
+// v10 - crash FORENSICS (2026-08-11, late): the v9 crash reporter caught the
+// crash - C0000005 (access violation) at Conquer.exe+0xE57F95 (VA 0x01257F95)
+// dereferencing address 0 (accessTarget=00000000), i.e. a NULL pointer used
+// with no field offset - the classic shape of a virtual call on a NULL object
+// or a NULL global being dereferenced. The crash is in GAME code, not this
+// DLL (dll base 0x736F0000), and the boost wrote NOTHING to game memory in
+// the captured run (detect-only was on; no role was ever found). v10 extends
+// the crash report with everything needed to identify the dying subsystem
+// without a debugger:
+//   - full register dump (which register held the NULL),
+//   - the 8 instruction bytes at EIP (the exact faulting instruction),
+//   - an EBP-frame stack walk (8 frames) - the return addresses name the
+//     calling functions and therefore the game subsystem,
+//   - a raw stack dump (esp..esp+32) as a fallback for frameless code.
+// The trace file handle is now kept open for the whole session (opened once)
+// so antivirus interference can't silently swallow mid-run marker lines
+// (that is what made the v7b/v8 traces look like they stopped early).
+//
+// The v6-v9 diagnostics stay: stage tracer (speed_boost_trace.txt),
 // detect-only safe mode (default ON), per-frame window markers, build tag.
 //
 // Safety: only data writes, nothing patched, no game-code calls. The game's
@@ -122,7 +126,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v9b (2026-08-11)";
+	const char* const BUILD_TAG = "v10 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -156,8 +160,8 @@ namespace Speed
 	bool g_capsRaised = false;
 	unsigned int g_raisedCapValue = 0;          // what the table currently holds
 
-	// Append raw text to a file in the game's working directory. Shared by the
-	// stage tracer and the crash reporter. Returns false on failure.
+	// Append raw text to a file in the game's working directory (per-event
+	// open/close - used only by the crash reporter, which runs at most once).
 	bool AppendLogLine(const char* fileName, const char* line, int len)
 	{
 		HANDLE h = CreateFileA(fileName, FILE_APPEND_DATA,
@@ -172,14 +176,13 @@ namespace Speed
 	}
 
 	// The crash reporter: runs on ANY unhandled exception, anywhere in the
-	// client (not just our code). Writes the exception code, the faulting
-	// instruction/address, the registers, and both module bases so the crash
-	// site can be mapped to an exact function afterwards. This catches what
-	// the stage tracer cannot (the v8 trace proved the log file gets cut off
-	// before the real crash).
+	// client (not just our code). Writes the exception record, ALL registers,
+// the instruction bytes at EIP, an EBP-frame stack walk, and a raw stack
+	// dump to speed_boost_crash.txt - enough to identify the dying game
+	// subsystem without a debugger. (The first capture proved the crash is a
+	// NULL deref inside Conquer.exe itself, not in this DLL.)
 	LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
 	{
-		char line[512];
 		EXCEPTION_RECORD* er = ep ? ep->ExceptionRecord : NULL;
 		CONTEXT* ctx = ep ? ep->ContextRecord : NULL;
 		if (er == NULL || ctx == NULL)
@@ -195,13 +198,61 @@ namespace Speed
 			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 			(LPCSTR)&CrashFilter, &hSelf);
 
+		char line[512];
 		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
-			"CRASH code=%08X addr=%08X accessTarget=%08X eip=%08X esp=%08X ebp=%08X game=%08X dll=%08X\r\n",
+			"CRASH code=%08X addr=%08X accessTarget=%08X game=%08X dll=%08X\r\n",
 			er->ExceptionCode, (DWORD)er->ExceptionAddress, accessTarget,
-			(DWORD)ctx->Eip, (DWORD)ctx->Esp, (DWORD)ctx->Ebp,
 			(DWORD)hGame, (DWORD)hSelf);
 		if (len > 0)
 			AppendLogLine("speed_boost_crash.txt", line, len);
+
+		len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+			"regs eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X eip=%08X esp=%08X ebp=%08X\r\n",
+			(DWORD)ctx->Eax, (DWORD)ctx->Ebx, (DWORD)ctx->Ecx, (DWORD)ctx->Edx,
+			(DWORD)ctx->Esi, (DWORD)ctx->Edi, (DWORD)ctx->Eip, (DWORD)ctx->Esp, (DWORD)ctx->Ebp);
+		if (len > 0)
+			AppendLogLine("speed_boost_crash.txt", line, len);
+
+		// The faulting instruction bytes (identifies which register was NULL).
+		if (!IsBadReadPtr((const void*)ctx->Eip, 8))
+		{
+			const unsigned char* code = (const unsigned char*)ctx->Eip;
+			len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+				"code@%08X: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+				(DWORD)ctx->Eip, code[0], code[1], code[2], code[3],
+				code[4], code[5], code[6], code[7]);
+			if (len > 0)
+				AppendLogLine("speed_boost_crash.txt", line, len);
+		}
+
+		// EBP-frame stack walk: the return addresses name the callers.
+		DWORD ebp = (DWORD)ctx->Ebp;
+		for (int i = 0; i < 8; i++)
+		{
+			if (IsBadReadPtr((const void*)ebp, 8))
+				break;
+			DWORD returnAddress = *(const DWORD*)(ebp + 4);
+			DWORD previousEbp = *(const DWORD*)ebp;
+			len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+				"frame%d ret=%08X\r\n", i, returnAddress);
+			if (len > 0)
+				AppendLogLine("speed_boost_crash.txt", line, len);
+			if (previousEbp <= ebp)  // the chain must grow upward; stop on junk
+				break;
+			ebp = previousEbp;
+		}
+
+		// Raw stack dwords (fallback for frameless code).
+		if (!IsBadReadPtr((const void*)ctx->Esp, 32))
+		{
+			const DWORD* stackWords = (const DWORD*)ctx->Esp;
+			len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+				"stack: %08X %08X %08X %08X %08X %08X %08X %08X\r\n",
+				stackWords[0], stackWords[1], stackWords[2], stackWords[3],
+				stackWords[4], stackWords[5], stackWords[6], stackWords[7]);
+			if (len > 0)
+				AppendLogLine("speed_boost_crash.txt", line, len);
+		}
 
 		return EXCEPTION_CONTINUE_SEARCH;  // let normal crash handling proceed
 	}
@@ -231,15 +282,30 @@ namespace Speed
 	}
 
 	// Crash tracer: appends one line per stage/event to speed_boost_trace.txt
-	// (game working directory). Bounded volume: click, first-pass stages,
-	// watch-window frame markers, and buff transitions only - never per-frame
-	// spam. Raw Win32 file APIs only (no CRT fopen) so strict MSVC deprecation
-	// settings can't break the build. Auto-disables after repeated write
-	// failures so antivirus interference can never stall the render thread.
+	// (game working directory). The file handle is opened ONCE and kept for
+	// the session - the v7b/v8 traces proved that re-opening per line lets
+	// antivirus software swallow lines mid-run. Bounded volume: click,
+	// first-pass stages, watch-window frame markers, and buff transitions
+	// only - never per-frame spam. Raw Win32 file APIs only (no CRT fopen).
+	HANDLE g_traceFile = NULL;
+	bool g_traceFileTried = false;
+
 	void Trace(const char* stage)
 	{
-		if (!g_traceEnabled || g_traceFailures >= 3)
+		if (!g_traceEnabled)
 			return;
+		if (!g_traceFileTried)
+		{
+			g_traceFileTried = true;
+			g_traceFile = CreateFileA("speed_boost_trace.txt", FILE_APPEND_DATA,
+				FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+				FILE_ATTRIBUTE_NORMAL, NULL);
+			if (g_traceFile == INVALID_HANDLE_VALUE)
+				g_traceFile = NULL;
+		}
+		if (g_traceFile == NULL)
+			return;
+
 		char line[256];
 		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
 			"[%lu] %s | client=%08X role=%08X boostPct=%d active=%d detectOnly=%d scan=%ld\r\n",
@@ -249,10 +315,8 @@ namespace Speed
 			(long)g_scanState);
 		if (len <= 0)
 			return;
-		if (!AppendLogLine("speed_boost_trace.txt", line, len))
-			g_traceFailures++;
-		else
-			g_traceFailures = 0;
+		DWORD written = 0;
+		WriteFile(g_traceFile, line, (DWORD)len, &written, NULL);
 	}
 
 	void GetClientIds(int client, unsigned int* idA, unsigned int* idB)
