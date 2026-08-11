@@ -10,6 +10,7 @@ extern void RenderXpSkillInterface();
 extern void ApplyXpSkillClientState();
 extern void RenderSpeedInterface();
 extern void ApplySpeedClientState();
+extern void SpeedTrace(const char* stage);
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -20,12 +21,15 @@ void RenderImGuiInterface()
 	// Auto-hunt's client-side hunting flag is asserted every frame too, so the
 	// hunt brain stays engaged even after the overlay is closed.
 	ApplyAutoHuntClientState();
+	SpeedTrace("frame: autohunt tick ok");
 
 	// Speed control's fast-loot tick gate reset runs every frame as well.
 	ApplySpeedClientState();
+	SpeedTrace("frame: speed tick ok");
 
 	// Auto XP pop ticks every frame too (it must run with the menu closed).
 	ApplyXpSkillClientState();
+	SpeedTrace("frame: xp tick ok");
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
@@ -48,14 +52,18 @@ void RenderImGuiInterface()
 	ImGui::Spacing();
 	
 	RenderAutoHuntInterface();
+	SpeedTrace("frame: autohunt section ok");
 	
 	ImGui::Spacing();
 
 	RenderXpSkillInterface();
+	SpeedTrace("frame: xp section ok");
 
 	ImGui::Spacing();
 	
 	RenderSpeedInterface();
+	SpeedTrace("frame: speed section ok");
 	
 	ImGui::End();
+	SpeedTrace("frame: window complete");
 }

@@ -38,16 +38,9 @@
 // PROCESS. The user does this by hand and it is stable EVEN AT 2000%:
 //   hunt at 100% -> XP skill lands -> drag the slider up -> when the buff is
 //   consumed, drag it back to 100% (avoids a server disconnect).
-// The automation does the identical swap through the identical write path.
-//
-// v7 KEY FIX - the settle delay: the manual process never applies the high
-// speed in the XP skill's CAST FRAME - a human reacts a few hundred ms after
-// the buff lands. The automation applied it the very frame the buff appeared
-// (mid cast animation) - the one timing the manual process never hits, and
-// the prime suspect for the crashes (a role's cast-state interval collapsing
-// at 5-20x while the animation is being set up). The boost now waits
-// BOOST_APPLY_DELAY_MS after the buff appears before applying the slider
-// value; the snap-back on buff end stays instant.
+// The automation does the identical swap through the identical write path,
+// with the same human timing: a 400 ms settle delay after the buff lands
+// (never boost in the cast frame), instant snap-back when the buff ends.
 //
 // XP-buff detection is PURE MEMORY READS - no game-code calls. The game's
 // status checker FUN_00f1a1d8(client, id) -> FUN_00d4e0ae is just a bitmask
@@ -60,15 +53,22 @@
 // dispatcher FUN_00a1d6bc skips re-casting while 0x5C/0x79/0x78/0x92/0x9F/
 // 0xC0/0xEB are up. Union = the 8 ids polled below.
 //
-// Diagnostics kept from v6 (the v5 build still crashed on click):
-//   1. CRASH TRACER - every stage appends one line to speed_boost_trace.txt
-//      (game working directory; the Speed Debug tree shows the full path).
-//      After a crash, the LAST line names the exact stage that was running.
-//      Written with raw Win32 file APIs (CreateFileA/WriteFile) - no CRT
-//      fopen, so strict MSVC deprecation settings can't break the build.
-//   2. DETECT-ONLY MODE (default ON) - polls the XP buff and shows the status
-//      line but never touches speed fields or the cap table.
-//   3. Visible build tag in the UI settles which DLL is running.
+// v8 - pinpoints the crash window (2026-08-11, late): the v7b trace proved
+// the game dies BETWEEN the boost section's first render and the very next
+// per-frame tick ("tick: begin" never appeared). v8 instruments that exact
+// window:
+//   - SpeedTrace() markers between the per-frame feature ticks (wired in
+//     imgui_interface.cpp) and at the end of the ImGui window build, active
+//     for 3 frames after the boost is enabled (bounded volume).
+//   - Stage markers INSIDE the boost section's first render (detect checkbox
+//     / slider / status lines / section complete), so a crash in the new
+//     widgets names the exact widget.
+//   - "tick: entered" at the very top of the tick + the loot-tick block moved
+//     INSIDE the SEH guard (it was the only unguarded part of the tick).
+//   - A "Trace to file" checkbox so the tracer itself can be ruled out (a
+//     freeze - not a crash - could theoretically come from the file I/O).
+// The v6 diagnostics stay: crash tracer (speed_boost_trace.txt), detect-only
+// safe mode (default ON), visible build tag.
 //
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
@@ -121,7 +121,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v7b (2026-08-11)";
+	const char* const BUILD_TAG = "v8 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -135,6 +135,7 @@ namespace Speed
 	int  g_xpBoostPercent = 500;        // default 5x - the live-validated stable value
 	bool g_xpBoostDetectOnly = true;    // SAFE DEFAULT: poll + display only, no speed writes
 	bool g_traceEnabled = true;         // crash tracer -> speed_boost_trace.txt
+	int  g_watchFrames = 0;             // frames of fine-grained tracing after enable
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -161,11 +162,11 @@ namespace Speed
 	}
 
 	// Crash tracer: appends one line per stage/event to speed_boost_trace.txt
-	// (game working directory). Bounded volume: click, first-pass stages, and
-	// buff transitions only - never per-frame spam. After a crash, the LAST
-	// line in the file names the exact stage that was running. Raw Win32 file
-	// APIs only (no CRT fopen) so strict MSVC deprecation settings can't break
-	// the build (C4996 fopen error on the user's machine).
+	// (game working directory). Bounded volume: click, first-pass stages,
+	// watch-window frame markers, and buff transitions only - never per-frame
+	// spam. After a crash, the LAST line in the file names the exact stage
+	// that was running. Raw Win32 file APIs only (no CRT fopen) so strict MSVC
+	// deprecation settings can't break the build (C4996 fopen error).
 	void Trace(const char* stage)
 	{
 		if (!g_traceEnabled)
@@ -439,6 +440,7 @@ namespace Speed
 		{
 			g_firstPassPending = true;  // trace the first tick's stages
 			g_renderLogged = false;     // and the first boost-section render
+			g_watchFrames = 3;          // fine-grained frame markers for 3 frames
 			Trace("click: boost ENABLED");
 		}
 		else
@@ -451,29 +453,32 @@ namespace Speed
 	// Runs every frame (even with the menu closed), like auto-hunt's pass.
 	void ApplyClientSideState()
 	{
-		if (g_fastLootTick)
-		{
-			// Rate-limited re-arm of the brain's 1000 ms tick gate. Zeroing the
-			// timestamp EVERY frame made the brain tick at frame rate (~30-60
-			// loot/attack orders per second) - the server's packet rate limit
-			// disconnected the character. Instead, only re-arm once the chosen
-			// interval has passed since the brain's last real tick.
-			// NOTE: the brain compares DAT_01a5cdb4 against timeGetTime();
-			// GetTickCount shares the same millisecond time base.
-			if (!IsBadReadPtr((const void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)) &&
-				!IsBadWritePtr((void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)))
-			{
-				unsigned long lastTick = *(unsigned long*)HUNT_BRAIN_TICK_GLOBAL;
-				unsigned long now = GetTickCount();
-				if (now - lastTick >= (unsigned long)g_lootTickIntervalMs)
-					*(unsigned long*)HUNT_BRAIN_TICK_GLOBAL = now - 1000;  // make the gate pass
-			}
-		}
-
-		// The whole speed block runs under an SEH guard: a stale client/role
-		// pointer turns into a skipped frame instead of a crashed client.
+		// EVERYTHING runs under an SEH guard: a stale client/role/global pointer
+		// turns into a skipped frame instead of a crashed client. (The loot-tick
+		// block moved inside the guard in v8 - it was the only unguarded part.)
 		__try
 		{
+			if (g_watchFrames > 0) Trace("tick: entered");
+
+			if (g_fastLootTick)
+			{
+				// Rate-limited re-arm of the brain's 1000 ms tick gate. Zeroing the
+				// timestamp EVERY frame made the brain tick at frame rate (~30-60
+				// loot/attack orders per second) - the server's packet rate limit
+				// disconnected the character. Instead, only re-arm once the chosen
+				// interval has passed since the brain's last real tick.
+				// NOTE: the brain compares DAT_01a5cdb4 against timeGetTime();
+				// GetTickCount shares the same millisecond time base.
+				if (!IsBadReadPtr((const void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)) &&
+					!IsBadWritePtr((void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)))
+				{
+					unsigned long lastTick = *(unsigned long*)HUNT_BRAIN_TICK_GLOBAL;
+					unsigned long now = GetTickCount();
+					if (now - lastTick >= (unsigned long)g_lootTickIntervalMs)
+						*(unsigned long*)HUNT_BRAIN_TICK_GLOBAL = now - 1000;  // make the gate pass
+				}
+			}
+
 			bool wantSpeed = g_speedEnabled || g_xpBoostEnabled;
 
 			if (wantSpeed)
@@ -566,6 +571,9 @@ namespace Speed
 			Trace("tick: EXCEPTION caught");
 			g_firstPassPending = false;
 		}
+
+		if (g_watchFrames > 0)
+			g_watchFrames--;
 	}
 
 	// Info line: shows what the live client currently has at the interval
@@ -592,6 +600,15 @@ namespace Speed
 void ApplySpeedClientState()
 {
 	Speed::ApplyClientSideState();
+}
+
+// Called from imgui_interface.cpp between the per-frame feature ticks so the
+// trace names which tick a crash happened in. Only writes during the short
+// watch window right after the boost is enabled (bounded volume).
+void SpeedTrace(const char* stage)
+{
+	if (Speed::g_watchFrames > 0)
+		Speed::Trace(stage);
 }
 
 void RenderSpeedInterface()
@@ -631,18 +648,19 @@ void RenderSpeedInterface()
 
 	if (Speed::g_xpBoostEnabled)
 	{
-		if (!Speed::g_renderLogged)
-		{
-			Speed::g_renderLogged = true;
-			Speed::Trace("render: boost section drawn");
-		}
+		// Stage markers on the FIRST render of the section: if the crash log
+		// stops between two of these, the crashing widget sits between them.
+		bool logStages = !Speed::g_renderLogged;
 
 		ImGui::Checkbox("Detect only (safe test - no speed change)", &Speed::g_xpBoostDetectOnly);
 		if (Speed::g_xpBoostDetectOnly)
 			ImGui::TextDisabled("Detect-only is ON: watches the buff, changes NOTHING.");
+		ImGui::Checkbox("Trace to file (speed_boost_trace.txt)", &Speed::g_traceEnabled);
+		if (logStages) Speed::Trace("render: checkboxes ok");
 
 		ImGui::SliderInt("XP boost speed %", &Speed::g_xpBoostPercent,
 			Speed::MIN_XP_BOOST_PERCENT, Speed::MAX_XP_BOOST_PERCENT);
+		if (logStages) Speed::Trace("render: slider ok");
 
 		if (Speed::g_xpBuffActive)
 		{
@@ -660,6 +678,12 @@ void RenderSpeedInterface()
 		ImGui::TextDisabled("Applies ~0.4s after the buff lands (like your manual timing) and");
 		ImGui::TextDisabled("snaps back to 100% the instant the buff ends - no disconnect.");
 		ImGui::TextDisabled("Start at 500 or less - very high values can be unstable.");
+
+		if (logStages)
+		{
+			Speed::Trace("render: section complete");
+			Speed::g_renderLogged = true;
+		}
 	}
 
 	if ((Speed::g_speedEnabled || Speed::g_xpBoostEnabled) && Speed::g_myRoleAddress == 0)
