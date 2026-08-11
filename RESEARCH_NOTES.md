@@ -98,7 +98,7 @@ the XP skill pops, drag it back to 100% when the buff expires. The feature
 just automates that exact swap — same engine, same fields — plus both sliders
 were raised to 100–2000% so maximum movement speed can be tested.
 
-**Final shape (v5):** one speed engine, two presets. Every frame the tick
+**Final shape (v5+):** one speed engine, two presets. Every frame the tick
 computes `percent` = boost slider while the XP buff is up, else the base
 slider (or stock 100% when only the boost is enabled), and feeds it to the
 identical `WriteSpeedFields` path the base feature uses (same role, same
@@ -106,9 +106,8 @@ fields, same cap table). The buff poll flips the moment the XP skill ends, so
 the snap-back happens the same frame; the next buff re-applies the boost
 value — fully automatic, every cycle. Slider range 100–2000%, **default 500%
 (the user's live-validated stable value)**. A visible **build tag** is
-rendered in the Speed section (`build v5 (2026-08-11)`) so the running DLL
-version can be verified from a screenshot — stale-DLL confusion cost several
-crash rounds.
+rendered in the Speed section so the running DLL version can be verified from
+a screenshot — stale-DLL confusion cost several crash rounds.
 
 **Detection — the client's own status flags, read as RAW MEMORY (no calls):**
 an active XP skill shows up as status flags. The disassembly showed the real
@@ -129,7 +128,7 @@ implementation is just a bitmask lookup, replicated with pure reads:
 - The poll only runs once the character is fully in the game world (the client
   id fields at `+0x268/+0x26C` are non-zero — they are 0 at login).
 
-**Crash saga (user-confirmed: base speed control works, XP boost crashed):**
+**Crash saga (user on build v5, confirmed via the build tag, still crashed on click):**
 
 - **v1 (7973d99) — crashed on enable:** it CALLED the game status checker
   `FUN_00f1a1d8` per frame from the render path. Fixed by v2's pure-read
@@ -138,15 +137,25 @@ implementation is just a bitmask lookup, replicated with pure reads:
   VirtualProtect (cap table) + launched the role-scan thread. Fixed by v3
   (66d803e): checkbox handlers now ONLY flip a flag; all work moved into the
   per-frame tick, which runs under an `__try/__except` SEH guard (and the scan
-  thread body has its own guard) — a stale pointer becomes a skipped frame
-  instead of a crashed client. Full-off transitions restore stock fields and
-  the cap table from the tick (`g_anySpeedWasOn`).
-- **v4 (8e6164a):** default boost lowered 1000 → 500 (the old default pushed
-  10x the instant any buff was active).
-- **v5 (a457b0f):** reframed as the automation of the user's proven manual
-  slider swap; BOTH sliders now run 100–2000%; added the visible build tag.
-  (The repeated "it crashes" reports arrived within minutes of each push —
-  stale DLL suspected; the build tag settles that question.)
+  thread body has its own guard). Full-off transitions restore stock fields
+  and the cap table from the tick (`g_anySpeedWasOn`).
+- **v4 (8e6164a):** default boost lowered 1000 → 500.
+- **v5 (a457b0f):** manual-swap automation framing, both sliders 100–2000%,
+  visible build tag. **User confirmed running v5 — still crashed on click.**
+  Since a flag-only click + SEH-guarded tick cannot crash in analysis, v6
+  instruments the feature to find the real site:
+- **v6 (e92d72b) — investigation kit:**
+  1. **Crash tracer** — every stage (click / tick begin / poll before+after /
+     caps VirtualProtect+written / role write / scan start+result / first
+     render of the boost section / buff ON/OFF transitions / caught
+     exceptions) appends one line to `speed_boost_trace.txt` in the game's
+     working directory (path shown in the Speed Debug tree). After a crash,
+     the LAST line names the exact stage that was running.
+  2. **Detect-only mode (default ON)** — polls the buff and updates the status
+     line but never touches speed fields or the cap table. Bisect protocol:
+     crash with detect-only ON ⇒ the detector/poll is the culprit; crash only
+     after turning detect-only OFF ⇒ the write/cap stage is the culprit; no
+     crash either way ⇒ the earlier crashes were environmental.
 
 **Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):**
 `role+0x48` flag + `role+0x44` divisor (uncapped, supports the full 2000% =
@@ -292,6 +301,7 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `66d803e` | XP speed boost v3: flag-only click handlers + SEH-guarded tick/scan (click-crash fix) |
 | `8e6164a` | XP speed boost v4: same-engine preset swap framing, default 500% (validated ceiling) |
 | `a457b0f` | XP speed boost v5: manual-swap automation, both sliders 100–2000%, visible build tag |
+| `e92d72b` | XP speed boost v6: crash tracer (speed_boost_trace.txt) + default-on detect-only mode |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -447,14 +457,12 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. ~~XP skill speed boost~~ — **done** (2026-08-11, v5 after the crash saga):
-   automates the user's proven manual swap — boost slider while the XP buff is
-   up, stock 100% the frame it ends, re-applied on the next buff; both sliders
-   100–2000% (default 500). Detection = pure-read status bitmask at
-   `client+0x138` (decoded from `FUN_00d4e0ae`; no game-code calls); click
-   handlers only flip a flag, all work runs in the SEH-guarded per-frame tick
-   (scan thread guarded too); in-world gated; visible build tag in the UI.
-   In `speed.cpp`.
+6. **XP skill speed boost — crash investigation in progress (v6):** the feature
+   automates the user's proven manual swap (boost slider while the XP buff is
+   up, stock 100% the frame it ends) with pure-read detection and SEH-guarded
+   tick; v6 adds a crash tracer (`speed_boost_trace.txt` — last line = crashing
+   stage) and a default-on detect-only mode to bisect detector vs writes.
+   Awaiting the user's trace results.
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
