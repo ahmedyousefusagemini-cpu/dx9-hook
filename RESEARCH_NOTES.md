@@ -92,11 +92,8 @@ speed snaps back to 100% automatically (and re-applies on the next buff —
 every cycle).
 
 **Detection — the client's own status flags, read as RAW MEMORY (no calls):**
-an active XP skill shows up as status flags. v1 of this feature **called** the
-game's checker `FUN_00f1a1d8(client, id)` every frame and that **crashed the
-client** (calling into game code from the render path at the wrong moment).
-The disassembly showed the real implementation (`FUN_00d4e0ae`) is just a
-bitmask lookup, so v2 replicates it with pure reads — crash-proof:
+an active XP skill shows up as status flags. The disassembly showed the real
+implementation is just a bitmask lookup, replicated with pure reads:
 
 - `FUN_00f1a1d8(client /*ECX*/, statusId)`: `CMP [EBP+8],0x23F; JA -> 0`, else
   `ADD ECX,0x138; JMP FUN_00f1eacd` → tail `FUN_00d4e0ae` — i.e. the status
@@ -122,7 +119,20 @@ feature is on and restored when all are off). Every frame: poll the XP flags →
 if active write the boost percent, else fall back to the base speed slider
 (or stock 100% when only the boost is enabled). The write is re-asserted each
 frame, so the snap-back happens the very frame the buff ends. The my-role
-scanner is shared with the base speed feature (enabling either one starts it).
+scanner is shared with the base speed feature.
+
+**Crash saga (both fixed):**
+
+- **v1 (7973d99) — crashed on enable:** it CALLED the game status checker
+  `FUN_00f1a1d8` per frame from the render path. Fixed by v2's pure-read
+  bitmask + in-world gate.
+- **v2 (d0462c0) — still crashed on click:** the click handler itself ran
+  VirtualProtect (cap table) + launched the role-scan thread. Fixed by v3
+  (66d803e): checkbox handlers now ONLY flip a flag; all work moved into the
+  per-frame tick, which runs under an `__try/__except` SEH guard (and the scan
+  thread body has its own guard) — a stale pointer becomes a skipped frame
+  instead of a crashed client. Full-off transitions restore stock fields and
+  the cap table from the tick (`g_anySpeedWasOn`).
 
 ---
 
@@ -258,6 +268,7 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `d81c8f0` | auto XP v3: enumerate the learned-magic list, fire all XP-type skills (rotating) |
 | `7973d99` | XP skill speed boost v1 (called the game status checker — CRASHED) |
 | `d0462c0` | XP speed boost v2: pure-read status bitmask at client+0x138, in-world gated |
+| `66d803e` | XP speed boost v3: flag-only click handlers + SEH-guarded tick/scan (click-crash fix) |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -411,11 +422,12 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. ~~XP skill speed boost~~ — **done** (2026-08-11, v2 after a crash fix): poll the
-   XP-buff status flags as a RAW bitmask at `client+0x138` (decoded from
-   `FUN_00d4e0ae`; no game-code calls — v1 called `FUN_00f1a1d8` and crashed);
-   while active write the role speed fields with the boost percent (100–2000%);
-   snap back to 100% on buff end. In-world gated. In `speed.cpp`.
+6. ~~XP skill speed boost~~ — **done** (2026-08-11, v3 after two crash fixes): poll
+   the XP-buff status flags as a RAW bitmask at `client+0x138` (decoded from
+   `FUN_00d4e0ae`; no game-code calls); click handlers only flip a flag, all work
+   runs in the SEH-guarded per-frame tick (scan thread guarded too); in-world
+   gated. While active write the role speed fields with the boost percent
+   (100–2000%); snap back to 100% on buff end. In `speed.cpp`.
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
