@@ -99,26 +99,20 @@ lands → drag the speed slider up → when the buff is consumed, drag it back t
 100% (that's how they avoid the server disconnect). The feature automates
 that exact swap through the identical write path — same engine, same fields.
 
-**Final shape (v7):** one speed engine, two presets. Every frame the tick
+**Final shape (v7+):** one speed engine, two presets. Every frame the tick
 computes `percent` = boost slider while the XP buff is up (after the settle
 delay below), else the base slider (or stock 100% when only the boost is
 enabled), and feeds it to the identical `WriteSpeedFields` path the base
 feature uses (same role, same fields, same cap table). Slider range
 100–2000% on BOTH sliders (the user manually validated 2000%), default 500%.
 
-**v7 key fix — the settle delay:** the user's crash-free manual process never
+**v7 fix — the settle delay:** the user's crash-free manual process never
 applies the high speed in the XP skill's CAST FRAME — a human reacts a few
-hundred ms after the buff lands. The automation applied it the very frame the
-buff appeared (mid cast animation) — the one timing the manual process never
-hits, and the prime suspect for the crashes (a role's cast-state interval
-collapsing at 5–20x while the animation is being set up). The boost now waits
-**400 ms** (`BOOST_APPLY_DELAY_MS`) after the buff appears before applying the
-slider value; the snap-back on buff end stays instant. UI shows three states:
-inactive / "applying in a moment..." / boosting.
+hundred ms after the buff lands. The boost waits **400 ms**
+(`BOOST_APPLY_DELAY_MS`) after the buff appears before applying the slider
+value; the snap-back on buff end stays instant.
 
 **Detection — the client's own status flags, read as RAW MEMORY (no calls):**
-an active XP skill shows up as status flags. The disassembly showed the real
-implementation is just a bitmask lookup, replicated with pure reads:
 
 - `FUN_00f1a1d8(client /*ECX*/, statusId)`: `CMP [EBP+8],0x23F; JA -> 0`, else
   `ADD ECX,0x138; JMP FUN_00f1eacd` → tail `FUN_00d4e0ae` — i.e. the status
@@ -135,40 +129,53 @@ implementation is just a bitmask lookup, replicated with pure reads:
 - The poll only runs once the character is fully in the game world (the client
   id fields at `+0x268/+0x26C` are non-zero — they are 0 at login).
 
-**Crash saga (user on build v5, confirmed via the build tag, still crashed on click):**
+**Crash saga + what the traces proved:**
 
 - **v1 (7973d99) — crashed on enable:** it CALLED the game status checker
   `FUN_00f1a1d8` per frame from the render path. Fixed by v2's pure-read
   bitmask + in-world gate.
 - **v2 (d0462c0) — still crashed on click:** the click handler itself ran
-  VirtualProtect (cap table) + launched the role-scan thread. Fixed by v3
-  (66d803e): checkbox handlers now ONLY flip a flag; all work moved into the
-  per-frame tick, which runs under an `__try/__except` SEH guard (and the scan
-  thread body has its own guard). Full-off transitions restore stock fields
-  and the cap table from the tick (`g_anySpeedWasOn`).
+  VirtualProtect + launched the scan thread. Fixed by v3 (66d803e): flag-only
+  click handlers, all work in the SEH-guarded tick.
 - **v4 (8e6164a):** default boost lowered 1000 → 500.
-- **v5 (a457b0f):** manual-swap automation framing, both sliders 100–2000%,
-  visible build tag. **User confirmed running v5 — still crashed on click.**
-- **v6 (e92d72b) — investigation kit (still current):**
-  1. **Crash tracer** — every stage (click / tick begin / poll before+after /
-     caps VirtualProtect+written / role write / scan start+result / first
-     render of the boost section / buff ON/OFF transitions / caught
-     exceptions) appends one line to `speed_boost_trace.txt` in the game's
-     working directory (path shown in the Speed Debug tree). After a crash,
-     the LAST line names the exact stage that was running.
-  2. **Detect-only mode (default ON)** — polls the buff and updates the status
-     line but never touches speed fields or the cap table. Bisect protocol:
-     crash with detect-only ON ⇒ the detector/poll is the culprit; crash only
-     after turning detect-only OFF ⇒ the write/cap stage is the culprit.
-- **v7 — the settle delay** (the likely real fix once the user clarified the
-  manual process): never apply the boost in the XP skill's cast frame; wait
-  400 ms after the buff appears, exactly like the user's human timing.
+- **v5 (a457b0f):** both sliders 100–2000%, visible build tag. User confirmed
+  running v5 — **still crashed on click**.
+- **v6 (e92d72b):** crash tracer (`speed_boost_trace.txt`) + detect-only safe
+  mode (default ON).
+- **v7/v7b (30f459a / d0fb048):** 400 ms settle delay; tracer moved to Win32
+  file APIs (C4996 `fopen` build fix). **First trace captured:**
+  ```
+  click: boost ENABLED | role=00000000 ... detectOnly=1 scan=0
+  render: boost section drawn
+  ```
+  then NOTHING — no "tick: begin" ever. The game died within one frame of the
+  click; detect-only was ON so NO speed writes happened and no role scan had
+  run. Crash is NOT in the poll/writes/caps.
+- **v8 (b08b00b):** per-stage markers (per-tick `SpeedTrace` markers wired in
+  `imgui_interface.cpp`, per-widget markers in the boost section's first
+  render, "tick: entered" at the tick top, loot block moved inside the SEH
+  guard, trace on/off checkbox). **Second trace captured:**
+  ```
+  click: boost ENABLED | ...
+  render: checkboxes ok
+  render: slider ok
+  ```
+  then NOTHING — the code between "slider ok" and "section complete" is only
+  plain ImGui text lines, which cannot crash. **Conclusion: the trace FILE is
+  being cut off mid-flight (antivirus interference on the rapidly re-opened
+  file) and the real crash happens later, invisibly to the log.**
+- **v9 (53eaa1b) — the crash catcher:** a process-wide
+  `SetUnhandledExceptionFilter` (installed lazily on the first tick) writes
+  `code/addr/accessTarget/eip/esp/ebp` + the module bases of Conquer.exe and
+  the DLL to `speed_boost_crash.txt` the moment ANY unhandled exception kills
+  the client — identifying the crash site by ADDRESS instead of by which log
+  line survived. A `SIGABRT` handler covers CRT assert/abort deaths. The
+  tracer auto-disables after 3 consecutive write failures so AV interference
+  can never stall the render thread.
 
 **Open question for the user:** does "crash" mean the client closes/freezes
 (client-side) or getting kicked back to the login screen (server disconnect)?
-The user reverts to 100% manually specifically to avoid a *disconnect* — if
-the "crash" is actually a disconnect, the write magnitude/timing is the
-suspect, not memory safety.
+The user reverts to 100% manually specifically to avoid a *disconnect*.
 
 **Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):**
 `role+0x48` flag + `role+0x44` divisor (uncapped, supports the full 2000% =
@@ -315,7 +322,10 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `8e6164a` | XP speed boost v4: same-engine preset swap framing, default 500% (validated ceiling) |
 | `a457b0f` | XP speed boost v5: manual-swap automation, both sliders 100–2000%, visible build tag |
 | `e92d72b` | XP speed boost v6: crash tracer (speed_boost_trace.txt) + default-on detect-only mode |
-| `a1c1b2e` | XP speed boost v7: 400 ms settle delay after the buff lands (mimics the crash-free manual timing) |
+| `30f459a` | XP speed boost v7: 400 ms settle delay after the buff lands (manual timing) |
+| `d0fb048` | v7b: tracer moved to Win32 file APIs (C4996 fopen build fix) — trace captured! |
+| `b08b00b` | v8: per-stage markers across the crash window (ticks, sections, widgets); loot block inside the SEH guard; trace toggle |
+| `53eaa1b` | v9: process-wide crash reporter (speed_boost_crash.txt) + SIGABRT handler + tracer auto-disable on write failures |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -474,12 +484,13 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. **XP skill speed boost — v7 shipped:** automates the user's proven manual
-   swap with the same timing (400 ms settle delay after the buff lands, instant
-   snap-back when it ends); both sliders 100–2000%; detection = pure-read
-   status bitmask at `client+0x138`; click handlers flip a flag only; tick is
-   SEH-guarded; crash tracer + detect-only bisect mode remain for diagnosis.
-   Awaiting confirmation (and the crash-vs-disconnect answer) from the user.
+6. **XP skill speed boost — crash investigation (v9):** the v7b/v8 traces
+   proved the log file gets cut off mid-flight (the lines between the last
+   marker and the crash are provably-safe ImGui text). v9 installs a
+   process-wide crash reporter — `speed_boost_crash.txt` captures the
+   exception code, faulting address, EIP/ESP/EBP, and both module bases at
+   the moment of death, so the crash site is identified by address. Awaiting
+   the user's v9 crash line (and the crash-vs-disconnect answer).
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
