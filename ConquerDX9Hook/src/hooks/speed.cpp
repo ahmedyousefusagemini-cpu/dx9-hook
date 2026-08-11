@@ -64,6 +64,8 @@
 //   1. CRASH TRACER - every stage appends one line to speed_boost_trace.txt
 //      (game working directory; the Speed Debug tree shows the full path).
 //      After a crash, the LAST line names the exact stage that was running.
+//      Written with raw Win32 file APIs (CreateFileA/WriteFile) - no CRT
+//      fopen, so strict MSVC deprecation settings can't break the build.
 //   2. DETECT-ONLY MODE (default ON) - polls the XP buff and shows the status
 //      line but never touches speed fields or the cap table.
 //   3. Visible build tag in the UI settles which DLL is running.
@@ -119,7 +121,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v7 (2026-08-11)";
+	const char* const BUILD_TAG = "v7b (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -161,20 +163,30 @@ namespace Speed
 	// Crash tracer: appends one line per stage/event to speed_boost_trace.txt
 	// (game working directory). Bounded volume: click, first-pass stages, and
 	// buff transitions only - never per-frame spam. After a crash, the LAST
-	// line in the file names the exact stage that was running.
+	// line in the file names the exact stage that was running. Raw Win32 file
+	// APIs only (no CRT fopen) so strict MSVC deprecation settings can't break
+	// the build (C4996 fopen error on the user's machine).
 	void Trace(const char* stage)
 	{
 		if (!g_traceEnabled)
 			return;
-		FILE* f = fopen("speed_boost_trace.txt", "a");
-		if (!f)
-			return;
-		fprintf(f, "[%lu] %s | client=%08X role=%08X boost%%=%d active=%d detectOnly=%d scan=%ld\n",
+		char line[256];
+		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+			"[%lu] %s | client=%08X role=%08X boostPct=%d active=%d detectOnly=%d scan=%ld\r\n",
 			(unsigned long)GetTickCount(), stage,
 			(unsigned int)GetClientObject(), (unsigned int)g_myRoleAddress,
 			g_xpBoostPercent, g_xpBuffActive ? 1 : 0, g_xpBoostDetectOnly ? 1 : 0,
-			g_scanState);
-		fclose(f);
+			(long)g_scanState);
+		if (len <= 0)
+			return;
+		HANDLE h = CreateFileA("speed_boost_trace.txt", FILE_APPEND_DATA,
+			FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL, NULL);
+		if (h == INVALID_HANDLE_VALUE)
+			return;
+		DWORD written = 0;
+		WriteFile(h, line, (DWORD)len, &written, NULL);
+		CloseHandle(h);
 	}
 
 	void GetClientIds(int client, unsigned int* idA, unsigned int* idB)
