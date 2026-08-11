@@ -33,13 +33,15 @@
 // disconnected the character (confirmed live). The overlay now re-arms the
 // gate at a controlled rate instead (default 250 ms = 4 ticks/sec).
 //
-// XP skill speed boost (2026-08-11): literally the SAME speed engine as the
-// base control (same WriteSpeedFields, same role, same cap table) - the only
-// difference is WHICH percent is fed in. While an XP skill buff (Superman /
-// Fatal Strike / ...) is active, the boost slider's value (100-2000%) is
-// applied; the moment the buff ends the poll flips and the fields fall back
-// to the base slider (or stock 100% when only the boost is enabled), and the
-// next buff re-applies the boost value - fully automatic, every cycle.
+// XP skill speed boost (2026-08-11): AUTOMATION OF THE USER'S PROVEN MANUAL
+// PROCESS - they hunt at 100%, drag the base slider to 500% when the XP
+// skill pops, and drag it back when the buff expires (no crashes, stable at
+// 500%). The boost does exactly that swap automatically: one speed engine
+// (same WriteSpeedFields, same role, same cap table as the base control),
+// percent = boost slider while the XP buff is up, base slider (or stock 100%
+// when only the boost is enabled) the moment it ends, re-applied on the next
+// buff - fully automatic, every cycle. Both sliders run 100-2000% (user
+// asked to test maximum movement speed while hunting).
 //
 // XP-buff detection is PURE MEMORY READS - no game-code calls. v1 of this
 // feature called the game's status checker FUN_00f1a1d8(client, id) per frame
@@ -60,14 +62,15 @@
 // the click path. All work happens in the per-frame tick, which is wrapped
 // in an SEH guard (and the background scan thread has its own guard), so a
 // stale pointer can never take the client down. The poll is additionally
-// gated on being fully in the game world (ids are 0 at login). The boost
-// default is 500% - the same ceiling the base feature was validated at;
-// values above that are available but may be unstable on some servers.
+// gated on being fully in the game world (ids are 0 at login). A visible
+// build tag is rendered in the Speed section so the running DLL version can
+// always be verified from a screenshot (guards against testing a stale DLL).
 //
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
 // speed-up is client-side: the server may rubber-band movement or drop loot
-// requests at extreme values, so the base slider tops out at 500%.
+// requests at extreme values - 500% is the live-validated stable ceiling;
+// beyond that is test territory.
 // ============================================================================
 
 namespace Speed
@@ -95,12 +98,10 @@ namespace Speed
 	const size_t CLIENT_STATUS_FLAGS_OFFSET = 0x138;  // client+0x138: 64-bit flag array
 	const size_t STATUS_FLAGS_SPAN = 9 * 8;           // ids < 0x240 -> 9 qwords = 72 bytes
 
-	const int MIN_SPEED_PERCENT = 100;  // 100% = normal speed
-	const int MAX_SPEED_PERCENT = 500;  // beyond this the server rubber-bands hard
+	const int MIN_SPEED_PERCENT = 100;   // 100% = normal speed
+	const int MAX_SPEED_PERCENT = 2000;  // user-requested test range (500 = validated ceiling)
 
-	// XP boost slider range (user-requested 20x headroom; the role+0x44 path
-	// is uncapped and the cap table is raised to match for the +0xc0 path).
-	// Default = 500: the same value the base feature was validated at live.
+	// XP boost slider range - same engine, same range as the base slider.
 	const int MIN_XP_BOOST_PERCENT = 100;
 	const int MAX_XP_BOOST_PERCENT = 2000;
 
@@ -109,6 +110,10 @@ namespace Speed
 
 	const uintptr_t IMAGE_BASE = 0x00400000;   // Conquer.exe image base
 	const uintptr_t IMAGE_TOP  = 0x02000000;   // vtable sanity range upper bound
+
+	// Rendered in the UI so the running DLL version is verifiable from a
+	// screenshot (stale-DLL confusion cost us several crash rounds).
+	const char* const BUILD_TAG = "v5 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -119,7 +124,7 @@ namespace Speed
 	bool g_fastLootTick = false;        // re-arm the brain tick gate at a safe rate
 	int  g_lootTickIntervalMs = 250;    // default: brain ticks at most every 250 ms (4/sec)
 	bool g_xpBoostEnabled = false;      // speed up while an XP skill buff is active
-	int  g_xpBoostPercent = 500;        // default 5x while the XP buff runs (proven-stable value)
+	int  g_xpBoostPercent = 500;        // default 5x - the live-validated stable value
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -415,10 +420,10 @@ namespace Speed
 
 			if (wantSpeed)
 			{
-				// ONE speed engine, two presets: the XP boost percent is fed in
-				// while an XP skill buff runs; the moment it ends the base slider
-				// (or stock 100% when only the boost is on) takes over again, and
-				// the next buff re-applies the boost value - every cycle.
+				// Automation of the proven manual swap: the boost slider's value
+				// is fed in while an XP skill buff runs; the moment it ends the
+				// base slider (or stock 100% when only the boost is on) takes over
+				// again, and the next buff re-applies the boost value - every cycle.
 				int percent = MIN_SPEED_PERCENT;
 				if (g_xpBoostEnabled)
 				{
@@ -500,6 +505,7 @@ void ApplySpeedClientState()
 void RenderSpeedInterface()
 {
 	ImGui::Text("Speed Control");
+	ImGui::TextDisabled("build %s", Speed::BUILD_TAG);  // verify the running DLL from a screenshot
 	ImGui::Separator();
 
 	int client = Speed::GetClientObject();
@@ -519,12 +525,13 @@ void RenderSpeedInterface()
 	if (Speed::g_speedEnabled)
 	{
 		ImGui::SliderInt("Action speed %", &Speed::g_speedPercent, Speed::MIN_SPEED_PERCENT, Speed::MAX_SPEED_PERCENT);
-		ImGui::TextDisabled("100 = normal, 200 = 2x. Too high may rubber-band (server check).");
+		ImGui::TextDisabled("100 = normal, 200 = 2x. 500 is the validated stable ceiling;");
+		ImGui::TextDisabled("above that is test territory (rubber-banding / instability).");
 	}
 
 	ImGui::Spacing();
 
-	// XP boost: same speed engine, driven by the XP skill buff automatically.
+	// XP boost: the manual 100% <-> 500% slider swap, automated.
 	bool xpBoost = Speed::g_xpBoostEnabled;
 	if (ImGui::Checkbox("XP skill speed boost", &xpBoost))
 		Speed::SetXpBoostEnabled(xpBoost);
