@@ -1,6 +1,6 @@
 # RE Offsets & Signatures — Conquer.exe (client 7937)
 
-Durable reverse-engineering reference for the auto-hunt / VIP / speed work. **Absolute
+Durable reverse-engineering reference for the auto-hunt / VIP work. **Absolute
 addresses shift on every recompile** — the byte signatures (AOB) and the unique
 string/RTTI anchors below are what let you re-locate each value after a binary
 update.
@@ -26,11 +26,8 @@ Image base for all addresses below: `0x00400000`. Build analyzed: client 7937.
 |---|---|---|
 | Client object | `DAT_01a52960` = `0x01A52960` | read by the client accessor `FUN_0043e481` |
 | CAutoHangUpMgr singleton | `DAT_01a531e0` = `0x01A531E0` | read by the manager accessor `FUN_00482705` |
-| Role/entity list owner singleton | `DAT_01a526bc` = `0x01A526BC` | accessor `FUN_0041f76c` (creator `FUN_0041f8f9`) |
-| Second config singleton | `DAT_01a52980` = `0x01A52980` | accessor `FUN_0043e495` (used by the hunt brain for ini flags) |
-| Hunt brain tick timestamp | `DAT_01a5cdb4` = `0x01A5CDB4` | read+written ONLY by `FUN_00f54058` (xref-verified) — the 1000 ms brain gate |
-| Speed cap table | `0x016F7E44` (13 dwords) | indexed by `role+0xb4` inside `FUN_00deb537` |
-| Mount speed tables | `0x016F7E78` / `0x016F7EAC` (13 dwords each) | mount (type 0x2c9) scaling in `FUN_00deb537` |
+| Main window handle | `DAT_01a5a9cc` = `0x01A5A9CC` | `FUN_00df9561` posts `0x464` game-command messages to it |
+| Main game controller object | `DAT_01a584c0` | `FUN_00c2c6c3` / `FUN_00a1d6bc` use its `+0x2420xxx` fields; HWND at `+0x20` |
 
 ---
 
@@ -104,16 +101,121 @@ Two adjacent getters: `return *(byte*)(mgr+0x11)` then `return *(byte*)(mgr+0x12
 8A 41 11 C3 8A 41 12 C3
 ```
 
+### XP-skill gates ("cannot use XP when hangup" block)
+
+The client refuses XP skills while the hunting state is active with
+`STR_CANNOT_USE_XP_WHEN_HANGUP`. Three gates, all driven by `FUN_0111621f`;
+the overlay patches all three (see `src/hooks/xp_skill.cpp`).
+
+**XP charge-bar fill gate — `FUN_011154f5` @ `0x011154F5`**  
+Adds to the 0-100 XP bar (client `+0xaec`) only when NOT hunting. Callers:
+`FUN_011354b1` (kill tick) and `FUN_00d3fb0f` (projectile complete on self).
+Also refuses to refill while an XP-skill buff status is active
+(`FUN_00f1a1d8(0x96/0xc0/0xeb)`). Patch site `0x01115514`: `75 49` (JNZ
+skip-fill) → `90 90` (NOPs).
+```
+E8 ?? ?? ?? ?? 6A 64 5B 84 C0 75 ?? 68 96 00 00 00
+```
+(`6A 64 5B` = `PUSH 0x64; POP EBX` right after the IsHunting call; `68 96`
+starts the 0x96 status-flag check that follows — the rest of the fill logic
+is unchanged, so those status gates still apply.)
+
+**Use-skill-on-target gate — `FUN_011b1ec9` @ `0x011B1EC9`**  
+If hunting AND the current skill is XP-type (`[FUN_00d9612c(client)+0x30] == 1`),
+shows `STR_CANNOT_USE_XP_WHEN_HANGUP` and bails. Patch site `0x011B21D8`:
+`74 59` (JZ skip-block) → `EB 59` (JMP — block never runs).
+```
+E8 ?? ?? ?? ?? 84 C0 74 ?? 8B 4D B8 E8 ?? ?? ?? ?? 83 78 30 01 75 ?? 68 ?? ?? ?? ??
+```
+(the trailing `68` pushes the string-key address — the anchor to the block.)
+
+**Use-skill-at-position gate — `FUN_011b3503` @ `0x011B3503`**  
+Same block as above. Patch site `0x011B3B21`: `74 4A` (JZ) → `EB 4A` (JMP).
+```
+E8 ?? ?? ?? ?? 84 C0 74 ?? 8B 4D 9C E8 ?? ?? ?? ?? 83 78 30 01 75 ?? 68 ?? ?? ?? ??
+```
+
+**Current-skill accessor — `FUN_00d9612c` @ `0x00D9612C`**  
+`return client + 0x70` — the current-magic-info struct; its `+0x30` dword == 1
+marks an XP-type skill; `+0x5c` is the current magic type id; `+0x10` the
+cooldown ms.
+```
+8D 41 70 C3
+```
+
+### XP-skill auto-activation (auto Superman / Fatal Strike)
+
+How the overlay pops the character's XP skill when the bar is full
+(`src/hooks/xp_skill.cpp`, "Auto XP skill when bar is full").
+
+**XP-skill pseudo magic id — `0x5FDC`**  
+What the XP icon actually fires. The client sends it as-is and the SERVER maps
+it to the character's class XP skill (Superman, Fatal Strike, ...) — which is
+why the icon only lights when the server says the bar is full. Also reachable
+via hotkey command `0x76D` → `FUN_00a1d6bc((0x5FDC << 8), 0x72)`; the skill
+dispatcher special-cases `0x4A6/0x4AB/0x5FDC` to fire at self with no
+learned-magic check.
+
+**XP icon click handler — `FUN_00b811a4` @ `0x00B811A4`**  
+When the icon entry's enabled flag (`entry+0x1c == 1`) is set: plays the
+`"yuanshen_jdt1"` effect (元神 = the XP skill system — a good re-find anchor),
+then `FUN_011b1ec9(0x5FDC, *(client+0x268), 0, 1)`.
+
+**Use-skill-on-target — `FUN_011b1ec9` @ `0x011B1EC9`**  
+The activation entry point. Call signature (verified at the hunt brain, the
+hotkey dispatcher, and the XP icon handler call sites):
+`char __thiscall FUN_011b1ec9(client /*ECX*/, int magicId, int targetUid, int unk /*0*/, int showErr /*1*/)`.
+XP skills are self-cast: `targetUid = *(uint*)(client+0x268)`.
+
+**Learned-magic lookup — `FUN_011a92b4` @ `0x011A92B4`**  
+`void __thiscall FUN_011a92b4(client /*ECX*/, void* out[2], int magicId)`.
+Scans the learned-magic vector (`client+0x1d88` begin / `client+0x1d8c` end,
+8-byte smart-pointer entries). `out[0] != 0` = the character knows the magic;
+`out[1]` is an intrusive refcount block — release it with `FUN_00420f03`.
+NOTE: keyed by the learned-list id space — the dispatcher's current-skill ids
+(`0x2845/0x2B34/0x2B2A/0x2D5A/0x3002/0x323C/0x3DA4`) did NOT match here (the
+v1 auto-XP probing failed in-game). Prefer the `0x5FDC` pseudo id.
+
+**Smart-pointer release — `FUN_00420f03` @ `0x00420F03`**  
+`int __fastcall FUN_00420f03(void* refBlock /*ECX*/)` — decrements the use
+count at `block+4`, virtual-destroys on zero, then the weak count at `block+8`.
+
+**Bar/UID confirmation call site — `FUN_00d3fb0f` @ `0x00D3FB0F`**  
+Projectile-complete tick: when the projectile's target id equals
+`*(client+0x268)` (self), it runs the GreenGlow effect, then
+`FUN_0043e481()` → ECX=client → `FUN_011154f5(1)` and posts
+`FUN_00df9561(0x40f, 0)`. This is the call-site proof that `client+0xaec` is
+the XP bar and `client+0x268` is the own role UID.
+
+**Game-command poster — `FUN_00df9561` @ `0x00DF9561`**  
+`PostMessageA(DAT_01a5a9cc, 0x464, wParam, lParam)`. The XP hotkey
+(`FUN_00a37356` case `0x38b`) posts `0xe65` with `lParam = !IsHunting`.
+The `0x464/0xe65` handler itself is still unlocated — not needed; the direct
+`FUN_011b1ec9(0x5FDC, ...)` call bypasses it.
+
 ### Hunt brain
 
 **Per-frame hunt brain — `FUN_00f54058` @ `0x00F54058`**  
 The client-side auto-hunt loop: gates on `IsHunting`, rate-limits to 1s, then
 finds targets / walks / attacks / loots. Each phase is gated by an
-`AutoHangUpFlag<N>` ini bit and (for jump/loot) a VIP gate.
+`AutoHangUpFlag<N>` ini bit and (for jump/loot) a VIP gate. Uses skills via
+`FUN_011b1ec9(currentSkill+0x5c, *(client+0x268), 0, 1)` /
+`FUN_011b3503(currentSkill+0x5c, x, y, 1)`.
 ```
 6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0
 ```
 Called once per frame from `FUN_01128c86` (the big per-frame updater).
+
+**Skill queue processor — `FUN_011b4477` @ `0x011B4477`**  
+Iterates the client's skill queue (`client+0x1b10` list; entries: `+0x10`
+magic id, `+0x14` active flag, `+0x18` last-used `timeGetTime`), honors the
+current skill's cooldown (`+0x10`), fires via `FUN_011b1ec9`.
+
+**Auto-hunt skill rotation — `FUN_0117ef25` @ `0x0117EF25`**  
+Iterates the configured auto-skill list (`param_1+0x68`; entry `+0x10` = magic
+sort id); per entry: learned lookup `FUN_011a92b4`, cooldown check
+`FUN_011a9744`, then fires the current skill via `FUN_011b1ec9` /
+`FUN_011b3503`. (Lead for overlay-configured hunt skills.)
 
 ### VIP
 
@@ -130,55 +232,12 @@ Returns the VIP level (0–6) from the client object: `client+0x9e4` normally,
 8B 81 F4 57 00 00 C1 E8 0A 24 01 C3
 ```
 
-**VIP feature gates — `FUN_00f3314b` @ `0x00F3314B`, `FUN_00f3316c` @ `0x00F3316C`**  
+**VIP feature gates — `FUN_00f3314b` @ `0x00F3314B`, `FUN_00f3316C` @ `0x00F3316C`**  
 Both return `requiredLevel <= vipLevel` (the auto-hunt jump-search / auto-pick
 gates). Adjacent and identically shaped — tell them apart by order.
 ```
 56 57 8B F9 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 8B CF 8B F0
 ```
-
-### Action interval / speed
-
-**Interval virtual — `FUN_010afd05` @ `0x010AFD05`**
-`CRole`-family virtual: ECX = role, one stack arg (time delta), `RET 4`. Forwards
-to `FUN_00de86b2` unless the override component at `role+0x8f8` handles it.
-⚠️ Observed hooked LIVE (first 5 bytes = `E9 xx xx xx xx` JMP to a trampoline
-page; comes and goes). Prefer data writes over hooking it.
-```
-55 8B EC 56 8B F1 83 BE ?? ?? ?? ?? 00 74 ?? FF 75 08 E8 ?? ?? ?? ?? 85 C0 74
-```
-(`83 BE ?? ?? ?? ?? 00` = `CMP [ESI+0x8F8],0` — the override-component check.)
-
-**Master interval computation — `FUN_00de86b2` @ `0x00DE86B2`**
-Computes the per-action interval for the role's current action (walk/attack/
-pickup; state `role+0xb4` < 0xD): base from `RoleDataQuery()` vtable+0x30, buff
-modifiers, the nSpeedPercent scaler `FUN_00deb537`, then the final generic
-divisor `100 + role+0x44/100` (gated by `role+0x48`). Clamps result to >= 1.
-```
-6A 18 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 8B 8B 70 07 00 00 33 FF 85 C9 0F 84
-```
-(`8B 8B 70 07 00 00` = `MOV ECX,[EBX+0x770]` — the anchor.)
-
-**nSpeedPercent scaler — `FUN_00deb537` @ `0x00DEB537`**
-`interval = interval * 100 / min(100 + role+0xc0, capTable[role+0xb4])`, plus
-mount-table scaling (type 0x2c9) and the ×5/4 transform boost (states 0x78–0x7B).
-Re-find via the string anchor `"nSpeedPercent > 0"` @ `0x016F7EE0` (its only code
-xref is inside this function), or from `FUN_00de86b2` (calls it near the end).
-
-**My-role list match — `FUN_00d3203a` @ `0x00D3203A`** (thunk `FUN_00d3244a`)
-Walks the role list (owner singleton `DAT_01a526bc`, accessor `FUN_0041f76c`) and
-accepts the candidate whose `role+0x54` == `client+0x268`. Re-find from the hunt
-brain `FUN_00f54058` (calls `FUN_00d3244a` right after the `FUN_0041f76c` accessor).
-
-**My-id getter (variant B) — `FUN_00fcd1e8` @ `0x00FCD1E8` → `FUN_0098c58d` @ `0x0098C58D`**
-`CALL FUN_0043e481; MOV ECX,EAX; JMP FUN_0098c58d` → `return *(client+0x26c)`.
-NOTE: reads 0 on at least one private server — prefer the variant-A pair
-(`client+0x268` ↔ `role+0x54`) above.
-
-**Pickup processor — `FUN_00f93854` @ `0x00F93854`** (roleaction.cpp)
-`_COMMAND_PICKUP` state machine on the role: init → walk to the item cell →
-`FUN_00fa252b(0x118, itemId)` picks. Re-find via the assert string
-`"m_Info.cmdProc.iType == _COMMAND_PICKUP"` @ `0x01718928`.
 
 ### Packet / message system (the 0x855 flow)
 
@@ -222,28 +281,16 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 
 | Offset | Type | Meaning |
 |---|---|---|
+| `+0x268` | dword | own role/UID (confirmed at FUN_00d3fb0f: projectile-target == self branch; also the target arg the hunt brain / XP icon handler pass to `FUN_011b1ec9`) |
 | `+0x9e4` | dword | VIP level (FUN_00fd3271 default branch) |
 | `+0x9ec` | dword | VIP level (FUN_00fd3271 alt branch, when the 0x57f4 flag is set) |
+| `+0xaec` | dword | XP charge bar 0–100 (full = 100; read/written by FUN_011154f5; ECX=client confirmed at FUN_00d3fb0f) |
+| `+0x1868` | dword | learned-magic list count (index getter FUN_00fcc707; entry `+0x1c` = magic id) |
+| `+0x1b10` | list | skill queue head (processed by FUN_011b4477) |
+| `+0x1d88`/`+0x1d8c` | ptr | learned-magic vector begin/end (8-byte smart-ptr entries; scanned by FUN_011a92b4) |
 | `+0x1da0` | dword | hunt brain gate — must be 0 (checked by FUN_011ae8b7) |
 | `+0x5385` | byte | auto-battle flag (read by FUN_0111524b) |
 | `+0x57f4` | dword | source of the VIP-field branch flag (FUN_01118b17) |
-| `+0x268` | dword | my entity id (variant A — matched against `role+0x54` in FUN_00d3203a) |
-| `+0x26c` | dword | my entity id (variant B — read by FUN_0098c58d; 0 on some servers) |
-
-### CRole / CMyRole (scan: id match + vtable contains FUN_010afd05/FUN_00de86b2)
-
-| Offset | Type | Meaning |
-|---|---|---|
-| `+0x44` | dword | speed boost in 1/100 % → final divisor `100 + value/100` (ALL actions; gated by `+0x48`) |
-| `+0x48` | byte | enables the `+0x44` divisor when nonzero |
-| `+0x4a` | byte | set to 1 when the computed interval is below base (client-side marker) |
-| `+0x54` | dword | entity id (variant A — the game's own my-role match) |
-| `+0xb4` | dword | action state (< 0xD); indexes the speed cap table |
-| `+0xc0` | dword | nSpeedPercent delta: effective % = 100 + value (FUN_00deb537). Keep > -100! |
-| `+0xf4` | dword | additive speed percent (FUN_00efb7f9 branch) |
-| `+0x268` | dword | entity id (variant B — msg filter FUN_01000e06) |
-| `+0x8f8` | ptr | interval-override component (FUN_010afd05 tail-jumps to its vtable+0x80 when set) |
-| `+0x468..+0x478` | dwords | XOR-obfuscated target/cell coords (pickup processor FUN_00f93854) |
 
 ### CAutoHangUpMgr (from `DAT_01a531e0`, size `0x44`)
 
@@ -256,16 +303,6 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 | `+0x14` | dword | `timeGetTime()` of last toggle (written by FUN_00f2fcd5) |
 | `+0x18`/`+0x1c` | int | hunt anchor X/Y (the brain re-sets these each tick) |
 | `+0x04` | int | hunt radius (the brain re-computes it each tick) |
-
-### Speed cap table contents (client 7937)
-
-`0x016F7E44` — per-state caps (max nSpeedPercent), states 0–12:
-`{100, 105, 110, 115, 120, 130, 140, 150, 165, 185, 190, 195, 200}`
-(state 0 = 100 → the `+0xc0` path alone can't speed it up; raise the table to exceed)
-
-`0x016F7E78` / `0x016F7EAC` — mount scaling (`interval = t1[state] * interval / t2[state]`):
-t1 = `{16,16,16,17,17,18,18,18,18,19,19,20,20}`
-t2 = `{22,22,22,22,22,18,18,18,18,16,16,14,14}`
 
 ---
 
@@ -294,13 +331,14 @@ withholds this packet by default so the server treats kills as normal gameplay.
   VIP4+). Client-side only — server-enforced VIP features (shop, teleport) still fail.
 - **Auto-pick (loot):** a separate VIP4-gated option. Enable it in the client's
   auto-hunt dialog (the VIP spoof unlocks the checkbox).
-- **Speed (client-side):** write `role+0x48=1` + `role+0x44=(pct-100)*100` and
-  `role+0xc0=pct-100` every frame; raise the cap table to lift the +0xc0 clamp.
-  Do NOT hook FUN_010afd05 (the server hooks it itself — seen live as an E9 jmp).
-- **Fast loot tick:** write `DAT_01a5cdb4 = 0` every frame so the hunt brain ticks
-  at frame rate instead of 1/sec.
-- **Find my role:** scan RW memory for a role-id == client-id (pairs above), then
-  require the candidate's vtable to contain FUN_010afd05 or FUN_00de86b2.
+- **XP skills while hunting:** three 2-byte code patches (see "XP-skill gates"
+  above) applied by `xp_skill.cpp`. Server unaffected (0x855 stays withheld).
+- **Auto XP skill (Superman / Fatal Strike):** every frame: if `client+0xaec >= 100`,
+  call `FUN_011b1ec9(client, 0x5FDC, *(client+0x268), 0, 1)` — exactly what
+  clicking the lit XP icon runs (`FUN_00b811a4`). `0x5FDC` is a pseudo id; the
+  server maps it to the character's class XP skill, so no class table or
+  learned-list probing is needed. Fire max 1/s. Requires the XP gates patched
+  (auto-enables them).
 
 ---
 
@@ -315,16 +353,13 @@ Use these to locate the code after an update when signatures fail:
 | `".?AVCDlgAutoHangUp@@"` | `0x019F3648` | the auto-hunt settings dialog |
 | `".?AVCMsgHangUp@@"` | `0x01A46AE8` | the CMsgHangUp message class |
 | `"AutoHangUpIconBtn"` | `0x01646F90` | the auto-hunt toolbar icon handler |
+| `"yuanshen_jdt1"` | (search the string) | the XP icon click handler `FUN_00b811a4` (fires `0x5FDC`) |
 | `"VipLev"` | `0x0163AA70` | VIP-level handling |
 | `"nVipLev >= 0 && nVipLev <= 6"` | `0x016160F8` | dlgvipquery.cpp — confirms VIP range 0–6 |
+| `"STR_CANNOT_USE_XP_WHEN_HANGUP"` | `0x01741FA4` | the two use-skill gates (FUN_011b1ec9 / FUN_011b3503) |
 | `"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %d"` | (search the string) | the message factory `FUN_00f36f4e` |
 | `"CQMain_OnNetMsg"` | (search the string) | the incoming-message → Lua dispatch |
 | `msghangup.cpp` path string | `0x017012F8` | CMsgHangUp source module |
-| `"nSpeedPercent > 0"` | `0x016F7EE0` | the nSpeedPercent scaler `FUN_00deb537` (role.cpp:0x1ae9) |
-| `"m_Info.cmdProc.iType == _COMMAND_PICKUP"` | `0x01718928` | the pickup processor `FUN_00f93854` (roleaction.cpp:0x5e9) |
-| `extend\myrole.cpp` path string | `0x015E3170` | CMyRole methods (FUN_007fd360 / FUN_007e0bb0) |
-| `".?AVCMyRole@@"` | `0x019F2704` | CMyRole RTTI |
-| `".?AVCRole@@"` | `0x01A45320` | CRole RTTI |
 
 ---
 
@@ -335,7 +370,8 @@ Use these to locate the code after an update when signatures fail:
 - [ ] Packet builder contains `B9 55 08 00 00` (`MOV ECX,0x855`).
 - [ ] VIP getter's field offsets match the two dwords it returns.
 - [ ] CMsgHangUp ctor contains `8D B? 08 04 00 00` (`LEA ...,+0x408` buffer).
-- [ ] Interval virtual is the `55 8B EC 56 8B F1 83 BE` prologue (or is E9-hooked live).
-- [ ] Cap table has 13 dwords starting at 100 and ending at 200.
-- [ ] My-role match: candidate's vtable contains the interval virtual or the core fn.
+- [ ] Each XP-skill gate signature matches: fill `6A 64 5B 84 C0 75`, use-skill
+      `84 C0 74 ?? 8B 4D ?? E8 ?? ?? ?? ?? 83 78 30 01`.
+- [ ] XP pseudo id: find the XP icon handler via the `"yuanshen_jdt1"` string
+      xref and take the id it passes to `FUN_011b1ec9` (`0x5FDC` on this build).
 - [ ] Confirm each AOB match is unique before trusting it.
