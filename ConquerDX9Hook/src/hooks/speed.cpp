@@ -136,6 +136,23 @@
 //   the trigger and the mystery is solved; if it still crashes, the next
 //   bisection removes file IO entirely (in-memory ring buffer).
 //
+// v14 (2026-08-12): XP-BUFF FLAG VISIBILITY FIX (verified live). The buff
+//   poll was gated behind the "XP skill move speed" checkbox, so with only
+//   the base speed feature (or nothing) enabled, the debug panel's
+//   "XP buff active" line never updated and sat on "no" even with a buff
+//   running. Chain re-verified against the binary: FUN_00f1a1d8(client, id)
+//   does ADD ECX,0x138 / JMP FUN_00f1eacd -> FUN_00d4e0ae(client+0x138, id)
+//   which tests bit (id & 0x3F) of the 64-bit entry [(id >> 6) * 8] - the
+//   client+0x138 base and the bitmask math below match the game exactly.
+//   Changes:
+//     1) the poll now runs whenever ANY speed feature is enabled, so the
+//        cached flag is always fresh while the overlay is active;
+//     2) the Speed Debug tree reads the flags LIVE on render, so the line
+//        is truthful even with every feature off;
+//     3) a per-flag breakdown shows each of the 8 XP status ids with its
+//        live bit - if the buff is up but all read 0, this server uses a
+//        different status id and one screenshot identifies it.
+//
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
 // speed-up is client-side: the server may rubber-band movement or drop loot
@@ -187,7 +204,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v13 (2026-08-11)";
+	const char* const BUILD_TAG = "v14 (2026-08-12)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -755,10 +772,11 @@ namespace Speed
 				if (g_firstPassPending) Trace("tick: begin");
 				DWORD now = GetTickCount();
 
-				// Poll the XP buff while the move-speed feature is on (pure
-				// memory reads, no game-code calls - see the header comment).
+				// Poll the XP buff whenever ANY speed feature is on (pure memory
+				// reads, no game-code calls - see the header comment). v14: this
+				// used to be gated behind the move-speed checkbox, which left the
+				// debug panel's "XP buff active" line stale on "no".
 				bool buffActive = false;
-				if (g_xpMoveSpeedEnabled)
 				{
 					int client = GetClientObject();
 					if (client != 0)
@@ -775,16 +793,19 @@ namespace Speed
 						else if (g_firstPassPending) Trace("poll: skipped (not in world)");
 					}
 					else if (g_firstPassPending) Trace("poll: skipped (no client)");
-
-					if (buffActive != g_prevBuffActive)
-					{
-						Trace(buffActive ? "buff: ON (settle delay armed)" : "buff: OFF -> 100%");
-						if (buffActive)
-							g_buffActivatedTick = now;
-						g_prevBuffActive = buffActive;
-					}
-					g_xpBuffActive = buffActive;
 				}
+
+				// The settle delay / snap-back edges only drive the move-speed
+				// feature, but the cached flag feeds the debug panel either way -
+				// keep it updated no matter which feature is on.
+				if (buffActive != g_prevBuffActive)
+				{
+					Trace(buffActive ? "buff: ON (settle delay armed)" : "buff: OFF -> 100%");
+					if (buffActive)
+						g_buffActivatedTick = now;
+					g_prevBuffActive = buffActive;
+				}
+				g_xpBuffActive = buffActive;
 
 				SyncSpeedCaps();  // cheap no-op unless a slider changed
 
@@ -989,7 +1010,36 @@ void RenderSpeedInterface()
 			(Speed::g_scanState == 2 ? "done" : "idle"));
 		ImGui::Text("Id matches last scan: %u", Speed::g_scanIdMatches);
 		ImGui::Text("Matched rule: %d (1=A 2=B 3=cross)", Speed::g_matchedRule);
-		ImGui::Text("XP buff active: %s", Speed::g_xpBuffActive ? "yes" : "no");
+
+		// v14: read the status flags LIVE right here. The cached g_xpBuffActive
+		// only refreshes while a speed feature is enabled; the debug line must
+		// be truthful even with everything off (that gating bug is what showed
+		// "no" with a buff running).
+		bool buffLive = false;
+		if (client != 0 && (idA != 0 || idB != 0))
+			buffLive = Speed::IsXpSkillActive(client);
+		ImGui::Text("XP buff active: %s", buffLive ? "yes" : "no");
+
+		// Per-flag breakdown: the live bit of each of the 8 known XP status
+		// ids. If a buff is visibly up but every id reads 0, this server sets
+		// a different status id - a screenshot of this line with the buff on
+		// identifies it.
+		if (client != 0 && (idA != 0 || idB != 0))
+		{
+			ImGui::Text("XP flags:");
+			for (int i = 0; i < (int)_countof(Speed::XP_STATUS_IDS); i++)
+			{
+				unsigned int sid = Speed::XP_STATUS_IDS[i];
+				if (i > 0)
+					ImGui::SameLine();
+				bool on = Speed::IsStatusActive(client, sid);
+				if (on)
+					ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%02X:1", sid);
+				else
+					ImGui::TextDisabled("%02X:0", sid);
+			}
+		}
+
 		if (Speed::g_myRoleAddress != 0 &&
 			!IsBadReadPtr((const void*)Speed::g_myRoleAddress, 4) &&
 			!IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_DELTA_OFFSET), 4))
