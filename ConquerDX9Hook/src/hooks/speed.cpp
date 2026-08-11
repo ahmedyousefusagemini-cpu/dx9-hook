@@ -94,6 +94,29 @@
 //   path too (write +0x44/+0x48 like WriteSpeedFields does) - both paths
 //   scale walk; +0xc0 is the movement-only one.
 //
+// v12 (2026-08-11, night): crash hunt, round 2. The crash needs ZERO writes
+//   (v9 crashed with detect-only ON, no scan, no role) and the base speed
+//   feature (scan + cap raise + field writes + its own slider) is proven
+//   stable - so the trigger lives in what the XP feature ADDS: the status
+//   bitmask poll at client+0x138 (or its probes). Prime suspect: an
+//   anti-cheat HARDWARE READ-WATCHPOINT (debug registers Dr0-Dr3) on the
+//   status-flag array - the game's own reads pass, a read from our module
+//   trips a DELIBERATE null-deref crash at a fixed game address (fits every
+//   symptom: deterministic RVA, accessTarget=0, zero writes needed).
+//   v12 instruments exactly that:
+//     - the crash reporter now also dumps Dr0-Dr3/Dr6/Dr7 (a DR pointing into
+//       client+0x138..+0x180 = watchpoint confirmed) and the crashing thread
+//       id (tells a watchdog/worker thread apart from the render thread),
+//     - a breadcrumb (g_lastStage) + feature-state line goes into the report,
+//     - every trace line now carries the thread id,
+//     - the status poll no longer uses IsBadReadPtr: that API TOUCHES the
+//       page (a read under the hood) and can spring PAGE_GUARD tripwires.
+//       It now VirtualQuery-checks the region (a pure VAD query, no page
+//       contact) and reads under SEH.
+//   If the DR dump confirms the watchpoint, buff detection must move off
+//   client+0x138 entirely (e.g. track the auto-pop + the bar drop at
+//   client+0xaec instead).
+//
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
 // speed-up is client-side: the server may rubber-band movement or drop loot
@@ -145,7 +168,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v11 (2026-08-11)";
+	const char* const BUILD_TAG = "v12 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -178,6 +201,11 @@ namespace Speed
 	bool g_capsRaised = false;
 	unsigned int g_raisedCapValue = 0;          // what the table currently holds
 
+	// Crash breadcrumb: Trace() keeps this pointed at the last stage name, so
+	// the crash reporter can name the stage even when the trace file itself
+	// was silenced. (v12)
+	const char* g_lastStage = "boot";
+
 	// Append raw text to a file in the game's working directory (per-call
 	// open/close - used by the crash reporter, which fires at most once).
 	bool AppendLogLine(const char* fileName, const char* line, int len)
@@ -195,9 +223,12 @@ namespace Speed
 
 	// The crash reporter: runs on ANY unhandled exception, anywhere in the
 	// client (not just our code). Writes the exception code, the faulting
-	// instruction/address, ALL registers, the faulting instruction bytes, and
-	// an EBP frame-chain walk (caller return addresses) + both module bases,
-	// so the crash site can be mapped to an exact function afterwards.
+	// instruction/address, ALL registers, the DEBUG REGISTERS (a Dr0-Dr3
+	// watchpoint inside the status-flag array proves the anti-cheat
+	// read-tripwire theory), the crashing thread id, the faulting instruction
+	// bytes, and an EBP frame-chain walk (caller return addresses) + both
+	// module bases, so the crash site can be mapped to an exact function
+	// afterwards.
 	LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
 	{
 		EXCEPTION_RECORD* er = ep ? ep->ExceptionRecord : NULL;
@@ -218,10 +249,18 @@ namespace Speed
 			(LPCSTR)&CrashFilter, &hSelf);
 
 		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
-			"CRASH code=%08X addr=%08X accessTarget=%08X eip=%08X esp=%08X ebp=%08X game=%08X dll=%08X\r\n",
+			"CRASH code=%08X addr=%08X accessTarget=%08X eip=%08X esp=%08X ebp=%08X game=%08X dll=%08X tid=%lu\r\n",
 			er->ExceptionCode, (DWORD)er->ExceptionAddress, accessTarget,
 			(DWORD)ctx->Eip, (DWORD)ctx->Esp, (DWORD)ctx->Ebp,
-			(DWORD)hGame, (DWORD)hSelf);
+			(DWORD)hGame, (DWORD)hSelf, (unsigned long)GetCurrentThreadId());
+		if (len > 0)
+			AppendLogLine("speed_boost_crash.txt", line, len);
+
+		// The breadcrumb + feature state: which stage the DLL last reached.
+		len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+			"  lastStage=%s moveOn=%d speedOn=%d role=%08X scan=%ld\r\n",
+			g_lastStage, g_xpMoveSpeedEnabled ? 1 : 0, g_speedEnabled ? 1 : 0,
+			(unsigned int)g_myRoleAddress, (long)g_scanState);
 		if (len > 0)
 			AppendLogLine("speed_boost_crash.txt", line, len);
 
@@ -231,6 +270,17 @@ namespace Speed
 			"  regs eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X\r\n",
 			(DWORD)ctx->Eax, (DWORD)ctx->Ebx, (DWORD)ctx->Ecx,
 			(DWORD)ctx->Edx, (DWORD)ctx->Esi, (DWORD)ctx->Edi);
+		if (len > 0)
+			AppendLogLine("speed_boost_crash.txt", line, len);
+
+		// DEBUG REGISTERS (v12): if Dr0-Dr3 holds an address inside the client's
+		// status-flag array (client+0x138 .. +0x180), the anti-cheat armed a
+		// hardware READ-watchpoint on the buff poll and this crash is a
+		// deliberate kill keyed on WHO reads the region.
+		len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+			"  dr0=%08X dr1=%08X dr2=%08X dr3=%08X dr6=%08X dr7=%08X\r\n",
+			(DWORD)ctx->Dr0, (DWORD)ctx->Dr1, (DWORD)ctx->Dr2, (DWORD)ctx->Dr3,
+			(DWORD)ctx->Dr6, (DWORD)ctx->Dr7);
 		if (len > 0)
 			AppendLogLine("speed_boost_crash.txt", line, len);
 
@@ -300,6 +350,7 @@ namespace Speed
 
 	void Trace(const char* stage)
 	{
+		g_lastStage = stage;  // crash breadcrumb updates even when tracing is off
 		if (!g_traceEnabled || g_traceGaveUp)
 			return;
 		if (g_traceFile == NULL)
@@ -318,8 +369,8 @@ namespace Speed
 		}
 		char line[256];
 		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
-			"[%lu] %s | client=%08X role=%08X movePct=%d active=%d scan=%ld\r\n",
-			(unsigned long)GetTickCount(), stage,
+			"[%lu] %s | tid=%lu client=%08X role=%08X movePct=%d active=%d scan=%ld\r\n",
+			(unsigned long)GetTickCount(), stage, (unsigned long)GetCurrentThreadId(),
 			(unsigned int)GetClientObject(), (unsigned int)g_myRoleAddress,
 			g_xpMoveSpeedPercent, g_xpBuffActive ? 1 : 0, (long)g_scanState);
 		if (len <= 0)
@@ -441,17 +492,31 @@ namespace Speed
 	//   FUN_00f1a1d8(client, statusId) -> FUN_00d4e0ae(client+0x138, statusId):
 	// the status flags are a 64-bit bitmask array at client+0x138;
 	// entry = (id >> 6), bit = (id & 0x3F), low word at +0, high word at +4.
+	// v12: NO IsBadReadPtr here - that API TOUCHES the page (a hidden read),
+	// which can spring PAGE_GUARD tripwires and is a classic anti-cheat tell.
+	// VirtualQuery is a pure VAD query (no page contact); the read itself runs
+	// under SEH so a stale client pointer costs one skipped frame, not a crash.
 	bool IsStatusActive(int client, unsigned int statusId)
 	{
 		if (client == 0)
 			return false;
-		if (IsBadReadPtr((const void*)(client + CLIENT_STATUS_FLAGS_OFFSET), STATUS_FLAGS_SPAN))
-			return false;
 		uintptr_t entry = client + CLIENT_STATUS_FLAGS_OFFSET + (statusId >> 6) * 8;
-		unsigned int bit = statusId & 0x3F;
-		if (bit < 32)
-			return ((*(const unsigned int*)entry >> bit) & 1) != 0;
-		return ((*(const unsigned int*)(entry + 4) >> (bit - 32)) & 1) != 0;
+		MEMORY_BASIC_INFORMATION mbi;
+		if (VirtualQuery((const void*)entry, &mbi, sizeof(mbi)) != sizeof(mbi))
+			return false;
+		if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+			return false;
+		__try
+		{
+			unsigned int bit = statusId & 0x3F;
+			if (bit < 32)
+				return ((*(const unsigned int*)entry >> bit) & 1) != 0;
+			return ((*(const unsigned int*)(entry + 4) >> (bit - 32)) & 1) != 0;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
 	}
 
 	// True while any XP-skill buff (Superman / Fatal Strike / ...) is running.
@@ -829,6 +894,8 @@ void RenderSpeedInterface()
 		{
 			ImGui::TextDisabled("XP buff inactive - move speed 100%%");
 		}
+		if (logStages) Speed::Trace("render: status ok");
+
 		ImGui::TextDisabled("Movement only - attacks keep normal speed. Applies ~0.4s after");
 		ImGui::TextDisabled("the buff lands and snaps back to 100% the instant it drops.");
 		if (Speed::g_speedEnabled)
