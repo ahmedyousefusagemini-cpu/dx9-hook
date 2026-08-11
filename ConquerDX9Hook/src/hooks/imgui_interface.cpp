@@ -3,8 +3,6 @@
 
 extern GameWindowInfo g_gameWindow;
 extern bool g_isWireframeEnabled;
-extern bool g_serverNameEnabled;
-extern bool g_serverNameUseRainbow;
 extern void UpdateRainbowColors();
 extern void RenderAutoHuntInterface();
 extern void ApplyAutoHuntClientState();
@@ -58,12 +56,6 @@ void RenderImGuiInterface()
 	ImGui::Spacing();
 	
 	RenderSpeedInterface();
-	
-	ImGui::Spacing();
-	
-	ImGui::Text("String Modifications");
-	ImGui::Separator();
-	ImGui::Checkbox("Server Name Rainbow", &g_serverNameUseRainbow); 
 	
 	ImGui::End();
 }
