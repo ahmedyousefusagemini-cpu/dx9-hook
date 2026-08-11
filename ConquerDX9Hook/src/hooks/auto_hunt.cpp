@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <stdint.h>
+#include <vector>
 #include "imgui.h"
 
 // ============================================================================
@@ -20,6 +21,16 @@
 // FUN_00fd3271 -> client+0x9e4 (or client+0x9ec). The auto-hunt feature gates
 // (jump-search VIP3+, auto-pick VIP4+) just do  requiredLevel <= vipLevel. So
 // forcing the client VIP field to 6 (max) passes every client-side gate.
+//
+// Waypoints / roam (2026-08-11): the character walks between a list of user
+// points and hunts each one, moving on when the area is clear. Built from the
+// brain's own helpers:
+//   - player pos : FUN_00deb082 walks the client's +0x98 chain to the role,
+//                  FUN_01249b80 decodes the obfuscated X/Y (secure ptr) /64.
+//   - walk to x,y: FUN_00f47df3(mgr, x, y, radius)  (__thiscall, ECX=mgr).
+//   - monster?   : FUN_00f42a88(mgr, &pair)  (__thiscall) pair[0]==0 => clear.
+//   - home anchor: mgr+0x20/+0x24 - where the brain returns when there's no
+//                  target; we point it at the current waypoint.
 // ============================================================================
 
 namespace AutoHunt
@@ -28,6 +39,10 @@ namespace AutoHunt
 	const uintptr_t MANAGER_GLOBAL_ADDRESS = 0x01A531E0;  // DAT_01a531e0 - CAutoHangUpMgr*
 	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A52960;  // DAT_01a52960 - client object*
 	const uintptr_t MANAGER_ACCESSOR_FUNC  = 0x00482705;  // FUN_00482705 - get/lazy-create mgr
+
+	// Waypoint primitives (the brain's own helpers).
+	const uintptr_t WALK_FUNC        = 0x00F47DF3;  // FUN_00f47df3(mgr, x, y, radius)
+	const uintptr_t FIND_TARGET_FUNC = 0x00F42A88;  // FUN_00f42a88(mgr, &outPair)
 
 	const size_t CLIENT_AUTO_BATTLE_BYTE_OFFSET = 0x5385;  // client auto-battle byte
 	const size_t CLIENT_HUNT_GATE_OFFSET        = 0x1da0;  // brain gate (FUN_011ae8b7)
@@ -40,6 +55,8 @@ namespace AutoHunt
 	const size_t MANAGER_HUNTING_BYTE_OFFSET = 0x11;  // hunting-active flag
 	const size_t MANAGER_GATE_BYTE_OFFSET    = 0x12;  // per-frame gate byte
 	const size_t MANAGER_TIMESTAMP_OFFSET    = 0x14;  // timeGetTime() of last toggle
+	const size_t MANAGER_ANCHOR_X_OFFSET     = 0x20;  // walk-back/home anchor X
+	const size_t MANAGER_ANCHOR_Y_OFFSET     = 0x24;  // walk-back/home anchor Y
 	const size_t MANAGER_STRUCT_SIZE         = 0x44;
 
 	// User intent - whether the hunt brain should be engaged.
@@ -55,8 +72,27 @@ namespace AutoHunt
 	// the packet is not needed for the overlay to work.
 	bool g_notifyServer = false;
 
+	// === Waypoints (roam between hunt spots) ===
+	struct Waypoint { int x; int y; };
+	std::vector<Waypoint> g_waypoints;
+	bool g_waypointsEnabled = false;
+	int  g_currentWaypoint = 0;
+	int  g_newWaypointX = 0;
+	int  g_newWaypointY = 0;
+	int  g_arrivalThreshold = 4;        // tiles - how close counts as "arrived"
+	int  g_clearedSeconds = 5;          // seconds with no monsters before moving on
+	int  g_travelTimeoutSeconds = 30;   // give up on an unreachable waypoint
+
+	static unsigned long g_lastWaypointTick = 0;
+	static int  g_clearedChecks = 0;
+	static bool g_traveling = false;
+	static unsigned long g_travelStartMs = 0;
+	static int  g_playerX = -1, g_playerY = -1;  // last good read (for the UI)
+
 	typedef void (*ToggleFunc)();
 	typedef int  (*ManagerAccessorFunc)();
+	typedef void (__thiscall* WalkFunc)(void* mgr, int x, int y, int radius);
+	typedef int* (__thiscall* FindTargetFunc)(void* mgr, int* outPair);
 
 	bool IsClientSupported()
 	{
@@ -128,6 +164,151 @@ namespace AutoHunt
 		((ToggleFunc)TOGGLE_HANDLER_ADDRESS)();
 	}
 
+	// Reads the player's tile position. Replicates the game's own read:
+	// FUN_00deb082 walks the client's +0x98 chain to the role, then
+	// FUN_01249b80 decodes the obfuscated X/Y (secure-pointer) into tiles.
+	bool GetPlayerPos(int& outX, int& outY)
+	{
+		outX = -1; outY = -1;
+		int client = GetClientObject();
+		if (!IsClientValid(client))
+			return false;
+
+		// FUN_00deb082: follow +0x98 to the tail node (the role).
+		int role = client;
+		for (int i = 0; i < 64; i++)
+		{
+			if (IsBadReadPtr((const void*)(role + 0x98), 4))
+				return false;
+			int next = *(int*)(role + 0x98);
+			if (next == 0)
+				break;
+			role = next;
+		}
+		if (IsBadReadPtr((const void*)(role + 0x20), 4))
+			return false;
+
+		// FUN_01249b80 decode: X = (*(role[0x20] ^ role[0x1c])) ^ role[0x20], then /64.
+		unsigned int r20 = *(unsigned int*)(role + 0x20);
+		unsigned int r1c = *(unsigned int*)(role + 0x1c);
+		if (r1c != 0)
+		{
+			unsigned int addr = r20 ^ r1c;
+			if (!IsBadReadPtr((const void*)addr, 4))
+				outX = (int)((*(unsigned int*)addr) ^ r20) / 64;
+		}
+
+		// Y = (*(role[0x14] ^ role[0x10])) ^ role[0x14], then /64.
+		unsigned int r14 = *(unsigned int*)(role + 0x14);
+		unsigned int r10 = *(unsigned int*)(role + 0x10);
+		if (r10 != 0)
+		{
+			unsigned int addr = r14 ^ r10;
+			if (!IsBadReadPtr((const void*)addr, 4))
+				outY = (int)((*(unsigned int*)addr) ^ r14) / 64;
+		}
+		return outX >= 0 && outY >= 0;
+	}
+
+	// Points the brain's "return to anchor" movement at (x,y).
+	void SetAnchor(int manager, int x, int y)
+	{
+		if (!IsManagerValid(manager))
+			return;
+		*(int*)(manager + MANAGER_ANCHOR_X_OFFSET) = x;
+		*(int*)(manager + MANAGER_ANCHOR_Y_OFFSET) = y;
+	}
+
+	// The brain's own walk-to-coordinate (FUN_00f47df3). No-op if already moving.
+	void WalkTo(int manager, int x, int y)
+	{
+		if (!IsManagerValid(manager))
+			return;
+		((WalkFunc)WALK_FUNC)((void*)manager, x, y, 4);
+	}
+
+	// True when the brain's target finder (FUN_00f42a88) sees an attackable monster.
+	bool HasMonsterNear(int manager)
+	{
+		if (!IsManagerValid(manager))
+			return false;
+		int pair[2] = { 0, 0 };
+		((FindTargetFunc)FIND_TARGET_FUNC)((void*)manager, pair);
+		return pair[0] != 0;
+	}
+
+	// Drives the character between waypoints. Self rate-limits; called every frame.
+	void UpdateWaypoints()
+	{
+		if (!g_clientSideHunting || !g_waypointsEnabled || g_waypoints.empty())
+		{
+			g_traveling = false;
+			g_clearedChecks = 0;
+			return;
+		}
+
+		unsigned long now = GetTickCount();
+		if (now - g_lastWaypointTick < 400)  // ~2.5 checks/sec
+			return;
+		g_lastWaypointTick = now;
+
+		int manager = GetOrCreateManager();
+		if (!IsManagerValid(manager))
+			return;
+
+		if (g_currentWaypoint < 0 || g_currentWaypoint >= (int)g_waypoints.size())
+			g_currentWaypoint = 0;
+		const Waypoint& wp = g_waypoints[g_currentWaypoint];
+
+		// Anchor the hunt on the current waypoint so the brain returns here.
+		SetAnchor(manager, wp.x, wp.y);
+
+		int px, py;
+		if (GetPlayerPos(px, py)) { g_playerX = px; g_playerY = py; }
+		else { px = g_playerX; py = g_playerY; }
+		if (px < 0 || py < 0)
+			return;
+
+		// Monsters nearby -> let the brain fight them; stay in this area.
+		if (HasMonsterNear(manager))
+		{
+			g_clearedChecks = 0;
+			g_traveling = false;
+			return;
+		}
+
+		// Area is clear. Head for the current waypoint.
+		int dx = px - wp.x; if (dx < 0) dx = -dx;
+		int dy = py - wp.y; if (dy < 0) dy = -dy;
+		int dist = dx > dy ? dx : dy;  // chebyshev
+
+		if (dist > g_arrivalThreshold)
+		{
+			// Not there yet - travel.
+			g_clearedChecks = 0;
+			if (!g_traveling) { g_traveling = true; g_travelStartMs = now; }
+			else if (now - g_travelStartMs > (unsigned long)g_travelTimeoutSeconds * 1000UL)
+			{
+				// Couldn't reach it (blocked?) - skip to the next waypoint.
+				g_traveling = false;
+				g_currentWaypoint = (g_currentWaypoint + 1) % (int)g_waypoints.size();
+				return;
+			}
+			WalkTo(manager, wp.x, wp.y);
+		}
+		else
+		{
+			// Arrived, and the area is clear.
+			g_traveling = false;
+			g_clearedChecks++;
+			if (g_clearedChecks * 400 >= g_clearedSeconds * 1000)
+			{
+				g_clearedChecks = 0;
+				g_currentWaypoint = (g_currentWaypoint + 1) % (int)g_waypoints.size();
+			}
+		}
+	}
+
 	// Runs every frame (even with the menu closed), like the memory scanner's
 	// frozen-value pass. Applies each enabled override independently.
 	void ApplyClientSideState()
@@ -152,6 +333,8 @@ namespace AutoHunt
 				*(int*)(client + CLIENT_VIP_LEVEL_FIELD_B) = g_vipLevel;
 			}
 		}
+
+		UpdateWaypoints();  // self rate-limits
 	}
 
 	void Start()
@@ -235,6 +418,79 @@ void RenderAutoHuntInterface()
 		ImGui::TextDisabled("Real level: %d", AutoHunt::GetVipLevel());
 	}
 
+	// === Roam waypoints ===
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Text("Roam Waypoints");
+	ImGui::Checkbox("Enable##waypoints", &AutoHunt::g_waypointsEnabled);
+	ImGui::SameLine();
+	ImGui::TextDisabled("(move on when no monsters)");
+
+	int curPx, curPy;
+	if (AutoHunt::GetPlayerPos(curPx, curPy))
+		ImGui::Text("Your position: %d, %d", curPx, curPy);
+	else
+		ImGui::TextDisabled("Your position: (enter the game)");
+
+	ImGui::PushItemWidth(90);
+	ImGui::InputInt("X##wp", &AutoHunt::g_newWaypointX);
+	ImGui::SameLine();
+	ImGui::InputInt("Y##wp", &AutoHunt::g_newWaypointY);
+	ImGui::PopItemWidth();
+	if (ImGui::Button("Add point"))
+	{
+		AutoHunt::Waypoint p; p.x = AutoHunt::g_newWaypointX; p.y = AutoHunt::g_newWaypointY;
+		AutoHunt::g_waypoints.push_back(p);
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Add current position"))
+	{
+		if (AutoHunt::GetPlayerPos(curPx, curPy))
+		{
+			AutoHunt::Waypoint p; p.x = curPx; p.y = curPy;
+			AutoHunt::g_waypoints.push_back(p);
+		}
+	}
+
+	if (!AutoHunt::g_waypoints.empty())
+	{
+		ImGui::Text("Points (%d):", (int)AutoHunt::g_waypoints.size());
+		for (int i = 0; i < (int)AutoHunt::g_waypoints.size(); i++)
+		{
+			ImGui::PushID(i);
+			bool isCur = (i == AutoHunt::g_currentWaypoint);
+			if (isCur)
+				ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "-> #%d (%d, %d)", i, AutoHunt::g_waypoints[i].x, AutoHunt::g_waypoints[i].y);
+			else
+				ImGui::Text("   #%d (%d, %d)", i, AutoHunt::g_waypoints[i].x, AutoHunt::g_waypoints[i].y);
+			ImGui::SameLine();
+			if (ImGui::SmallButton("remove"))
+			{
+				AutoHunt::g_waypoints.erase(AutoHunt::g_waypoints.begin() + i);
+				ImGui::PopID();
+				break;
+			}
+			ImGui::PopID();
+		}
+		if (ImGui::SmallButton("Clear all"))
+		{
+			AutoHunt::g_waypoints.clear();
+			AutoHunt::g_currentWaypoint = 0;
+		}
+
+		ImGui::SliderInt("Arrive within (tiles)", &AutoHunt::g_arrivalThreshold, 1, 12);
+		ImGui::SliderInt("Move on after clear (sec)", &AutoHunt::g_clearedSeconds, 1, 60);
+		ImGui::SliderInt("Travel timeout (sec)", &AutoHunt::g_travelTimeoutSeconds, 5, 120);
+
+		if (AutoHunt::g_waypointsEnabled && AutoHunt::g_clientSideHunting)
+		{
+			const AutoHunt::Waypoint& wp = AutoHunt::g_waypoints[AutoHunt::g_currentWaypoint];
+			ImGui::Text("Target: #%d (%d, %d)", AutoHunt::g_currentWaypoint, wp.x, wp.y);
+			ImGui::SameLine();
+			ImGui::TextDisabled(AutoHunt::g_traveling ? "(traveling)" : "(here)");
+		}
+	}
+
 	if (ImGui::TreeNode("Auto Hunt Debug"))
 	{
 		int client = AutoHunt::GetClientObject();
@@ -256,6 +512,12 @@ void RenderAutoHuntInterface()
 				(unsigned int)*(unsigned int*)(client + AutoHunt::CLIENT_HUNT_GATE_OFFSET));
 		}
 
+		int px, py;
+		if (AutoHunt::GetPlayerPos(px, py))
+			ImGui::Text("Player pos (decoded): %d, %d", px, py);
+		else
+			ImGui::TextDisabled("Player pos: (unavailable)");
+
 		ImGui::Text("Manager: 0x%08X", (unsigned int)manager);
 
 		if (manager && !IsBadReadPtr((const void*)manager, AutoHunt::MANAGER_STRUCT_SIZE))
@@ -264,10 +526,13 @@ void RenderAutoHuntInterface()
 			unsigned char huntingByte = *(unsigned char*)(manager + AutoHunt::MANAGER_HUNTING_BYTE_OFFSET);
 			unsigned char gateByte = *(unsigned char*)(manager + AutoHunt::MANAGER_GATE_BYTE_OFFSET);
 			unsigned long timestamp = *(unsigned long*)(manager + AutoHunt::MANAGER_TIMESTAMP_OFFSET);
+			int anchorX = *(int*)(manager + AutoHunt::MANAGER_ANCHOR_X_OFFSET);
+			int anchorY = *(int*)(manager + AutoHunt::MANAGER_ANCHOR_Y_OFFSET);
 
 			ImGui::Text("State word (mgr+0x10): 0x%03X", (unsigned int)stateWord);
 			ImGui::Text("Hunting byte (mgr+0x11): %u", (unsigned int)huntingByte);
 			ImGui::Text("Gate byte (mgr+0x12): %u", (unsigned int)gateByte);
+			ImGui::Text("Anchor (mgr+0x20/0x24): %d, %d", anchorX, anchorY);
 			ImGui::Text("Last toggle (mgr+0x14): %lu", timestamp);
 		}
 
