@@ -111,8 +111,8 @@ high 32 bits at `entry+4`); ids < `0x240` → 9 qwords = 72 bytes.
 **The overlay reads the bitmask directly — no game-code calls** (calling
 `FUN_00f1a1d8` from the render path crashed the client). XP-buff flag ids:
 `0x96/0xC0/0xEB` (bar fill `FUN_011154f5`) and `0x5C/0x79/0x78/0x92/0x9F/
-0xC0/0xEB` (XP dispatcher `FUN_00a1d6bc`) — union polled for the XP speed
-boost: `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`.
+0xC0/0xEB` (XP dispatcher `FUN_00a1d6bc`) — union polled for the XP move
+speed feature: `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`.
 
 ### XP-skill gates ("cannot use XP when hangup" block)
 
@@ -287,7 +287,7 @@ Transmits the built message. This is vtable[5] — the method the toggle calls.
 **Message factory — `FUN_00f36f4e` @ `0x00F36F4E` (`CNetMsg::CreateNetMsg`)**  
 Giant switch mapping packet type → message ctor (`case 0x855` → `FUN_00e5e50d`).
 Too large to signature reliably — re-find via the anchor string
-`"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %d"`.
+`"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %s"`.
 
 **Incoming dispatch → Lua — `FUN_0103ef3e` @ `0x0103EF3E` → `FUN_00ba2d7b` → `FUN_00c3c2d0`**  
 Incoming packets are created via the factory, then routed to the Lua handler
@@ -372,15 +372,17 @@ withholds this packet by default so the server treats kills as normal gameplay.
   clicking the lit XP icon runs (`FUN_00b811a4`). One pop per fill (latch until
   the bar drops, 5s retry), rotating round-robin through the fire list.
   Requires the XP gates patched (auto-enables them).
-- **XP speed boost:** every frame, once in-world, read the status bitmask at
-  `client+0x138` directly (NO game calls — calling the checker crashed the
-  client): bit test the XP ids `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`;
-  while any is set write `role+0x48=1`, `role+0x44=(boost%-100)*100`,
-  `role+0xc0=boost%-100` (cap table `0x016F7E44` raised to the boost value,
-  restored when all speed features are off). When the buff ends the fields
-  snap back to stock 100% (or the base speed slider when that's also on).
-  Same hookless role-field mechanism + my-role scanner as the base speed
-  control (`speed.cpp`).
+- **XP move speed (v11 redesign):** every frame, once in-world, read the
+  status bitmask at `client+0x138` directly (NO game calls — calling the
+  checker crashed the client): bit test the XP ids
+  `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`; while any is set (and the 400 ms
+  settle delay has passed) write `role+0xc0 = movePct-100` ONLY — the movement
+  path — forcing `role+0x48=0` / `role+0x44=0` so attack/pickup speed stays
+  stock (cap table `0x016F7E44` raised to the custom value, restored when all
+  speed features are off). While no buff is up the fields are forced to stock
+  100% every frame; the base speed slider is ignored while this feature is
+  enabled. Same hookless role-field mechanism + my-role scanner as the base
+  speed control (`speed.cpp`).
 
 ---
 
@@ -400,7 +402,7 @@ Use these to locate the code after an update when signatures fail:
 | `"VipLev"` | `0x0163AA70` | VIP-level handling |
 | `"nVipLev >= 0 && nVipLev <= 6"` | `0x016160F8` | dlgvipquery.cpp — confirms VIP range 0–6 |
 | `"STR_CANNOT_USE_XP_WHEN_HANGUP"` | `0x01741FA4` | the two use-skill gates (FUN_011b1ec9 / FUN_011b3503) |
-| `"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %d"` | (search the string) | the message factory `FUN_00f36f4e` |
+| `"CNetMsg::CreateNetMsg Miss MsgType:%d at %s, %s"` | (search the string) | the message factory `FUN_00f36f4e` |
 | `"CQMain_OnNetMsg"` | (search the string) | the incoming-message → Lua dispatch |
 | `msghangup.cpp` path string | `0x017012F8` | CMsgHangUp source module |
 
