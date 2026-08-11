@@ -5,13 +5,11 @@
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "libMinHook.x86.lib")
 
-extern std::vector<StringConfiguration> g_itemStringConfigurations;
 extern GameWindowInfo g_gameWindow;
 extern EndSceneFunc g_originalEndSceneFunction;
 extern ResetFunc g_originalResetFunction;
 extern LPVOID g_originalEndSceneAddress;
 extern LPVOID g_originalResetAddress;
-extern void InstallGetKeyboardStateHook();
 extern void InstallDrawIndexedPrimitiveHook();
 extern void InstallShowStringExHook();
 extern uintptr_t FindMemoryPattern(uintptr_t startAddress, size_t searchLength, const std::vector<int>& pattern);
@@ -86,8 +84,6 @@ void HookInitializationThread()
 	MH_EnableHook(g_originalEndSceneAddress);
 	MH_EnableHook(g_originalResetAddress);
 	
-	InstallGetKeyboardStateHook();
-	
 	while (!g_gameWindow.direct3DDevice) 
 	{
 		Sleep(100);
@@ -118,8 +114,6 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 	case DLL_PROCESS_ATTACH:
 	
 		DisableThreadLibraryCalls(moduleHandle);
-
-		g_itemStringConfigurations.push_back(StringConfiguration("WhiteDye")); /// itens blackground/strings edit
 
 		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)HookInitializationThread, NULL, 0, NULL);
 		break;
