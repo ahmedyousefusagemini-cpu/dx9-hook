@@ -18,27 +18,31 @@
 //        JZ @ 0x011B3B21: 74 4A -> EB 4A.
 //
 // 2) "Auto XP skill when bar is full" - pops the character's XP skill
-//    (Superman / Fatal Strike / any class XP skill) automatically:
-//      - XP bar value: *(uint*)(client + 0xaec); full at 100 (FUN_011154f5
-//        clamps to 100 and treats 99 < bar as full).
-//      - Which skill: FUN_011a92b4(client, &out, magicId) is the client's own
-//        learned-magic lookup (scans the vector at client+0x1d88..+0x1d8c).
-//        out[0] != 0 = learned; out[1] is an intrusive refcount block released
-//        with FUN_00420f03 (__fastcall, ECX = block).
-//      - The XP-skill hotkey dispatcher (FUN_00a1d6bc) knows exactly seven
-//        self-cast XP skill ids - it compares the current skill's +0x5c field
-//        against each and fires the match at the self UID:
-//          0x2845, 0x2B34, 0x2B2A, 0x2D5A, 0x3002, 0x323C, 0x3DA4
-//        We probe them with the lookup and use the first the character knows,
-//        so every class (warrior Superman, trojan Fatal Strike, ...) works
-//        with no hardcoded per-class table.
-//      - Activation mirrors the dispatcher / hunt brain (FUN_00f54058) call:
-//          FUN_011b1ec9  __thiscall(ECX = client, magicId, selfUid, 0, 1)
-//        with selfUid = *(uint*)(client + 0x268).
+//    (Superman / Fatal Strike / any class) automatically.
 //
-//    The use-skill gates above are already patched by (1), so the pop works
-//    while hunting. Server unaffected: the 0x855 packet stays withheld, so
-//    the XP pop is treated as normal gameplay.
+//    The activation mirrors EXACTLY what clicking the lit XP icon does
+//    (FUN_00b811a4 = the XP icon click handler; it plays the "yuanshen_jdt1"
+//    effect - yuanshen = the XP skill system - then fires):
+//
+//        FUN_011b1ec9  __thiscall(ECX = client, 0x5FDC, selfUid, 0, 1)
+//
+//    0x5FDC is a generic XP-skill PSEUDO magic id: the client sends it as-is
+//    and the SERVER maps it to the character's actual XP skill - which is why
+//    the icon is only enabled when the server says the bar is full. No
+//    per-class id table or learned-magic probing is needed (the v1 probing
+//    approach never matched - those dispatcher ids are not in the
+//    learned-list key space). The same pseudo id appears in the hotkey flow:
+//    hotkey command 0x76D -> FUN_00a1d6bc((0x5FDC << 8), 0x72), and the
+//    dispatcher special-cases 0x4A6/0x4AB/0x5FDC to fire at self directly.
+//
+//    - XP bar value: *(uint*)(client + 0xaec); full at 100 (FUN_011154f5
+//      clamps to 100 and treats 99 < bar as full).
+//    - selfUid = *(uint*)(client + 0x268) (confirmed at FUN_00d3fb0f).
+//    - The use-skill gates above are already patched by (1), and note the
+//      FUN_011b1ec9 gate reads the CURRENT skill's +0x30 (the attack skill
+//      while hunting), so the pop works during auto-hunt either way.
+//    - Server unaffected: the 0x855 packet stays withheld, so the XP pop is
+//      treated as normal gameplay.
 // ============================================================================
 
 namespace XpSkill
@@ -52,17 +56,16 @@ namespace XpSkill
 	const uintptr_t CLIENT_GLOBAL_ADDRESS    = 0x01A52960;  // DAT_01a52960 - client object*
 	const uintptr_t MANAGER_GLOBAL_ADDRESS   = 0x01A531E0;  // DAT_01a531e0 - CAutoHangUpMgr*
 	const uintptr_t USE_SKILL_ON_TARGET_FUNC = 0x011B1EC9;  // FUN_011b1ec9
-	const uintptr_t MAGIC_LOOKUP_FUNC        = 0x011A92B4;  // FUN_011a92b4
-	const uintptr_t REF_RELEASE_FUNC         = 0x00420F03;  // FUN_00420f03
 
 	const size_t CLIENT_XP_BAR_OFFSET          = 0xaec;   // 0-100, full at 100
 	const size_t CLIENT_SELF_UID_OFFSET        = 0x268;   // own role/UID
 	const size_t CLIENT_AUTO_BATTLE_BYTE_OFFSET = 0x5385; // auto-battle flag
 	const size_t MANAGER_HUNTING_BYTE_OFFSET   = 0x11;    // hunting-active flag
 
-	// The seven self-cast XP skill ids from the hotkey dispatcher FUN_00a1d6bc.
-	const unsigned int XP_SKILL_IDS[] =
-		{ 0x2845, 0x2B34, 0x2B2A, 0x2D5A, 0x3002, 0x323C, 0x3DA4 };
+	// The generic XP-skill pseudo magic id the XP icon click handler
+	// (FUN_00b811a4) fires. The server maps it to Superman / Fatal Strike /
+	// whatever the character's class XP skill is.
+	const unsigned int XP_PSEUDO_MAGIC_ID = 0x5FDC;
 
 	struct BytePatch
 	{
@@ -85,11 +88,9 @@ namespace XpSkill
 	// Auto-activation state.
 	bool g_autoXpSkill = false;
 	bool g_autoXpOnlyWhileHunting = true;   // default: pop during auto-hunt only
-	unsigned int g_detectedXpSkillId = 0;   // cached result of the learned-magic scan
-	DWORD g_lastDetectScan = 0;
 	DWORD g_lastFireAttempt = 0;
-	const DWORD DETECT_INTERVAL_MS = 3000;  // re-scan learned magics slowly
-	const DWORD FIRE_INTERVAL_MS   = 1000;  // same cadence as the hunt brain tick
+	unsigned long g_fireCount = 0;          // how many times we sent the pop
+	const DWORD FIRE_INTERVAL_MS = 1000;    // same cadence as the hunt brain tick
 
 	// Same idea as AutoHunt::IsClientSupported - never write into an unknown
 	// build: every site must still hold its original bytes.
@@ -188,54 +189,9 @@ namespace XpSkill
 		return *(unsigned int*)(client + CLIENT_SELF_UID_OFFSET);
 	}
 
-	// The client's own learned-magic lookup:
-	//   void __thiscall FUN_011a92b4(client, CSmartPtr out[2], int magicId)
-	// out[0] != 0 means the character knows the magic; out[1] is a refcount
-	// block that must be released with FUN_00420f03 (__fastcall, ECX = block).
-	bool HasMagic(int client, unsigned int magicId)
-	{
-		if (IsBadReadPtr((const void*)MAGIC_LOOKUP_FUNC, 1))
-			return false;
-
-		void* result[2] = { 0, 0 };
-		uintptr_t lookupFunc = MAGIC_LOOKUP_FUNC;
-		__asm
-		{
-			push magicId
-			lea  eax, result
-			push eax
-			mov  ecx, client
-			call lookupFunc
-		}
-
-		bool known = (result[0] != 0);
-		if (result[1] != 0)
-		{
-			void* refBlock = result[1];
-			uintptr_t releaseFunc = REF_RELEASE_FUNC;
-			__asm
-			{
-				mov  ecx, refBlock
-				call releaseFunc
-			}
-		}
-		return known;
-	}
-
-	// First XP skill the character has learned, or 0.
-	unsigned int DetectXpSkill(int client)
-	{
-		for (int i = 0; i < _countof(XP_SKILL_IDS); i++)
-		{
-			if (HasMagic(client, XP_SKILL_IDS[i]))
-				return XP_SKILL_IDS[i];
-		}
-		return 0;
-	}
-
-	// Exactly what the dispatcher and the hunt brain run:
-	//   FUN_011b1ec9 __thiscall(ECX = client, magicId, targetUid, 0, 1)
-	void FireXpSkill(int client, unsigned int magicId)
+	// Exactly what clicking the lit XP icon runs (FUN_00b811a4):
+	//   FUN_011b1ec9 __thiscall(ECX = client, 0x5FDC, selfUid, 0, 1)
+	void FireXpSkill(int client)
 	{
 		unsigned int selfUid = GetSelfUid(client);
 		if (selfUid == 0)
@@ -246,25 +202,25 @@ namespace XpSkill
 		uintptr_t useSkillFunc = USE_SKILL_ON_TARGET_FUNC;
 		__asm
 		{
-			push 1            // show-error flag (client's own XP call passes 1)
+			push 1            // show-error flag (the icon handler passes 1)
 			push 0
 			push selfUid
-			push magicId
+			push 0x5FDC       // XP_PSEUDO_MAGIC_ID
 			mov  ecx, client
 			call useSkillFunc
 		}
 	}
 
 	// Per-frame driver (runs from HookedEndScene = the game's own thread, like
-	// the auto-hunt state assertion). Fires the detected XP skill the moment
-	// the bar reads full; the server then resets the bar, which throttles the
-	// next pop naturally.
+	// the auto-hunt state assertion). Pops the XP skill the moment the bar
+	// reads full; the server then resets the bar, which throttles the next
+	// pop naturally.
 	void AutoXpTick()
 	{
 		if (!g_autoXpSkill)
 			return;
 
-		// Same-build proof: the function addresses only get called when the
+		// Same-build proof: the function address only gets called when the
 		// gate-patch bytes match this build (or are already applied).
 		if (!g_patchesApplied && !IsClientSupported())
 		{
@@ -279,25 +235,16 @@ namespace XpSkill
 		if (g_autoXpOnlyWhileHunting && !IsHunting())
 			return;
 
-		DWORD now = GetTickCount();
-
-		// Re-scan slowly: cheap, and picks up relogs / class changes.
-		if (now - g_lastDetectScan >= DETECT_INTERVAL_MS)
-		{
-			g_lastDetectScan = now;
-			g_detectedXpSkillId = DetectXpSkill(client);
-		}
-		if (g_detectedXpSkillId == 0)
-			return;
-
 		if (GetXpBarValue(client) < 100)
 			return;
 
+		DWORD now = GetTickCount();
 		if (now - g_lastFireAttempt < FIRE_INTERVAL_MS)
 			return;
 		g_lastFireAttempt = now;
 
-		FireXpSkill(client, g_detectedXpSkillId);
+		FireXpSkill(client);
+		g_fireCount++;
 	}
 }
 
@@ -341,7 +288,7 @@ void RenderXpSkillInterface()
 		}
 		else
 		{
-			XpSkill::g_detectedXpSkillId = 0;
+			XpSkill::g_fireCount = 0;
 		}
 	}
 
@@ -353,10 +300,7 @@ void RenderXpSkillInterface()
 		if (XpSkill::IsClientValid(client))
 		{
 			ImGui::Text("XP bar: %u / 100", XpSkill::GetXpBarValue(client));
-			if (XpSkill::g_detectedXpSkillId != 0)
-				ImGui::Text("XP skill: 0x%04X (auto-detected)", XpSkill::g_detectedXpSkillId);
-			else
-				ImGui::TextDisabled("XP skill: scanning...");
+			ImGui::Text("XP pops sent: %lu", XpSkill::g_fireCount);
 		}
 	}
 
