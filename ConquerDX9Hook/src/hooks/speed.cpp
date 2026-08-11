@@ -52,6 +52,13 @@
 // dispatcher FUN_00a1d6bc skips re-casting while 0x5C/0x79/0x78/0x92/0x9F/
 // 0xC0/0xEB are up. Union = the 8 ids polled below.
 //
+// Crash hardening (2026-08-11, after "crashes when I click it"): the checkbox
+// handlers now ONLY flip a flag - no scans, no VirtualProtect, no writes on
+// the click path. All work happens in the per-frame tick, which is wrapped
+// in an SEH guard (and the background scan thread has its own guard), so a
+// stale pointer can never take the client down. The poll is additionally
+// gated on being fully in the game world (ids are 0 at login).
+//
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
 // speed-up is client-side: the server may rubber-band movement or drop loot
@@ -116,6 +123,7 @@ namespace Speed
 	volatile int g_matchedRule = 0;             // which id rule hit (0 none, 1 A, 2 B, 3 cross)
 	volatile int g_vtableHasIntervalFn = 0;     // candidate's vtable passed the class check
 	bool g_xpBuffActive = false;                // last status poll (for the UI)
+	bool g_anySpeedWasOn = false;               // last frame's wantSpeed (off-transition restore)
 	unsigned int g_originalCaps[13] = {0};      // saved SPEED_CAP_TABLE contents
 	bool g_capsRaised = false;
 	unsigned int g_raisedCapValue = 0;          // what the table currently holds
@@ -274,15 +282,16 @@ namespace Speed
 
 	// Background scan: walk committed writable regions looking for the role
 	// whose +0x268 dword equals my entity id. Same VirtualQuery pattern as the
-	// memory scanner, but targeted at one dword so it's quick.
-	DWORD WINAPI FindMyRoleThread(LPVOID)
+	// memory scanner, but targeted at one dword so it's quick. The body runs
+	// under an SEH guard so a bad region can never take the client down.
+	void ScanBody()
 	{
 		unsigned int idA = 0, idB = 0;
 		GetClientIds(GetClientObject(), &idA, &idB);
 		if (idA == 0 && idB == 0)
 		{
 			g_scanState = 2;
-			return 0;
+			return;
 		}
 
 		uintptr_t address = 0x10000;
@@ -321,12 +330,24 @@ namespace Speed
 					g_matchedRule = rule;
 					g_myRoleAddress = p;
 					g_scanState = 2;
-					return 0;
+					return;
 				}
 			}
 			address = end;
 		}
 		g_scanState = 2;  // done (not found)
+	}
+
+	DWORD WINAPI FindMyRoleThread(LPVOID)
+	{
+		__try
+		{
+			ScanBody();
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			g_scanState = 2;  // scan died on a bad region - just give up
+		}
 		return 0;
 	}
 
@@ -343,30 +364,19 @@ namespace Speed
 		CreateThread(NULL, 0, FindMyRoleThread, NULL, 0, NULL);
 	}
 
+	// Click handlers only flip the flag - every real action (cap table, role
+	// scan, field writes) happens in the SEH-guarded per-frame tick, so
+	// clicking a checkbox can never crash the client.
 	void SetSpeedEnabled(bool enabled)
 	{
-		if (!enabled && !g_xpBoostEnabled && IsMyRoleWritable(g_myRoleAddress))
-			WriteSpeedFields(g_myRoleAddress, MIN_SPEED_PERCENT);  // restore stock
-
 		g_speedEnabled = enabled;
-		SyncSpeedCaps();
-
-		if (enabled && g_myRoleAddress == 0)
-			StartRoleScan();
 	}
 
 	void SetXpBoostEnabled(bool enabled)
 	{
-		if (!enabled && !g_speedEnabled && IsMyRoleWritable(g_myRoleAddress))
-			WriteSpeedFields(g_myRoleAddress, MIN_SPEED_PERCENT);  // restore stock
-
 		g_xpBoostEnabled = enabled;
 		if (!enabled)
 			g_xpBuffActive = false;
-		SyncSpeedCaps();
-
-		if (enabled && g_myRoleAddress == 0)
-			StartRoleScan();
 	}
 
 	// Runs every frame (even with the menu closed), like auto-hunt's pass.
@@ -391,49 +401,67 @@ namespace Speed
 			}
 		}
 
-		if (g_speedEnabled || g_xpBoostEnabled)
+		// The whole speed block runs under an SEH guard: a stale client/role
+		// pointer turns into a skipped frame instead of a crashed client.
+		__try
 		{
-			// Effective speed this frame: the XP boost wins while an XP skill buff
-			// is running; otherwise the base slider (or stock when only the boost
-			// is enabled and no buff is up - that is what snaps movement back to
-			// 100% the moment the XP skill ends).
-			int percent = MIN_SPEED_PERCENT;
-			if (g_xpBoostEnabled)
+			bool wantSpeed = g_speedEnabled || g_xpBoostEnabled;
+
+			if (wantSpeed)
 			{
-				int client = GetClientObject();
-				bool active = false;
-				if (client != 0)
+				// Effective speed this frame: the XP boost wins while an XP skill
+				// buff is running; otherwise the base slider (or stock when only
+				// the boost is enabled and no buff is up - that is what snaps
+				// movement back to 100% the moment the XP skill ends).
+				int percent = MIN_SPEED_PERCENT;
+				if (g_xpBoostEnabled)
 				{
-					// Only poll once fully in the game world (ids are 0 at login).
-					unsigned int idA = 0, idB = 0;
-					GetClientIds(client, &idA, &idB);
-					if (idA != 0 || idB != 0)
-						active = IsXpSkillActive(client);
+					int client = GetClientObject();
+					bool active = false;
+					if (client != 0)
+					{
+						// Only poll once fully in the game world (ids are 0 at login).
+						unsigned int idA = 0, idB = 0;
+						GetClientIds(client, &idA, &idB);
+						if (idA != 0 || idB != 0)
+							active = IsXpSkillActive(client);
+					}
+					g_xpBuffActive = active;
+					if (active)
+						percent = g_xpBoostPercent;
 				}
-				g_xpBuffActive = active;
-				if (active)
-					percent = g_xpBoostPercent;
-			}
-			if (percent == MIN_SPEED_PERCENT && g_speedEnabled)
-				percent = g_speedPercent;
+				if (percent == MIN_SPEED_PERCENT && g_speedEnabled)
+					percent = g_speedPercent;
 
-			SyncSpeedCaps();  // cheap no-op unless a slider changed
+				SyncSpeedCaps();  // cheap no-op unless a slider changed
 
-			uintptr_t role = g_myRoleAddress;
-			if (IsMyRoleWritable(role))
-			{
-				WriteSpeedFields(role, percent);
+				uintptr_t role = g_myRoleAddress;
+				if (IsMyRoleWritable(role))
+				{
+					WriteSpeedFields(role, percent);
+				}
+				else if (g_myRoleAddress != 0)
+				{
+					// Role object went away (relog, map change) - drop it + rescan.
+					g_myRoleAddress = 0;
+				}
+				else if (g_scanState != 1 && GetTickCount() - g_lastScanTick > 3000)
+				{
+					StartRoleScan();  // throttled to one scan every few seconds
+				}
 			}
-			else if (g_myRoleAddress != 0)
+			else if (g_anySpeedWasOn)
 			{
-				// Role object went away (relog, map change) - drop it and rescan,
-				// throttled to one scan every few seconds.
-				g_myRoleAddress = 0;
+				// Both features just turned off: restore stock once.
+				if (IsMyRoleWritable(g_myRoleAddress))
+					WriteSpeedFields(g_myRoleAddress, MIN_SPEED_PERCENT);
+				RestoreSpeedCaps();
 			}
-			else if (g_scanState == 2 && GetTickCount() - g_lastScanTick > 3000)
-			{
-				StartRoleScan();
-			}
+			g_anySpeedWasOn = wantSpeed;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			// Never let a speed-feature hiccup kill the game client.
 		}
 	}
 
