@@ -77,6 +77,23 @@
 // instead of re-opening per line - antivirus can no longer cut the log off
 // mid-flight (that is what made the earlier traces look truncated).
 //
+// v11 REDESIGN (2026-08-11): the old "XP skill speed boost" is now "XP move
+//   speed" - movement speed runs at a custom value while an XP skill buff is
+//   active and snaps back to exactly 100% the instant the buff drops. Two
+//   changes from the old boost:
+//     1) MOVEMENT ONLY - only the role+0xc0 move-state path is driven; the
+//        +0x44/+0x48 action divisor is forced to stock, so attack / pickup
+//        speed never changes.
+//     2) The fallback is ALWAYS stock 100% - the base speed slider no longer
+//        leaks into the buff-down state (while this feature is enabled it
+//        owns the speed fields outright).
+//   Detect-only mode is gone: the v9/v10 forensics proved the crash was a
+//   NULL dereference inside the game's own code with detect-only ON and no
+//   role found - the speed writes were never the cause.
+//   If walking ever fails to respond on a new server build, drive the divisor
+//   path too (write +0x44/+0x48 like WriteSpeedFields does) - both paths
+//   scale walk; +0xc0 is the movement-only one.
+//
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
 // speed-up is client-side: the server may rubber-band movement or drop loot
@@ -111,9 +128,9 @@ namespace Speed
 	const int MIN_SPEED_PERCENT = 100;   // 100% = normal speed
 	const int MAX_SPEED_PERCENT = 2000;  // user-requested test range (manually validated)
 
-	// XP boost slider range - same engine, same range as the base slider.
-	const int MIN_XP_BOOST_PERCENT = 100;
-	const int MAX_XP_BOOST_PERCENT = 2000;
+	// XP move speed slider range - same engine, same range as the base slider.
+	const int MIN_XP_MOVE_PERCENT = 100;
+	const int MAX_XP_MOVE_PERCENT = 2000;
 
 	// The user's crash-free manual process never applies the high speed in the
 	// XP skill's cast frame - they react a moment after the buff lands. The
@@ -128,7 +145,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v10 (2026-08-11)";
+	const char* const BUILD_TAG = "v11 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -138,9 +155,8 @@ namespace Speed
 	int  g_speedPercent = 200;          // default 2x
 	bool g_fastLootTick = false;        // re-arm the brain tick gate at a safe rate
 	int  g_lootTickIntervalMs = 250;    // default: brain ticks at most every 250 ms (4/sec)
-	bool g_xpBoostEnabled = false;      // speed up while an XP skill buff is active
-	int  g_xpBoostPercent = 500;        // default 5x - the live-validated stable value
-	bool g_xpBoostDetectOnly = true;    // SAFE DEFAULT: poll + display only, no speed writes
+	bool g_xpMoveSpeedEnabled = false;  // custom movement speed while an XP skill buff is active
+	int  g_xpMoveSpeedPercent = 500;    // default 5x - the live-validated stable value
 	bool g_traceEnabled = true;         // crash tracer -> speed_boost_trace.txt
 	int  g_watchFrames = 0;             // frames of fine-grained tracing after enable
 	int  g_traceOpenFailures = 0;       // consecutive trace-file open failures
@@ -156,7 +172,7 @@ namespace Speed
 	bool g_prevBuffActive = false;              // edge detection for the tracer + delay
 	DWORD g_buffActivatedTick = 0;              // when the current buff was first seen
 	bool g_firstPassPending = false;            // log the first tick's stages after enable
-	bool g_renderLogged = false;                // log the first boost-section render
+	bool g_renderLogged = false;                // log the first move-speed-section render
 	bool g_anySpeedWasOn = false;               // last frame's wantSpeed (off-transition restore)
 	unsigned int g_originalCaps[13] = {0};      // saved SPEED_CAP_TABLE contents
 	bool g_capsRaised = false;
@@ -302,11 +318,10 @@ namespace Speed
 		}
 		char line[256];
 		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
-			"[%lu] %s | client=%08X role=%08X boostPct=%d active=%d detectOnly=%d scan=%ld\r\n",
+			"[%lu] %s | client=%08X role=%08X movePct=%d active=%d scan=%ld\r\n",
 			(unsigned long)GetTickCount(), stage,
 			(unsigned int)GetClientObject(), (unsigned int)g_myRoleAddress,
-			g_xpBoostPercent, g_xpBuffActive ? 1 : 0, g_xpBoostDetectOnly ? 1 : 0,
-			(long)g_scanState);
+			g_xpMoveSpeedPercent, g_xpBuffActive ? 1 : 0, (long)g_scanState);
 		if (len <= 0)
 			return;
 		DWORD written = 0;
@@ -349,16 +364,31 @@ namespace Speed
 			enabled ? percent - MIN_SPEED_PERCENT : 0;
 	}
 
-	// The cap the role+0xc0 path needs given which features are enabled.
-	// Detect-only mode never raises caps (it never writes).
+	// The v11 redesign: MOVEMENT ONLY. Only the role+0xc0 move-state path
+	// (nSpeedPercent delta, FUN_00deb537, gated by the raised cap table) is
+	// driven; the +0x44/+0x48 action divisor is forced to stock so attack and
+	// pickup speed never change. percent 100 = stock (both paths zeroed).
+	void WriteXpMoveSpeedFields(uintptr_t role, int percent)
+	{
+		bool enabled = percent > MIN_SPEED_PERCENT;
+		// Divisor path stays stock: attacks / pickup keep normal speed.
+		*(unsigned char*)(role + ROLE_SPEED_BOOST_FLAG) = 0;
+		*(int*)(role + ROLE_SPEED_BOOST_OFFSET) = 0;
+		// Move-state path: the custom percent as a delta over 100, or 0 = 100%.
+		*(int*)(role + ROLE_SPEED_DELTA_OFFSET) =
+			enabled ? percent - MIN_SPEED_PERCENT : 0;
+	}
+
+	// The cap the role+0xc0 path needs given which feature owns the fields:
+	// while XP move speed is enabled it owns them outright, so only its
+	// slider matters; otherwise the base speed slider rules.
 	unsigned int NeededCap()
 	{
-		unsigned int needed = 0;
-		if (g_speedEnabled && (unsigned int)g_speedPercent > needed)
-			needed = (unsigned int)g_speedPercent;
-		if (g_xpBoostEnabled && !g_xpBoostDetectOnly && (unsigned int)g_xpBoostPercent > needed)
-			needed = (unsigned int)g_xpBoostPercent;
-		return needed;
+		if (g_xpMoveSpeedEnabled)
+			return (unsigned int)g_xpMoveSpeedPercent;
+		if (g_speedEnabled)
+			return (unsigned int)g_speedPercent;
+		return 0;
 	}
 
 	// Restores the per-state speed caps used by the role+0xc0 path.
@@ -556,20 +586,20 @@ namespace Speed
 		g_speedEnabled = enabled;
 	}
 
-	void SetXpBoostEnabled(bool enabled)
+	void SetXpMoveSpeedEnabled(bool enabled)
 	{
-		g_xpBoostEnabled = enabled;
+		g_xpMoveSpeedEnabled = enabled;
 		if (enabled)
 		{
 			g_firstPassPending = true;  // trace the first tick's stages
-			g_renderLogged = false;     // and the first boost-section render
+			g_renderLogged = false;     // and the first move-speed-section render
 			g_watchFrames = 3;          // fine-grained frame markers for 3 frames
-			Trace("click: boost ENABLED");
+			Trace("click: XP move speed ENABLED");
 		}
 		else
 		{
 			g_xpBuffActive = false;
-			Trace("click: boost disabled");
+			Trace("click: XP move speed disabled");
 		}
 	}
 
@@ -604,23 +634,19 @@ namespace Speed
 				}
 			}
 
-			bool wantSpeed = g_speedEnabled || g_xpBoostEnabled;
+			bool wantSpeed = g_speedEnabled || g_xpMoveSpeedEnabled;
 
 			if (wantSpeed)
 			{
 				if (g_firstPassPending) Trace("tick: begin");
 				DWORD now = GetTickCount();
 
-				// Automation of the proven manual swap: the boost slider's value
-				// is fed in while an XP skill buff runs - but only AFTER a short
-				// settle delay, exactly like the user's manual timing (never in
-				// the XP skill's cast frame). The moment the buff ends the base
-				// slider (or stock 100%) takes over again instantly.
-				int percent = MIN_SPEED_PERCENT;
-				if (g_xpBoostEnabled)
+				// Poll the XP buff while the move-speed feature is on (pure
+				// memory reads, no game-code calls - see the header comment).
+				bool buffActive = false;
+				if (g_xpMoveSpeedEnabled)
 				{
 					int client = GetClientObject();
-					bool active = false;
 					if (client != 0)
 					{
 						// Only poll once fully in the game world (ids are 0 at login).
@@ -629,39 +655,46 @@ namespace Speed
 						if (idA != 0 || idB != 0)
 						{
 							if (g_firstPassPending) Trace("poll: reading status flags");
-							active = IsXpSkillActive(client);
+							buffActive = IsXpSkillActive(client);
 							if (g_firstPassPending) Trace("poll: done");
 						}
 						else if (g_firstPassPending) Trace("poll: skipped (not in world)");
 					}
 					else if (g_firstPassPending) Trace("poll: skipped (no client)");
 
-					if (active != g_prevBuffActive)
+					if (buffActive != g_prevBuffActive)
 					{
-						Trace(active ? "buff: ON (settle delay armed)" : "buff: OFF");
-						if (active)
+						Trace(buffActive ? "buff: ON (settle delay armed)" : "buff: OFF -> 100%");
+						if (buffActive)
 							g_buffActivatedTick = now;
-						g_prevBuffActive = active;
+						g_prevBuffActive = buffActive;
 					}
-					g_xpBuffActive = active;
-
-					// Apply only after the settle delay - never in the cast frame.
-					if (active && !g_xpBoostDetectOnly &&
-						now - g_buffActivatedTick >= BOOST_APPLY_DELAY_MS)
-					{
-						percent = g_xpBoostPercent;
-					}
+					g_xpBuffActive = buffActive;
 				}
-				if (percent == MIN_SPEED_PERCENT && g_speedEnabled)
-					percent = g_speedPercent;
 
 				SyncSpeedCaps();  // cheap no-op unless a slider changed
 
 				uintptr_t role = g_myRoleAddress;
 				if (IsMyRoleWritable(role))
 				{
-					if (g_firstPassPending) Trace("write: speed fields");
-					WriteSpeedFields(role, percent);
+					if (g_xpMoveSpeedEnabled)
+					{
+						// The redesign: while an XP buff runs (past the short settle
+						// delay - never in the cast frame) movement runs at the custom
+						// percent; while it is down the fields are forced to stock 100%
+						// every frame. The base speed slider is ignored while this
+						// feature owns the fields.
+						int movePercent = MIN_SPEED_PERCENT;
+						if (buffActive && now - g_buffActivatedTick >= BOOST_APPLY_DELAY_MS)
+							movePercent = g_xpMoveSpeedPercent;
+						if (g_firstPassPending) Trace("write: move-speed fields");
+						WriteXpMoveSpeedFields(role, movePercent);
+					}
+					else
+					{
+						if (g_firstPassPending) Trace("write: speed fields");
+						WriteSpeedFields(role, g_speedPercent);
+					}
 					if (g_firstPassPending) Trace("write: done");
 				}
 				else if (g_myRoleAddress != 0)
@@ -765,43 +798,41 @@ void RenderSpeedInterface()
 
 	ImGui::Spacing();
 
-	// XP boost: the manual 100% <-> high% slider swap, automated, with the same
-	// human timing (a short settle delay after the buff lands).
-	bool xpBoost = Speed::g_xpBoostEnabled;
-	if (ImGui::Checkbox("XP skill speed boost", &xpBoost))
-		Speed::SetXpBoostEnabled(xpBoost);
+	// XP move speed (v11 redesign): movement runs at the custom value while an
+	// XP skill buff is up, exactly 100% while it is down. Movement only -
+	// attack / pickup speed stay stock.
+	bool xpMoveSpeed = Speed::g_xpMoveSpeedEnabled;
+	if (ImGui::Checkbox("XP skill move speed", &xpMoveSpeed))
+		Speed::SetXpMoveSpeedEnabled(xpMoveSpeed);
 
-	if (Speed::g_xpBoostEnabled)
+	if (Speed::g_xpMoveSpeedEnabled)
 	{
 		// Stage markers on the FIRST render of the section: if the crash log
 		// stops between two of these, the crashing widget sits between them.
 		bool logStages = !Speed::g_renderLogged;
 
-		ImGui::Checkbox("Detect only (safe test - no speed change)", &Speed::g_xpBoostDetectOnly);
-		if (Speed::g_xpBoostDetectOnly)
-			ImGui::TextDisabled("Detect-only is ON: watches the buff, changes NOTHING.");
-		ImGui::Checkbox("Trace to file (speed_boost_trace.txt)", &Speed::g_traceEnabled);
-		if (logStages) Speed::Trace("render: checkboxes ok");
-
-		ImGui::SliderInt("XP boost speed %", &Speed::g_xpBoostPercent,
-			Speed::MIN_XP_BOOST_PERCENT, Speed::MAX_XP_BOOST_PERCENT);
+		ImGui::SliderInt("Move speed while XP active %", &Speed::g_xpMoveSpeedPercent,
+			Speed::MIN_XP_MOVE_PERCENT, Speed::MAX_XP_MOVE_PERCENT);
 		if (logStages) Speed::Trace("render: slider ok");
+
+		ImGui::Checkbox("Trace to file (speed_boost_trace.txt)", &Speed::g_traceEnabled);
+		if (logStages) Speed::Trace("render: checkbox ok");
 
 		if (Speed::g_xpBuffActive)
 		{
-			if (Speed::g_xpBoostDetectOnly)
-				ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "XP buff ACTIVE (detect-only: no speed change)");
-			else if (GetTickCount() - Speed::g_buffActivatedTick < Speed::BOOST_APPLY_DELAY_MS)
+			if (GetTickCount() - Speed::g_buffActivatedTick < Speed::BOOST_APPLY_DELAY_MS)
 				ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "XP buff ACTIVE - applying in a moment...");
 			else
-				ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "XP buff ACTIVE - boosting");
+				ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "XP buff ACTIVE - move speed %d%%", Speed::g_xpMoveSpeedPercent);
 		}
 		else
 		{
-			ImGui::TextDisabled("XP buff inactive - normal speed");
+			ImGui::TextDisabled("XP buff inactive - move speed 100%%");
 		}
-		ImGui::TextDisabled("Applies ~0.4s after the buff lands (like your manual timing) and");
-		ImGui::TextDisabled("snaps back to 100% the instant the buff ends - no disconnect.");
+		ImGui::TextDisabled("Movement only - attacks keep normal speed. Applies ~0.4s after");
+		ImGui::TextDisabled("the buff lands and snaps back to 100% the instant it drops.");
+		if (Speed::g_speedEnabled)
+			ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Note: the base speed slider is ignored while this is on.");
 		ImGui::TextDisabled("Start at 500 or less - very high values can be unstable.");
 
 		if (logStages)
@@ -811,7 +842,7 @@ void RenderSpeedInterface()
 		}
 	}
 
-	if ((Speed::g_speedEnabled || Speed::g_xpBoostEnabled) && Speed::g_myRoleAddress == 0)
+	if ((Speed::g_speedEnabled || Speed::g_xpMoveSpeedEnabled) && Speed::g_myRoleAddress == 0)
 	{
 		if (Speed::g_scanState == 1)
 			ImGui::TextDisabled("Locating my role...");
