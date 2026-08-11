@@ -10,7 +10,7 @@ DirectX9 hooking for Conquer Online with ImGui overlay
 - Compile on Release & x86
 - Uses MinHook for function hooking
 - ImGui overlay (toggle with INSERT key)
-- Features: Always Jump, Wireframe/Chams, String modification, Memory Scanner
+- Features: Speed control, XP move speed (custom movement speed while an XP skill buff is up, snaps back to 100% when it drops), Always Jump, Wireframe/Chams, String modification, Memory Scanner
 - Loading: D3DX9_43.dll proxy (no injector needed)
 
 ## Memory Scanner
