@@ -33,10 +33,13 @@
 // disconnected the character (confirmed live). The overlay now re-arms the
 // gate at a controlled rate instead (default 250 ms = 4 ticks/sec).
 //
-// XP skill speed boost (2026-08-11): while an XP skill buff (Superman /
-// Fatal Strike / ...) is active, speed jumps to the XP-boost slider value
-// (100-2000%); the moment the buff ends the poll flips and the fields fall
-// back to stock 100% (or to the base slider when that's also enabled).
+// XP skill speed boost (2026-08-11): literally the SAME speed engine as the
+// base control (same WriteSpeedFields, same role, same cap table) - the only
+// difference is WHICH percent is fed in. While an XP skill buff (Superman /
+// Fatal Strike / ...) is active, the boost slider's value (100-2000%) is
+// applied; the moment the buff ends the poll flips and the fields fall back
+// to the base slider (or stock 100% when only the boost is enabled), and the
+// next buff re-applies the boost value - fully automatic, every cycle.
 //
 // XP-buff detection is PURE MEMORY READS - no game-code calls. v1 of this
 // feature called the game's status checker FUN_00f1a1d8(client, id) per frame
@@ -57,7 +60,9 @@
 // the click path. All work happens in the per-frame tick, which is wrapped
 // in an SEH guard (and the background scan thread has its own guard), so a
 // stale pointer can never take the client down. The poll is additionally
-// gated on being fully in the game world (ids are 0 at login).
+// gated on being fully in the game world (ids are 0 at login). The boost
+// default is 500% - the same ceiling the base feature was validated at;
+// values above that are available but may be unstable on some servers.
 //
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
@@ -95,6 +100,7 @@ namespace Speed
 
 	// XP boost slider range (user-requested 20x headroom; the role+0x44 path
 	// is uncapped and the cap table is raised to match for the +0xc0 path).
+	// Default = 500: the same value the base feature was validated at live.
 	const int MIN_XP_BOOST_PERCENT = 100;
 	const int MAX_XP_BOOST_PERCENT = 2000;
 
@@ -113,7 +119,7 @@ namespace Speed
 	bool g_fastLootTick = false;        // re-arm the brain tick gate at a safe rate
 	int  g_lootTickIntervalMs = 250;    // default: brain ticks at most every 250 ms (4/sec)
 	bool g_xpBoostEnabled = false;      // speed up while an XP skill buff is active
-	int  g_xpBoostPercent = 1000;       // default 10x while the XP buff runs
+	int  g_xpBoostPercent = 500;        // default 5x while the XP buff runs (proven-stable value)
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -409,10 +415,10 @@ namespace Speed
 
 			if (wantSpeed)
 			{
-				// Effective speed this frame: the XP boost wins while an XP skill
-				// buff is running; otherwise the base slider (or stock when only
-				// the boost is enabled and no buff is up - that is what snaps
-				// movement back to 100% the moment the XP skill ends).
+				// ONE speed engine, two presets: the XP boost percent is fed in
+				// while an XP skill buff runs; the moment it ends the base slider
+				// (or stock 100% when only the boost is on) takes over again, and
+				// the next buff re-applies the boost value - every cycle.
 				int percent = MIN_SPEED_PERCENT;
 				if (g_xpBoostEnabled)
 				{
@@ -518,7 +524,7 @@ void RenderSpeedInterface()
 
 	ImGui::Spacing();
 
-	// XP boost: speed follows the XP skill buff automatically.
+	// XP boost: same speed engine, driven by the XP skill buff automatically.
 	bool xpBoost = Speed::g_xpBoostEnabled;
 	if (ImGui::Checkbox("XP skill speed boost", &xpBoost))
 		Speed::SetXpBoostEnabled(xpBoost);
@@ -533,6 +539,7 @@ void RenderSpeedInterface()
 			ImGui::TextDisabled("XP buff inactive - normal speed");
 		ImGui::TextDisabled("While an XP skill (Superman / Fatal Strike / ...) runs, speed jumps");
 		ImGui::TextDisabled("to this value; it snaps back to 100% the moment the buff ends.");
+		ImGui::TextDisabled("Start at 500 or less - very high values can be unstable.");
 	}
 
 	if ((Speed::g_speedEnabled || Speed::g_xpBoostEnabled) && Speed::g_myRoleAddress == 0)
