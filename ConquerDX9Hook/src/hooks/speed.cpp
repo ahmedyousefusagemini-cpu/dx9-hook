@@ -117,6 +117,25 @@
 //   client+0x138 entirely (e.g. track the auto-pop + the bar drop at
 //   client+0xaec instead).
 //
+// v13 (2026-08-11, night): THE CRASH THREAD IS NOT OURS. The v12 capture:
+//     CRASH ... addr=01257F95 accessTarget=00000000 tid=10460
+//   while every overlay trace line carries tid=12964 (the render thread).
+//   A BACKGROUND (watchdog) thread kills the process at a fixed game
+//   address. And the v12 trace shows the process died WITHIN ONE FRAME of
+//   the click: no tick/poll/scan/write lines at all - with the persistent
+//   handle those cannot be lost, so the feature's game-memory interaction
+//   NEVER RAN. Every memory theory (writes, caps, probes, watchpoints on
+//   client+0x138) is thereby exonerated: the only externally visible side
+//   effect of the click is the FIRST Trace() call CREATING
+//   "speed_boost_trace.txt" IN THE GAME FOLDER - a file named speed_boost
+//   appearing in a watched directory. (It also finally explains the v8-era
+//   "AV cut-off": something was interfering with that file all along.)
+//   v13 moves both logs OUT of the game directory into %TEMP% under neutral
+//   names (co_overlay_trace.log / co_overlay_crash.log) and adds markers
+//   inside the click setter. If enabling no longer crashes, the file was
+//   the trigger and the mystery is solved; if it still crashes, the next
+//   bisection removes file IO entirely (in-memory ring buffer).
+//
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
 // speed-up is client-side: the server may rubber-band movement or drop loot
@@ -168,7 +187,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v12 (2026-08-11)";
+	const char* const BUILD_TAG = "v13 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -180,7 +199,7 @@ namespace Speed
 	int  g_lootTickIntervalMs = 250;    // default: brain ticks at most every 250 ms (4/sec)
 	bool g_xpMoveSpeedEnabled = false;  // custom movement speed while an XP skill buff is active
 	int  g_xpMoveSpeedPercent = 500;    // default 5x - the live-validated stable value
-	bool g_traceEnabled = true;         // crash tracer -> speed_boost_trace.txt
+	bool g_traceEnabled = true;         // crash tracer -> %TEMP%/co_overlay_trace.log
 	int  g_watchFrames = 0;             // frames of fine-grained tracing after enable
 	int  g_traceOpenFailures = 0;       // consecutive trace-file open failures
 
@@ -206,8 +225,33 @@ namespace Speed
 	// was silenced. (v12)
 	const char* g_lastStage = "boot";
 
-	// Append raw text to a file in the game's working directory (per-call
-	// open/close - used by the crash reporter, which fires at most once).
+	// v13: the logs live in %TEMP% under neutral names - a file named
+	// "speed_boost_trace.txt" appearing in the watched game folder is the
+	// prime crash trigger (see the header comment). Resolved once, lazily.
+	char g_tracePath[MAX_PATH] = {0};
+	char g_crashPath[MAX_PATH] = {0};
+	bool g_pathsReady = false;
+
+	void InitLogPaths()
+	{
+		if (g_pathsReady)
+			return;
+		g_pathsReady = true;
+		char tempDir[MAX_PATH];
+		DWORD n = GetTempPathA(MAX_PATH, tempDir);
+		if (n == 0 || n >= MAX_PATH)
+		{
+			// Fallback: the game dir (old behavior) if %TEMP% is unavailable.
+			_snprintf_s(g_tracePath, sizeof(g_tracePath), _TRUNCATE, "co_overlay_trace.log");
+			_snprintf_s(g_crashPath, sizeof(g_crashPath), _TRUNCATE, "co_overlay_crash.log");
+			return;
+		}
+		_snprintf_s(g_tracePath, sizeof(g_tracePath), _TRUNCATE, "%sco_overlay_trace.log", tempDir);
+		_snprintf_s(g_crashPath, sizeof(g_crashPath), _TRUNCATE, "%sco_overlay_crash.log", tempDir);
+	}
+
+	// Append raw text to a file (per-call open/close - used by the crash
+	// reporter, which fires at most once).
 	bool AppendLogLine(const char* fileName, const char* line, int len)
 	{
 		HANDLE h = CreateFileA(fileName, FILE_APPEND_DATA,
@@ -236,6 +280,7 @@ namespace Speed
 		if (er == NULL || ctx == NULL)
 			return EXCEPTION_CONTINUE_SEARCH;
 
+		InitLogPaths();
 		char line[512];
 
 		DWORD accessTarget = 0;
@@ -254,7 +299,7 @@ namespace Speed
 			(DWORD)ctx->Eip, (DWORD)ctx->Esp, (DWORD)ctx->Ebp,
 			(DWORD)hGame, (DWORD)hSelf, (unsigned long)GetCurrentThreadId());
 		if (len > 0)
-			AppendLogLine("speed_boost_crash.txt", line, len);
+			AppendLogLine(g_crashPath, line, len);
 
 		// The breadcrumb + feature state: which stage the DLL last reached.
 		len = _snprintf_s(line, sizeof(line), _TRUNCATE,
@@ -262,7 +307,7 @@ namespace Speed
 			g_lastStage, g_xpMoveSpeedEnabled ? 1 : 0, g_speedEnabled ? 1 : 0,
 			(unsigned int)g_myRoleAddress, (long)g_scanState);
 		if (len > 0)
-			AppendLogLine("speed_boost_crash.txt", line, len);
+			AppendLogLine(g_crashPath, line, len);
 
 		// Full registers: with the instruction bytes below this shows exactly
 		// which pointer was NULL and which field offset was touched.
@@ -271,7 +316,7 @@ namespace Speed
 			(DWORD)ctx->Eax, (DWORD)ctx->Ebx, (DWORD)ctx->Ecx,
 			(DWORD)ctx->Edx, (DWORD)ctx->Esi, (DWORD)ctx->Edi);
 		if (len > 0)
-			AppendLogLine("speed_boost_crash.txt", line, len);
+			AppendLogLine(g_crashPath, line, len);
 
 		// DEBUG REGISTERS (v12): if Dr0-Dr3 holds an address inside the client's
 		// status-flag array (client+0x138 .. +0x180), the anti-cheat armed a
@@ -282,7 +327,7 @@ namespace Speed
 			(DWORD)ctx->Dr0, (DWORD)ctx->Dr1, (DWORD)ctx->Dr2, (DWORD)ctx->Dr3,
 			(DWORD)ctx->Dr6, (DWORD)ctx->Dr7);
 		if (len > 0)
-			AppendLogLine("speed_boost_crash.txt", line, len);
+			AppendLogLine(g_crashPath, line, len);
 
 		// The faulting instruction bytes (identifies the exact operation).
 		if (!IsBadReadPtr((const void*)ctx->Eip, 8))
@@ -293,7 +338,7 @@ namespace Speed
 				(DWORD)ctx->Eip,
 				code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
 			if (len > 0)
-				AppendLogLine("speed_boost_crash.txt", line, len);
+				AppendLogLine(g_crashPath, line, len);
 		}
 
 		// EBP frame-chain walk: each frame's return address names the caller.
@@ -307,7 +352,7 @@ namespace Speed
 			len = _snprintf_s(line, sizeof(line), _TRUNCATE,
 				"  frame%d ret=%08X\r\n", i, returnAddress);
 			if (len > 0)
-				AppendLogLine("speed_boost_crash.txt", line, len);
+				AppendLogLine(g_crashPath, line, len);
 			if (callerEbp <= ebp)   // the chain must move up the stack
 				break;
 			ebp = callerEbp;
@@ -320,7 +365,8 @@ namespace Speed
 	void __cdecl AbortHandler(int)
 	{
 		static const char msg[] = "CRASH abort() (CRT assert or purecall)\r\n";
-		AppendLogLine("speed_boost_crash.txt", msg, (int)(sizeof(msg) - 1));
+		InitLogPaths();
+		AppendLogLine(g_crashPath, msg, (int)(sizeof(msg) - 1));
 	}
 
 	void InstallCrashReporter()
@@ -355,7 +401,8 @@ namespace Speed
 			return;
 		if (g_traceFile == NULL)
 		{
-			g_traceFile = CreateFileA("speed_boost_trace.txt", FILE_APPEND_DATA,
+			InitLogPaths();
+			g_traceFile = CreateFileA(g_tracePath, FILE_APPEND_DATA,
 				FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
 				FILE_ATTRIBUTE_NORMAL, NULL);
 			if (g_traceFile == NULL || g_traceFile == INVALID_HANDLE_VALUE)
@@ -653,6 +700,7 @@ namespace Speed
 
 	void SetXpMoveSpeedEnabled(bool enabled)
 	{
+		Trace("click: setter entered");   // v13: proves the setter is reached
 		g_xpMoveSpeedEnabled = enabled;
 		if (enabled)
 		{
@@ -666,6 +714,7 @@ namespace Speed
 			g_xpBuffActive = false;
 			Trace("click: XP move speed disabled");
 		}
+		Trace("click: setter done");      // v13: proves the setter completed
 	}
 
 	// Runs every frame (even with the menu closed), like auto-hunt's pass.
@@ -880,7 +929,7 @@ void RenderSpeedInterface()
 			Speed::MIN_XP_MOVE_PERCENT, Speed::MAX_XP_MOVE_PERCENT);
 		if (logStages) Speed::Trace("render: slider ok");
 
-		ImGui::Checkbox("Trace to file (speed_boost_trace.txt)", &Speed::g_traceEnabled);
+		ImGui::Checkbox("Trace to file (co_overlay_trace.log)", &Speed::g_traceEnabled);
 		if (logStages) Speed::Trace("render: checkbox ok");
 
 		if (Speed::g_xpBuffActive)
@@ -958,9 +1007,8 @@ void RenderSpeedInterface()
 		char bytesText[64];
 		Speed::GetTargetBytesHex(bytesText, 16);
 		ImGui::TextDisabled("Interval fn @0x010AFD05: %s", bytesText);
-		char traceDir[MAX_PATH];
-		if (GetCurrentDirectoryA(MAX_PATH, traceDir) != 0)
-			ImGui::TextDisabled("Trace file: %s\\speed_boost_trace.txt", traceDir);
+		Speed::InitLogPaths();
+		ImGui::TextDisabled("Trace file: %s", Speed::g_tracePath);
 		ImGui::TreePop();
 	}
 }
