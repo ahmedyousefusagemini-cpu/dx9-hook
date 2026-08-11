@@ -101,6 +101,15 @@ Two adjacent getters: `return *(byte*)(mgr+0x11)` then `return *(byte*)(mgr+0x12
 8A 41 11 C3 8A 41 12 C3
 ```
 
+**Status-flag check — `FUN_00f1a1d8` @ `0x00F1A1D8`**  
+`bool __thiscall FUN_00f1a1d8(client /*ECX*/, uint statusId)` → `AL != 0` =
+status active. `RET 4` (callee cleans). Disassembly-verified:
+`CMP [EBP+8],0x23F; JA -> return 0`, else `ADD ECX,0x138; JMP FUN_00f1eacd` —
+the status manager sub-object lives at `client+0x138`. The XP code uses it
+with `0x96/0xC0/0xEB` (bar fill `FUN_011154f5`) and `0x5C/0x79/0x78/0x92/0x9F/
+0xC0/0xEB` (XP dispatcher `FUN_00a1d6bc`) — the overlay polls that union
+`{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}` for the XP-speed-boost feature.
+
 ### XP-skill gates ("cannot use XP when hangup" block)
 
 The client refuses XP skills while the hunting state is active with
@@ -297,6 +306,7 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 
 | Offset | Type | Meaning |
 |---|---|---|
+| `+0x138` | object | status manager sub-object (`FUN_00f1a1d8` adds ECX+0x138 before the real check) |
 | `+0x268` | dword | own role/UID (confirmed at FUN_00d3fb0f: projectile-target == self branch; also the target arg the hunt brain / XP icon handler pass to `FUN_011b1ec9`) |
 | `+0x9e4` | dword | VIP level (FUN_00fd3271 default branch) |
 | `+0x9ec` | dword | VIP level (FUN_00fd3271 alt branch, when the 0x57f4 flag is set) |
@@ -357,6 +367,13 @@ withholds this packet by default so the server treats kills as normal gameplay.
   clicking the lit XP icon runs (`FUN_00b811a4`). One pop per fill (latch until
   the bar drops, 5s retry), rotating round-robin through the fire list.
   Requires the XP gates patched (auto-enables them).
+- **XP speed boost:** every frame poll `FUN_00f1a1d8(client, id)` for the XP
+  status ids `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`; while any is active
+  write `role+0x48=1`, `role+0x44=(boost%-100)*100`, `role+0xc0=boost%-100`
+  (cap table `0x016F7E44` raised to the boost value; restored when all speed
+  features are off). When the buff ends the fields snap back to stock 100%
+  (or the base speed slider when that's also on). Same hookless role-field
+  mechanism + my-role scanner as the base speed control (`speed.cpp`).
 
 ---
 
@@ -395,4 +412,7 @@ Use these to locate the code after an update when signatures fail:
       inner loop does `CALL <this+0x70 getter>` then `CMP [EAX+0x5C],[EBP+0xC]`).
 - [ ] XP pseudo id: find the XP icon handler via the `"yuanshen_jdt1"` string
       xref and take the id it passes to `FUN_011b1ec9` (`0x5FDC` on this build).
+- [ ] Status check: re-find via its callers (the bar fill `FUN_011154f5` calls
+      it with `0x96/0xC0/0xEB`); wrapper shape `CMP [EBP+8],0x23?; JA; ADD ECX,
+      0x1??; JMP <impl>`; `RET 4`.
 - [ ] Confirm each AOB match is unique before trusting it.

@@ -1,10 +1,10 @@
 # Reverse Engineering Notes — Conquer.exe (client 7937)
 
 **Current status: auto-hunt FULLY WORKING from the ImGui overlay** (kills, loots
-gold/items, XP + skill bars fill normally) — and the overlay now **auto-pops the
-XP skill(s)** (Superman / Fatal Strike / any class, rotating through all of them)
-when the bar fills. See the "WORKING STATE" section for the auto-hunt solution;
-the detailed research follows.
+gold/items, XP + skill bars fill normally) — the overlay **auto-pops the XP
+skill(s)** when the bar fills, and can **auto-boost movement speed while an XP
+skill buff is active** (snaps back to 100% when it ends). See the "WORKING
+STATE" section for the auto-hunt solution; the detailed research follows.
 
 Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll imported).
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
@@ -81,6 +81,40 @@ guessing ids.
 UI shows the live bar value, a pop counter, the last fired id, and an
 **XP Debug** tree (learned-magic count + the detected XP skill ids) so a
 failure is diagnosable from a screenshot.
+
+---
+
+## ✅ XP skill speed boost (2026-08-11) — speed follows the XP buff
+
+**Goal:** while an XP skill (Superman / Fatal Strike / ...) is active, movement
+speed jumps to a configurable value (100%–2000%); the moment the buff ends,
+speed snaps back to 100% automatically.
+
+**Detection — the client's own status flags, not bar-value guessing:** an active
+XP skill shows up as status flags checked with
+`FUN_00f1a1d8(client /*ECX*/, statusId) -> AL != 0`.
+Disassembly-verified wrapper: `CMP [EBP+8],0x23F; JA -> return 0`, else
+`ADD ECX,0x138; JMP FUN_00f1eacd` — the status manager sub-object lives at
+`client+0x138`; `RET 4` (callee cleans the one stack arg). The flag ids come
+from the game's own XP code:
+
+- `FUN_011154f5` (bar fill) refuses to refill while `0x96/0xC0/0xEB` are up;
+- `FUN_00a1d6bc` (XP dispatcher) skips re-casting while the per-skill flags
+  `0x5C/0x79/0x78/0x92/0x9F/0xC0/0xEB` are up.
+
+Union polled by the overlay: `0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB`
+(all < 0x240, so the wrapper accepts them).
+
+**Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):** same
+hookless role-field mechanism as the base speed control — `role+0x48` flag +
+`role+0x44` divisor (uncapped, supports the full 2000% = 20x) plus `role+0xc0`
+(the nSpeedPercent path, capped per state by the 13-dword table at
+`0x016F7E44`; the table is raised to the configured value while any speed
+feature is on and restored when all are off). Every frame: poll the XP flags →
+if active write the boost percent, else fall back to the base speed slider
+(or stock 100% when only the boost is enabled). The write is re-asserted each
+frame, so the snap-back happens the very frame the buff ends. The my-role
+scanner is shared with the base speed feature (enabling either one starts it).
 
 ---
 
@@ -214,6 +248,7 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `348e798` | debug progress saved (offset confirmations, investigation state) |
 | `c2bf5aa` | auto XP v2: fire the XP-icon pseudo id `0x5FDC` (still no cast in-game) |
 | `d81c8f0` | auto XP v3: enumerate the learned-magic list, fire all XP-type skills (rotating) |
+| `7973d99` | XP skill speed boost: status-flag-driven 100–2000% while the XP buff runs |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -367,8 +402,11 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. Optional: set auto-pick directly from the overlay (currently enabled via the client
+6. ~~XP skill speed boost~~ — **done** (2026-08-11): poll the XP-buff status flags
+   via `FUN_00f1a1d8`; while active write the role speed fields with the boost
+   percent (100–2000%); snap back to 100% on buff end. In `speed.cpp`.
+7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
-7. Verify jump-search (VIP3) engages while hunting.
-8. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
+8. Verify jump-search (VIP3) engages while hunting.
+9. If the binary updates: use `OFFSETS.md` (AOB signatures + object maps + string
    anchors) to re-locate every value.
