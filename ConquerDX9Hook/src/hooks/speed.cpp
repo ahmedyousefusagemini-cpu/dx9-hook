@@ -53,22 +53,22 @@
 // dispatcher FUN_00a1d6bc skips re-casting while 0x5C/0x79/0x78/0x92/0x9F/
 // 0xC0/0xEB are up. Union = the 8 ids polled below.
 //
-// v8 - pinpoints the crash window (2026-08-11, late): the v7b trace proved
-// the game dies BETWEEN the boost section's first render and the very next
-// per-frame tick ("tick: begin" never appeared). v8 instruments that exact
-// window:
-//   - SpeedTrace() markers between the per-frame feature ticks (wired in
-//     imgui_interface.cpp) and at the end of the ImGui window build, active
-//     for 3 frames after the boost is enabled (bounded volume).
-//   - Stage markers INSIDE the boost section's first render (detect checkbox
-//     / slider / status lines / section complete), so a crash in the new
-//     widgets names the exact widget.
-//   - "tick: entered" at the very top of the tick + the loot-tick block moved
-//     INSIDE the SEH guard (it was the only unguarded part of the tick).
-//   - A "Trace to file" checkbox so the tracer itself can be ruled out (a
-//     freeze - not a crash - could theoretically come from the file I/O).
-// The v6 diagnostics stay: crash tracer (speed_boost_trace.txt), detect-only
-// safe mode (default ON), visible build tag.
+// v9 - the crash catcher (2026-08-11, late): the v8 trace proved the run dies
+// between "render: slider ok" and "render: section complete" - but the code
+// between those markers is nothing but plain ImGui text lines, which cannot
+// crash. Conclusion: the trace FILE is being cut off mid-flight (antivirus
+// interference on the rapidly-opened file) and the real crash happens later,
+// invisibly. v9 therefore adds a REAL crash reporter:
+//   - SetUnhandledExceptionFilter (installed lazily on the first tick)
+//     writes code/address/EIP/ESP/EBP + the module bases of Conquer.exe and
+//     this DLL to speed_boost_crash.txt the moment ANY unhandled exception
+//     kills the client - so the crash site is identified by address, not by
+//     which log line survived.
+//   - A SIGABRT handler covers abort()-style deaths (CRT asserts).
+//   - The tracer auto-disables itself after repeated file-write failures, so
+//     AV interference can never hang the render thread.
+// The v6-v8 diagnostics stay: stage tracer (speed_boost_trace.txt),
+// detect-only safe mode (default ON), per-frame window markers, build tag.
 //
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
@@ -121,7 +121,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v8 (2026-08-11)";
+	const char* const BUILD_TAG = "v9 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -136,6 +136,7 @@ namespace Speed
 	bool g_xpBoostDetectOnly = true;    // SAFE DEFAULT: poll + display only, no speed writes
 	bool g_traceEnabled = true;         // crash tracer -> speed_boost_trace.txt
 	int  g_watchFrames = 0;             // frames of fine-grained tracing after enable
+	int  g_traceFailures = 0;           // consecutive trace write failures
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -154,6 +155,73 @@ namespace Speed
 	bool g_capsRaised = false;
 	unsigned int g_raisedCapValue = 0;          // what the table currently holds
 
+	// Append raw text to a file in the game's working directory. Shared by the
+	// stage tracer and the crash reporter. Returns false on failure.
+	bool AppendLogLine(const char* fileName, const char* line, int len)
+	{
+		HANDLE h = CreateFileA(fileName, FILE_APPEND_DATA,
+			FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL, NULL);
+		if (h == INVALID_HANDLE_VALUE)
+			return false;
+		DWORD written = 0;
+		WriteFile(h, line, (DWORD)len, &written, NULL);
+		CloseHandle(h);
+		return true;
+	}
+
+	// The crash reporter: runs on ANY unhandled exception, anywhere in the
+	// client (not just our code). Writes the exception code, the faulting
+	// instruction/address, the registers, and both module bases so the crash
+	// site can be mapped to an exact function afterwards. This catches what
+	// the stage tracer cannot (the v8 trace proved the log file gets cut off
+	// before the real crash).
+	LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
+	{
+		char line[512];
+		EXCEPTION_RECORD* er = ep ? ep->ExceptionRecord : NULL;
+		CONTEXT* ctx = ep ? ep->ContextRecord : NULL;
+		if (er == NULL || ctx == NULL)
+			return EXCEPTION_CONTINUE_SEARCH;
+
+		DWORD accessTarget = 0;
+		if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+			accessTarget = (DWORD)er->ExceptionInformation[1];
+
+		HMODULE hGame = GetModuleHandleA(NULL);           // Conquer.exe base
+		HMODULE hSelf = NULL;                              // this DLL's base
+		GetModuleHandleExA(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)&CrashFilter, &hSelf);
+
+		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
+			"CRASH code=%08X addr=%08X accessTarget=%08X eip=%08X esp=%08X ebp=%08X game=%08X dll=%08X\r\n",
+			er->ExceptionCode, (DWORD)er->ExceptionAddress, accessTarget,
+			(DWORD)ctx->Eip, (DWORD)ctx->Esp, (DWORD)ctx->Ebp,
+			(DWORD)hGame, (DWORD)hSelf);
+		if (len > 0)
+			AppendLogLine("speed_boost_crash.txt", line, len);
+
+		return EXCEPTION_CONTINUE_SEARCH;  // let normal crash handling proceed
+	}
+
+	// CRT assert / abort() deaths don't raise SEH exceptions - catch them too.
+	void __cdecl AbortHandler(int)
+	{
+		static const char msg[] = "CRASH abort() (CRT assert or purecall)\r\n";
+		AppendLogLine("speed_boost_crash.txt", msg, (int)(sizeof(msg) - 1));
+	}
+
+	void InstallCrashReporter()
+	{
+		static bool installed = false;
+		if (installed)
+			return;
+		installed = true;
+		SetUnhandledExceptionFilter(CrashFilter);
+		signal(SIGABRT, AbortHandler);
+	}
+
 	int GetClientObject()
 	{
 		if (IsBadReadPtr((const void*)CLIENT_GLOBAL_ADDRESS, sizeof(int)))
@@ -164,12 +232,12 @@ namespace Speed
 	// Crash tracer: appends one line per stage/event to speed_boost_trace.txt
 	// (game working directory). Bounded volume: click, first-pass stages,
 	// watch-window frame markers, and buff transitions only - never per-frame
-	// spam. After a crash, the LAST line in the file names the exact stage
-	// that was running. Raw Win32 file APIs only (no CRT fopen) so strict MSVC
-	// deprecation settings can't break the build (C4996 fopen error).
+	// spam. Raw Win32 file APIs only (no CRT fopen) so strict MSVC deprecation
+	// settings can't break the build. Auto-disables after repeated write
+	// failures so antivirus interference can never stall the render thread.
 	void Trace(const char* stage)
 	{
-		if (!g_traceEnabled)
+		if (!g_traceEnabled || g_traceFailures >= 3)
 			return;
 		char line[256];
 		int len = _snprintf_s(line, sizeof(line), _TRUNCATE,
@@ -180,14 +248,10 @@ namespace Speed
 			(long)g_scanState);
 		if (len <= 0)
 			return;
-		HANDLE h = CreateFileA("speed_boost_trace.txt", FILE_APPEND_DATA,
-			FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
-			FILE_ATTRIBUTE_NORMAL, NULL);
-		if (h == INVALID_HANDLE_VALUE)
-			return;
-		DWORD written = 0;
-		WriteFile(h, line, (DWORD)len, &written, NULL);
-		CloseHandle(h);
+		if (!AppendLogLine("speed_boost_trace.txt", line, len))
+			g_traceFailures++;
+		else
+			g_traceFailures = 0;
 	}
 
 	void GetClientIds(int client, unsigned int* idA, unsigned int* idB)
@@ -453,6 +517,8 @@ namespace Speed
 	// Runs every frame (even with the menu closed), like auto-hunt's pass.
 	void ApplyClientSideState()
 	{
+		InstallCrashReporter();  // first call only; catches crashes process-wide
+
 		// EVERYTHING runs under an SEH guard: a stale client/role/global pointer
 		// turns into a skipped frame instead of a crashed client. (The loot-tick
 		// block moved inside the guard in v8 - it was the only unguarded part.)
