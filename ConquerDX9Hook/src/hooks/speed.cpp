@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <windows.h>
 #include <stdint.h>
 #include "imgui.h"
@@ -35,21 +36,16 @@
 //
 // XP skill speed boost (2026-08-11): AUTOMATION OF THE USER'S PROVEN MANUAL
 // PROCESS - they hunt at 100%, drag the base slider to 500% when the XP
-// skill pops, and drag it back when the buff expires (no crashes, stable at
-// 500%). The boost does exactly that swap automatically: one speed engine
-// (same WriteSpeedFields, same role, same cap table as the base control),
-// percent = boost slider while the XP buff is up, base slider (or stock 100%
-// when only the boost is enabled) the moment it ends, re-applied on the next
-// buff - fully automatic, every cycle. Both sliders run 100-2000% (user
-// asked to test maximum movement speed while hunting).
+// skill pops, and drag it back when the buff expires. One speed engine (same
+// WriteSpeedFields, same role, same cap table as the base control), percent =
+// boost slider while the XP buff is up, base slider (or stock 100%) the
+// moment it ends, re-applied on the next buff - every cycle. Both sliders
+// run 100-2000% (user asked to test maximum movement speed while hunting).
 //
-// XP-buff detection is PURE MEMORY READS - no game-code calls. v1 of this
-// feature called the game's status checker FUN_00f1a1d8(client, id) per frame
-// and that CRASHED the client (calling into game code at the wrong moment).
-// The real implementation behind it (FUN_00d4e0ae) is just a bitmask lookup,
-// decoded by disassembly:
-//   status flags = 64-bit bitmask array at client+0x138 (the wrapper does
-//   ADD ECX,0x138 before tail-jumping there);
+// XP-buff detection is PURE MEMORY READS - no game-code calls. The game's
+// status checker FUN_00f1a1d8(client, id) -> FUN_00d4e0ae is just a bitmask
+// lookup, decoded by disassembly:
+//   status flags = 64-bit bitmask array at client+0x138;
 //   entry = manager + (id >> 6) * 8, bit = id & 0x3F
 //   (low 32 bits at entry+0, high 32 bits at entry+4; ids < 0x240).
 // The flag ids come from the game's own XP code: the bar-fill function
@@ -57,20 +53,21 @@
 // dispatcher FUN_00a1d6bc skips re-casting while 0x5C/0x79/0x78/0x92/0x9F/
 // 0xC0/0xEB are up. Union = the 8 ids polled below.
 //
-// Crash hardening (2026-08-11, after "crashes when I click it"): the checkbox
-// handlers now ONLY flip a flag - no scans, no VirtualProtect, no writes on
-// the click path. All work happens in the per-frame tick, which is wrapped
-// in an SEH guard (and the background scan thread has its own guard), so a
-// stale pointer can never take the client down. The poll is additionally
-// gated on being fully in the game world (ids are 0 at login). A visible
-// build tag is rendered in the Speed section so the running DLL version can
-// always be verified from a screenshot (guards against testing a stale DLL).
+// Crash saga + the v6 investigation kit (2026-08-11, late): v5 STILL crashed
+// on click even with flag-only handlers + SEH-guarded tick. v6 adds:
+//   1. CRASH TRACER - every stage appends one line to speed_boost_trace.txt
+//      (in the game's working directory). After a crash, the LAST line names
+//      the exact stage that was running (poll / caps / write / scan / render).
+//   2. DETECT-ONLY MODE (default ON) - polls the XP buff and shows the status
+//      line but never touches speed fields or the cap table. Bisect protocol:
+//      crash in detect-only => the detector is the culprit; no crash until
+//      detect-only is turned off => the write/cap stage is the culprit.
+// A visible build tag in the UI settles which DLL is running.
 //
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
 // speed-up is client-side: the server may rubber-band movement or drop loot
-// requests at extreme values - 500% is the live-validated stable ceiling;
-// beyond that is test territory.
+// requests at extreme values - 500% is the live-validated stable ceiling.
 // ============================================================================
 
 namespace Speed
@@ -113,7 +110,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v5 (2026-08-11)";
+	const char* const BUILD_TAG = "v6 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -125,6 +122,8 @@ namespace Speed
 	int  g_lootTickIntervalMs = 250;    // default: brain ticks at most every 250 ms (4/sec)
 	bool g_xpBoostEnabled = false;      // speed up while an XP skill buff is active
 	int  g_xpBoostPercent = 500;        // default 5x - the live-validated stable value
+	bool g_xpBoostDetectOnly = true;    // SAFE DEFAULT: poll + display only, no speed writes
+	bool g_traceEnabled = true;         // crash tracer -> speed_boost_trace.txt
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -134,6 +133,9 @@ namespace Speed
 	volatile int g_matchedRule = 0;             // which id rule hit (0 none, 1 A, 2 B, 3 cross)
 	volatile int g_vtableHasIntervalFn = 0;     // candidate's vtable passed the class check
 	bool g_xpBuffActive = false;                // last status poll (for the UI)
+	bool g_prevBuffActive = false;              // edge detection for the tracer
+	bool g_firstPassPending = false;            // log the first tick's stages after enable
+	bool g_renderLogged = false;                // log the first boost-section render
 	bool g_anySpeedWasOn = false;               // last frame's wantSpeed (off-transition restore)
 	unsigned int g_originalCaps[13] = {0};      // saved SPEED_CAP_TABLE contents
 	bool g_capsRaised = false;
@@ -144,6 +146,25 @@ namespace Speed
 		if (IsBadReadPtr((const void*)CLIENT_GLOBAL_ADDRESS, sizeof(int)))
 			return 0;
 		return *(int*)CLIENT_GLOBAL_ADDRESS;
+	}
+
+	// Crash tracer: appends one line per stage/event to speed_boost_trace.txt
+	// (game working directory). Bounded volume: click, first-pass stages, and
+	// buff transitions only - never per-frame spam. After a crash, the LAST
+	// line in the file names the exact stage that was running.
+	void Trace(const char* stage)
+	{
+		if (!g_traceEnabled)
+			return;
+		FILE* f = fopen("speed_boost_trace.txt", "a");
+		if (!f)
+			return;
+		fprintf(f, "[%lu] %s | client=%08X role=%08X boost%%=%d active=%d detectOnly=%d scan=%ld\n",
+			(unsigned long)GetTickCount(), stage,
+			(unsigned int)GetClientObject(), (unsigned int)g_myRoleAddress,
+			g_xpBoostPercent, g_xpBuffActive ? 1 : 0, g_xpBoostDetectOnly ? 1 : 0,
+			g_scanState);
+		fclose(f);
 	}
 
 	void GetClientIds(int client, unsigned int* idA, unsigned int* idB)
@@ -183,12 +204,13 @@ namespace Speed
 	}
 
 	// The cap the role+0xc0 path needs given which features are enabled.
+	// Detect-only mode never raises caps (it never writes).
 	unsigned int NeededCap()
 	{
 		unsigned int needed = 0;
 		if (g_speedEnabled && (unsigned int)g_speedPercent > needed)
 			needed = (unsigned int)g_speedPercent;
-		if (g_xpBoostEnabled && (unsigned int)g_xpBoostPercent > needed)
+		if (g_xpBoostEnabled && !g_xpBoostDetectOnly && (unsigned int)g_xpBoostPercent > needed)
 			needed = (unsigned int)g_xpBoostPercent;
 		return needed;
 	}
@@ -222,6 +244,7 @@ namespace Speed
 		if (g_capsRaised && g_raisedCapValue == needed)
 			return;
 
+		if (g_firstPassPending) Trace("caps: VirtualProtect");
 		DWORD oldProtect = 0;
 		if (!VirtualProtect((void*)SPEED_CAP_TABLE, 13 * 4, PAGE_READWRITE, &oldProtect))
 			return;
@@ -235,6 +258,7 @@ namespace Speed
 			caps[i] = needed;
 		g_capsRaised = true;
 		g_raisedCapValue = needed;
+		if (g_firstPassPending) Trace("caps: written");
 	}
 
 	// Pure-read equivalent of the game's status check
@@ -341,12 +365,14 @@ namespace Speed
 					g_matchedRule = rule;
 					g_myRoleAddress = p;
 					g_scanState = 2;
+					Trace("scan: role found");
 					return;
 				}
 			}
 			address = end;
 		}
 		g_scanState = 2;  // done (not found)
+		Trace("scan: finished, no role");
 	}
 
 	DWORD WINAPI FindMyRoleThread(LPVOID)
@@ -358,6 +384,7 @@ namespace Speed
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
 			g_scanState = 2;  // scan died on a bad region - just give up
+			Trace("scan: EXCEPTION caught");
 		}
 		return 0;
 	}
@@ -386,8 +413,17 @@ namespace Speed
 	void SetXpBoostEnabled(bool enabled)
 	{
 		g_xpBoostEnabled = enabled;
-		if (!enabled)
+		if (enabled)
+		{
+			g_firstPassPending = true;  // trace the first tick's stages
+			g_renderLogged = false;     // and the first boost-section render
+			Trace("click: boost ENABLED");
+		}
+		else
+		{
 			g_xpBuffActive = false;
+			Trace("click: boost disabled");
+		}
 	}
 
 	// Runs every frame (even with the menu closed), like auto-hunt's pass.
@@ -424,6 +460,7 @@ namespace Speed
 				// is fed in while an XP skill buff runs; the moment it ends the
 				// base slider (or stock 100% when only the boost is on) takes over
 				// again, and the next buff re-applies the boost value - every cycle.
+				if (g_firstPassPending) Trace("tick: begin");
 				int percent = MIN_SPEED_PERCENT;
 				if (g_xpBoostEnabled)
 				{
@@ -435,10 +472,22 @@ namespace Speed
 						unsigned int idA = 0, idB = 0;
 						GetClientIds(client, &idA, &idB);
 						if (idA != 0 || idB != 0)
+						{
+							if (g_firstPassPending) Trace("poll: reading status flags");
 							active = IsXpSkillActive(client);
+							if (g_firstPassPending) Trace("poll: done");
+						}
+						else if (g_firstPassPending) Trace("poll: skipped (not in world)");
+					}
+					else if (g_firstPassPending) Trace("poll: skipped (no client)");
+
+					if (active != g_prevBuffActive)
+					{
+						Trace(active ? "buff: ON" : "buff: OFF");
+						g_prevBuffActive = active;
 					}
 					g_xpBuffActive = active;
-					if (active)
+					if (active && !g_xpBoostDetectOnly)
 						percent = g_xpBoostPercent;
 				}
 				if (percent == MIN_SPEED_PERCENT && g_speedEnabled)
@@ -449,7 +498,9 @@ namespace Speed
 				uintptr_t role = g_myRoleAddress;
 				if (IsMyRoleWritable(role))
 				{
+					if (g_firstPassPending) Trace("write: speed fields");
 					WriteSpeedFields(role, percent);
+					if (g_firstPassPending) Trace("write: done");
 				}
 				else if (g_myRoleAddress != 0)
 				{
@@ -458,7 +509,13 @@ namespace Speed
 				}
 				else if (g_scanState != 1 && GetTickCount() - g_lastScanTick > 3000)
 				{
+					if (g_firstPassPending) Trace("scan: starting");
 					StartRoleScan();  // throttled to one scan every few seconds
+				}
+				if (g_firstPassPending)
+				{
+					Trace("tick: first pass complete");
+					g_firstPassPending = false;
 				}
 			}
 			else if (g_anySpeedWasOn)
@@ -472,7 +529,10 @@ namespace Speed
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
-			// Never let a speed-feature hiccup kill the game client.
+			// Never let a speed-feature hiccup kill the game client - and if it
+			// tries, the trace file records that we even got an exception here.
+			Trace("tick: EXCEPTION caught");
+			g_firstPassPending = false;
 		}
 	}
 
@@ -538,6 +598,16 @@ void RenderSpeedInterface()
 
 	if (Speed::g_xpBoostEnabled)
 	{
+		if (!Speed::g_renderLogged)
+		{
+			Speed::g_renderLogged = true;
+			Speed::Trace("render: boost section drawn");
+		}
+
+		ImGui::Checkbox("Detect only (safe test - no speed change)", &Speed::g_xpBoostDetectOnly);
+		if (Speed::g_xpBoostDetectOnly)
+			ImGui::TextDisabled("Detect-only is ON: watches the buff, changes NOTHING.");
+
 		ImGui::SliderInt("XP boost speed %", &Speed::g_xpBoostPercent,
 			Speed::MIN_XP_BOOST_PERCENT, Speed::MAX_XP_BOOST_PERCENT);
 		if (Speed::g_xpBuffActive)
@@ -598,6 +668,9 @@ void RenderSpeedInterface()
 		char bytesText[64];
 		Speed::GetTargetBytesHex(bytesText, 16);
 		ImGui::TextDisabled("Interval fn @0x010AFD05: %s", bytesText);
+		char traceDir[MAX_PATH];
+		if (GetCurrentDirectoryA(MAX_PATH, traceDir) != 0)
+			ImGui::TextDisabled("Trace file: %s\\speed_boost_trace.txt", traceDir);
 		ImGui::TreePop();
 	}
 }
