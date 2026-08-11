@@ -157,19 +157,25 @@ Analysis:
   own code dying on a NULL pointer shortly after the boost is enabled.
 - The base speed feature (scan + cap raise + field writes + its own slider)
   is proven stable (the user's manual process), so the trigger lives in what
-  the XP feature ADDS: the status-bitmask poll at `client+0x138`.
-- Suspect subsystems (to be identified by v12's stack walk + debug registers):
+  the XP feature ADDS at click time.
+- Suspect subsystems:
   (a) a game UI handler (handler functions live around `0x01262xxx`, near the
       crash at `0x01257F95`) — a click leaking into the game's own UI;
   (b) the game's render path reacting to our extra ImGui drawing;
   (c) an anti-cheat watchdog deliberately dereferencing NULL (a deliberate
-      "crash on detection") — e.g. a HARDWARE READ-WATCHPOINT (Dr0-Dr3) on the
-      status-flag array: the game's own reads pass, a read from our module
-      dies. v12's debug-register dump confirms/denies this directly.
-- The stage traces ALSO proved the trace file itself gets cut off mid-flight
-  by antivirus interference (the code between the last logged marker and the
-  crash is provably-safe ImGui text) — v10 keeps one persistent file handle
-  open instead of re-opening per line.
+      "crash on detection").
+- **v12 capture settled the shape (2026-08-11, ~23:50):** the v12 crash line
+  carries `tid=10460` while every overlay trace line carries `tid=12964` (the
+  render thread) — **the crash runs on a BACKGROUND (watchdog) thread**, not
+  on ours. And the v12 trace dies WITHIN ONE FRAME of the click: no
+  tick/poll/scan/write lines at all, which the persistent handle cannot lose
+  — so the feature's game-memory interaction NEVER RAN and every memory
+  theory (writes, caps, probes, watchpoints on `client+0x138`) is exonerated.
+  The click's only externally visible side effect is the first `Trace()`
+  CREATING `speed_boost_trace.txt` in the watched game folder — a file
+  literally named "speed_boost". (It also finally explains the v8-era
+  "AV cut-off": something was interfering with that file all along.)
+  That is suspect (c) with a FILE trigger, not a memory trigger.
 
 **v10 (bcc164d) — full crash forensics:** the crash reporter now also writes
 the full register set (EAX–EDI), the 8 faulting instruction bytes at EIP, and
@@ -178,13 +184,16 @@ addresses identify WHICH game subsystem (UI handler / renderer / logic)
 called into the crashing function. `speed_boost_crash.txt`.
 
 **v12 (67ab84a) — crash hunt, round 2:** the crash report now ALSO dumps the
-**debug registers (Dr0-Dr3/Dr6/Dr7)** — a DR pointing inside
-`client+0x138..+0x180` proves the anti-cheat read-tripwire — plus the
-**crashing thread id** (tells a watchdog/worker thread apart from the render
-thread) and a **stage breadcrumb** (`g_lastStage`, survives even a silenced
-trace file). Every trace line now carries the thread id too. If the
-watchpoint is confirmed, buff detection must move off `client+0x138`
-(e.g. track the auto-pop + the bar drop at `client+0xaec`).
+**debug registers (Dr0-Dr3/Dr6/Dr7)**, the **crashing thread id**, and a
+**stage breadcrumb** (`g_lastStage`, survives even a silenced trace file).
+Every trace line now carries the thread id too.
+
+**v13 (2985a4e) — logs moved out of the game folder:** both logs now live in
+`%TEMP%` under neutral names (`co_overlay_trace.log` / `co_overlay_crash.log`)
+and the click setter got its own markers (`click: setter entered/done`). If
+enabling no longer crashes, the game-folder file creation was the trigger and
+the mystery is solved; if it still crashes, the next bisection removes file
+IO entirely (in-memory trace ring buffer, dumped on demand).
 
 **Crash saga timeline:**
 
@@ -214,7 +223,12 @@ watchpoint is confirmed, buff detection must move off `client+0x138`
   `role+0xc0` (divisor path forced to stock), strict 100% fallback, detect-only
   removed. User-confirmed click still crashes — the trigger is NOT the writes.
 - **v12 (67ab84a):** DR-register dump + thread id + stage breadcrumb in the
-  crash report; probe-free status poll (VirtualQuery + SEH).
+  crash report; probe-free status poll. **Capture: the crash thread is a
+  background watchdog (`tid=10460` ≠ render `12964`) and the process dies
+  within one frame of the click — before any poll/scan/write.**
+- **v13 (2985a4e):** logs moved to `%TEMP%` under neutral names
+  (`co_overlay_trace.log` / `co_overlay_crash.log`) — the game-folder trace
+  file's creation is the prime remaining trigger; setter markers added.
 
 **Integration (`src/hooks/speed.cpp`, "XP skill move speed" checkbox):**
 `role+0xc0` move-state delta only (the nSpeedPercent path, capped per state by
@@ -304,7 +318,7 @@ the *problem*, not the trigger. Three pieces, all in `src/hooks/auto_hunt.cpp`:
 The in-game toggle `FUN_00bd7355` only *sends* the 0x855 packet — it never sets the
 client hunting state (verified at instruction level). A bare packet toggle played the
 activation effect but never hunted. The overlay instead asserts the client state
-directly **every frame** (so a server update can't knock it off):
+directly **every frame** (so a server update can't knock them off):
 - `mgr+0x11 = 1`   (hunting-active flag)
 - `client+0x5385 = 1` (auto-battle flag)
 
@@ -368,16 +382,18 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `bd9c753` | v9b: missing `<signal.h>` include build fix |
 | `bcc164d` | v10: full crash forensics (registers, EIP bytes, EBP stack walk) + persistent trace handle |
 | `71f61c1` | v11: XP move speed redesign - movement-only via role+0xc0, strict 100% fallback, detect-only removed |
-| `67ab84a` | v12: crash hunt round 2 - DR-register dump + thread id + stage breadcrumb in the crash report; probe-free status poll |
+| `67ab84a` | v12: DR-register dump + thread id + stage breadcrumb in the crash report; probe-free status poll |
+| `2985a4e` | v13: logs moved to %TEMP% under neutral names (game-folder file creation is the prime crash trigger); setter markers |
 
 ### Open / next
-- **Identify the crashing game function at Conquer.exe+0xE57F95** using the
-  v12 forensics (register dump + DEBUG REGISTERS + instruction bytes + EBP
-  stack walk + thread id) — the caller addresses will name the subsystem
-  (UI handler / renderer / anti-cheat), and Dr0-Dr3 will confirm/deny a
-  hardware read-watchpoint on the status-flag array at `client+0x138`. If
-  confirmed: move buff detection off `client+0x138` (track the auto-pop +
-  bar drop at `client+0xaec`, or find the buff's own timer struct).
+- **The click-crash (Conquer.exe+0xE57F95):** the v12 capture showed the crash
+  runs on a BACKGROUND thread (`tid=10460` ≠ render thread `12964`) within one
+  frame of the click — a watchdog kill, not a fault in overlay-called code.
+  v13 tests the prime trigger (the trace file's creation in the watched game
+  folder) by moving the logs to `%TEMP%` under neutral names. If it still
+  crashes: remove file IO entirely (in-memory trace ring). If it stops: keep
+  the logs out of the game folder permanently and verify the feature works
+  end-to-end (buff ON → role+0xc0 = movePct-100; buff OFF → 0).
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
   overlay if we want it fully dialog-free (find the auto-pick config flag).
 - Verify jump-search (VIP3) engages while hunting.
@@ -532,18 +548,18 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. **XP move speed — crash captured, forensics in progress (v12):** the crash
-   is a NULL deref in Conquer.exe's own code at `0x01257F95` (NOT our DLL),
-   deterministic, with zero game-memory writes from the feature in the
-   captured run. Base speed control (scan + cap raise + field writes) is
-   proven stable, so the trigger lives in what the XP feature ADDS: the
-   status-bitmask poll at `client+0x138`. v12 dumps the DEBUG REGISTERS
-   (Dr0-Dr3/Dr6/Dr7 — a watchpoint inside `client+0x138..+0x180` proves an
-   anti-cheat read-tripwire), the crashing thread id, and a stage breadcrumb
-   to `speed_boost_crash.txt`; the poll no longer uses IsBadReadPtr
-   (VirtualQuery + SEH instead). Awaiting the v12 crash report from the user.
-   If the DR dump confirms the watchpoint: move buff detection off
-   `client+0x138` (e.g. track the auto-pop + the bar drop at `client+0xaec`).
+6. **XP move speed — crash hunt, round 3 (v13):** the v12 forensics proved the
+   crash is a BACKGROUND watchdog thread (`tid=10460` ≠ render thread `12964`)
+   killing the process at the fixed address `0x01257F95` WITHIN ONE FRAME of
+   the click — before the first tick, so no poll, scan, cap raise, or write
+   ever ran. All game-memory theories are exonerated. The click's only
+   externally visible side effect is the first Trace() creating
+   `speed_boost_trace.txt` in the (watched) game folder — the prime trigger,
+   and the likely cause of the v8-era "AV cut-off" line loss. v13 moved the
+   logs to `%TEMP%` (`co_overlay_trace.log` / `co_overlay_crash.log`).
+   Awaiting the v13 test: if enabling no longer crashes, the file was the
+   trigger; if it still crashes, the next bisection removes file IO entirely
+   (in-memory trace ring buffer, dumped on demand).
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
