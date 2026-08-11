@@ -99,12 +99,17 @@ lands → drag the speed slider up → when the buff is consumed, drag it back t
 100% (that's how they avoid the server disconnect). The feature automates
 that exact swap through the identical write path — same engine, same fields.
 
-**Final shape (v7+):** one speed engine, two presets. Every frame the tick
-computes `percent` = boost slider while the XP buff is up (after the settle
-delay below), else the base slider (or stock 100% when only the boost is
-enabled), and feeds it to the identical `WriteSpeedFields` path the base
-feature uses (same role, same fields, same cap table). Slider range
-100–2000% on BOTH sliders (the user manually validated 2000%), default 500%.
+**Final shape (v11):** the feature was redesigned as **"XP move speed"** —
+movement runs at the custom slider value while an XP skill buff is active and
+is forced to exactly 100% the instant the buff drops. Two changes from the
+old boost: (1) MOVEMENT ONLY — only the `role+0xc0` move-state path is driven
+(the `+0x44/+0x48` action divisor is forced to stock, so attack/pickup speed
+never changes); (2) the fallback is always stock 100% — the base speed slider
+no longer leaks into the buff-down state (while the feature is enabled it
+owns the speed fields outright). Detect-only mode was removed (the forensics
+below exonerated the writes). If walking ever stops responding on a new
+build, drive the divisor path too — both paths scale walk; `+0xc0` is the
+movement-only one.
 
 **v7 fix — the settle delay:** the user's crash-free manual process never
 applies the high speed in the XP skill's CAST FRAME — a human reacts a few
@@ -128,6 +133,9 @@ value; the snap-back on buff end stays instant.
   - Union polled: `0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB`.
 - The poll only runs once the character is fully in the game world (the client
   id fields at `+0x268/+0x26C` are non-zero — they are 0 at login).
+- v12: the poll no longer uses `IsBadReadPtr` (that API TOUCHES the page — a
+  hidden read that can spring PAGE_GUARD tripwires); it `VirtualQuery`-checks
+  the region (pure VAD query, no page contact) and reads under SEH.
 
 **🎯 THE CRASH, CAPTURED (v9 crash reporter, 2026-08-11 ~22:20):**
 
@@ -147,12 +155,17 @@ Analysis:
   (`role=00000000, scan=0`) — so the boost wrote **NOTHING** to game memory.
   The crash is therefore NOT caused by our speed/cap writes. It is the game's
   own code dying on a NULL pointer shortly after the boost is enabled.
-- Suspect subsystems (to be identified by v10's stack walk):
+- The base speed feature (scan + cap raise + field writes + its own slider)
+  is proven stable (the user's manual process), so the trigger lives in what
+  the XP feature ADDS: the status-bitmask poll at `client+0x138`.
+- Suspect subsystems (to be identified by v12's stack walk + debug registers):
   (a) a game UI handler (handler functions live around `0x01262xxx`, near the
       crash at `0x01257F95`) — a click leaking into the game's own UI;
   (b) the game's render path reacting to our extra ImGui drawing;
   (c) an anti-cheat watchdog deliberately dereferencing NULL (a deliberate
-      "crash on detection").
+      "crash on detection") — e.g. a HARDWARE READ-WATCHPOINT (Dr0-Dr3) on the
+      status-flag array: the game's own reads pass, a read from our module
+      dies. v12's debug-register dump confirms/denies this directly.
 - The stage traces ALSO proved the trace file itself gets cut off mid-flight
   by antivirus interference (the code between the last logged marker and the
   crash is provably-safe ImGui text) — v10 keeps one persistent file handle
@@ -163,6 +176,15 @@ the full register set (EAX–EDI), the 8 faulting instruction bytes at EIP, and
 an **EBP frame-chain walk** (8 frames of return addresses) — the caller
 addresses identify WHICH game subsystem (UI handler / renderer / logic)
 called into the crashing function. `speed_boost_crash.txt`.
+
+**v12 (67ab84a) — crash hunt, round 2:** the crash report now ALSO dumps the
+**debug registers (Dr0-Dr3/Dr6/Dr7)** — a DR pointing inside
+`client+0x138..+0x180` proves the anti-cheat read-tripwire — plus the
+**crashing thread id** (tells a watchdog/worker thread apart from the render
+thread) and a **stage breadcrumb** (`g_lastStage`, survives even a silenced
+trace file). Every trace line now carries the thread id too. If the
+watchpoint is confirmed, buff detection must move off `client+0x138`
+(e.g. track the auto-pop + the bar drop at `client+0xaec`).
 
 **Crash saga timeline:**
 
@@ -188,13 +210,18 @@ called into the crashing function. `speed_boost_crash.txt`.
   (+ `<signal.h>` build fix). **Captured the crash line above.**
 - **v10 (bcc164d):** full forensics (registers, EIP bytes, EBP stack walk) +
   persistent trace handle.
+- **v11 (71f61c1):** redesign as "XP move speed" — movement-only via
+  `role+0xc0` (divisor path forced to stock), strict 100% fallback, detect-only
+  removed. User-confirmed click still crashes — the trigger is NOT the writes.
+- **v12 (67ab84a):** DR-register dump + thread id + stage breadcrumb in the
+  crash report; probe-free status poll (VirtualQuery + SEH).
 
-**Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):**
-`role+0x48` flag + `role+0x44` divisor (uncapped, supports the full 2000% =
-20x) plus `role+0xc0` (the nSpeedPercent path, capped per state by the
-13-dword table at `0x016F7E44`; the table is raised to the configured value
-while any speed feature is on and restored when all are off). The my-role
-scanner is shared with the base speed feature.
+**Integration (`src/hooks/speed.cpp`, "XP skill move speed" checkbox):**
+`role+0xc0` move-state delta only (the nSpeedPercent path, capped per state by
+the 13-dword table at `0x016F7E44`; the table is raised to the configured
+value while any speed feature is on and restored when all are off); the
+`role+0x44/+0x48` divisor path is forced to stock while the feature owns the
+fields. The my-role scanner is shared with the base speed feature.
 
 ---
 
@@ -295,7 +322,7 @@ checkbox (default OFF) in case a server ever needs it.
 ### 3. VIP level spoof (client-side)
 The VIP getter `FUN_00fd3271` reads the level from the client object (`client+0x9e4`,
 or `+0x9ec` when the `FUN_01118b17` branch flag is set). The auto-hunt feature gates
-`FUN_00f3314b` / `FUN_00f3316c` just do `requiredLevel <= vipLevel`. The overlay forces
+`FUN_00f3314b` / `FUN_00f3316C` just do `requiredLevel <= vipLevel`. The overlay forces
 both fields to `6` every frame → passes every gate (jump-search VIP3+, auto-pick VIP4+).
 **Client-side only** — server-enforced VIP features (shop, teleport) still fail.
 
@@ -340,11 +367,17 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `53eaa1b` | v9: process-wide crash reporter (speed_boost_crash.txt) + SIGABRT handler + tracer auto-disable |
 | `bd9c753` | v9b: missing `<signal.h>` include build fix |
 | `bcc164d` | v10: full crash forensics (registers, EIP bytes, EBP stack walk) + persistent trace handle |
+| `71f61c1` | v11: XP move speed redesign - movement-only via role+0xc0, strict 100% fallback, detect-only removed |
+| `67ab84a` | v12: crash hunt round 2 - DR-register dump + thread id + stage breadcrumb in the crash report; probe-free status poll |
 
 ### Open / next
 - **Identify the crashing game function at Conquer.exe+0xE57F95** using the
-  v10 forensics (register dump + instruction bytes + EBP stack walk) — the
-  caller addresses will name the subsystem (UI handler / renderer / anti-cheat).
+  v12 forensics (register dump + DEBUG REGISTERS + instruction bytes + EBP
+  stack walk + thread id) — the caller addresses will name the subsystem
+  (UI handler / renderer / anti-cheat), and Dr0-Dr3 will confirm/deny a
+  hardware read-watchpoint on the status-flag array at `client+0x138`. If
+  confirmed: move buff detection off `client+0x138` (track the auto-pop +
+  bar drop at `client+0xaec`, or find the buff's own timer struct).
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
   overlay if we want it fully dialog-free (find the auto-pick config flag).
 - Verify jump-search (VIP3) engages while hunting.
@@ -462,8 +495,8 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
   - imm = 0x0100 → 3 hits: manager ctor 00f264e2, manager dtor 00f2a19c, and
     FUN_010a8c39 @ 010a8c4f (different class; sets +0x10=0x100 alongside timeGetTime).
   - **No immediate-write "stop hunting" setter exists for the manager.** The runtime
-    state flip is the client-side byte write (which the overlay now performs) — see the
-    WORKING STATE section.
+    state flip is the client-side byte write (which the overlay now performs) — see
+    the WORKING STATE section.
 
 ### Overlay integration (src/hooks/auto_hunt.cpp)
 
@@ -499,13 +532,18 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. **XP skill speed boost — crash captured, forensics in progress (v10):** the
-   crash is a NULL deref in Conquer.exe's own code at `0x01257F95` (NOT our
-   DLL), deterministic, with zero game-memory writes from the boost in the
-   captured run. v10 dumps registers, faulting instruction bytes, and an EBP
-   stack walk to `speed_boost_crash.txt` — the caller addresses will identify
-   the subsystem (game UI handler / renderer / anti-cheat). Awaiting the v10
-   crash report from the user.
+6. **XP move speed — crash captured, forensics in progress (v12):** the crash
+   is a NULL deref in Conquer.exe's own code at `0x01257F95` (NOT our DLL),
+   deterministic, with zero game-memory writes from the feature in the
+   captured run. Base speed control (scan + cap raise + field writes) is
+   proven stable, so the trigger lives in what the XP feature ADDS: the
+   status-bitmask poll at `client+0x138`. v12 dumps the DEBUG REGISTERS
+   (Dr0-Dr3/Dr6/Dr7 — a watchpoint inside `client+0x138..+0x180` proves an
+   anti-cheat read-tripwire), the crashing thread id, and a stage breadcrumb
+   to `speed_boost_crash.txt`; the poll no longer uses IsBadReadPtr
+   (VirtualQuery + SEH instead). Awaiting the v12 crash report from the user.
+   If the DR dump confirms the watchpoint: move buff detection off
+   `client+0x138` (e.g. track the auto-pop + the bar drop at `client+0xaec`).
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
