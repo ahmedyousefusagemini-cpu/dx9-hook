@@ -88,22 +88,30 @@ failure is diagnosable from a screenshot.
 
 **Goal:** while an XP skill (Superman / Fatal Strike / ...) is active, movement
 speed jumps to a configurable value (100%–2000%); the moment the buff ends,
-speed snaps back to 100% automatically.
+speed snaps back to 100% automatically (and re-applies on the next buff —
+every cycle).
 
-**Detection — the client's own status flags, not bar-value guessing:** an active
-XP skill shows up as status flags checked with
-`FUN_00f1a1d8(client /*ECX*/, statusId) -> AL != 0`.
-Disassembly-verified wrapper: `CMP [EBP+8],0x23F; JA -> return 0`, else
-`ADD ECX,0x138; JMP FUN_00f1eacd` — the status manager sub-object lives at
-`client+0x138`; `RET 4` (callee cleans the one stack arg). The flag ids come
-from the game's own XP code:
+**Detection — the client's own status flags, read as RAW MEMORY (no calls):**
+an active XP skill shows up as status flags. v1 of this feature **called** the
+game's checker `FUN_00f1a1d8(client, id)` every frame and that **crashed the
+client** (calling into game code from the render path at the wrong moment).
+The disassembly showed the real implementation (`FUN_00d4e0ae`) is just a
+bitmask lookup, so v2 replicates it with pure reads — crash-proof:
 
-- `FUN_011154f5` (bar fill) refuses to refill while `0x96/0xC0/0xEB` are up;
-- `FUN_00a1d6bc` (XP dispatcher) skips re-casting while the per-skill flags
-  `0x5C/0x79/0x78/0x92/0x9F/0xC0/0xEB` are up.
-
-Union polled by the overlay: `0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB`
-(all < 0x240, so the wrapper accepts them).
+- `FUN_00f1a1d8(client /*ECX*/, statusId)`: `CMP [EBP+8],0x23F; JA -> 0`, else
+  `ADD ECX,0x138; JMP FUN_00f1eacd` → tail `FUN_00d4e0ae` — i.e. the status
+  manager sub-object is `client+0x138` (`RET 4`, callee-cleans).
+- `FUN_00d4e0ae(mgr, id)`: the flags are a **64-bit bitmask array** —
+  `entry = mgr + (id >> 6) * 8`, `bit = id & 0x3F`, low 32 bits at `entry+0`,
+  high 32 bits at `entry+4`. Ids < `0x240` → 9 qwords = 72 bytes at
+  `client+0x138`.
+- The XP flag ids come from the game's own XP code:
+  - `FUN_011154f5` (bar fill) refuses to refill while `0x96/0xC0/0xEB` are up;
+  - `FUN_00a1d6bc` (XP dispatcher) skips re-casting while `0x5C/0x79/0x78/
+    0x92/0x9F/0xC0/0xEB` are up.
+  - Union polled: `0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB`.
+- The poll only runs once the character is fully in the game world (the client
+  id fields at `+0x268/+0x26C` are non-zero — they are 0 at login).
 
 **Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):** same
 hookless role-field mechanism as the base speed control — `role+0x48` flag +
@@ -248,7 +256,8 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `348e798` | debug progress saved (offset confirmations, investigation state) |
 | `c2bf5aa` | auto XP v2: fire the XP-icon pseudo id `0x5FDC` (still no cast in-game) |
 | `d81c8f0` | auto XP v3: enumerate the learned-magic list, fire all XP-type skills (rotating) |
-| `7973d99` | XP skill speed boost: status-flag-driven 100–2000% while the XP buff runs |
+| `7973d99` | XP skill speed boost v1 (called the game status checker — CRASHED) |
+| `d0462c0` | XP speed boost v2: pure-read status bitmask at client+0x138, in-world gated |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
@@ -402,9 +411,11 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. ~~XP skill speed boost~~ — **done** (2026-08-11): poll the XP-buff status flags
-   via `FUN_00f1a1d8`; while active write the role speed fields with the boost
-   percent (100–2000%); snap back to 100% on buff end. In `speed.cpp`.
+6. ~~XP skill speed boost~~ — **done** (2026-08-11, v2 after a crash fix): poll the
+   XP-buff status flags as a RAW bitmask at `client+0x138` (decoded from
+   `FUN_00d4e0ae`; no game-code calls — v1 called `FUN_00f1a1d8` and crashed);
+   while active write the role speed fields with the boost percent (100–2000%);
+   snap back to 100% on buff end. In-world gated. In `speed.cpp`.
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.

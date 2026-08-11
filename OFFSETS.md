@@ -101,14 +101,18 @@ Two adjacent getters: `return *(byte*)(mgr+0x11)` then `return *(byte*)(mgr+0x12
 8A 41 11 C3 8A 41 12 C3
 ```
 
-**Status-flag check — `FUN_00f1a1d8` @ `0x00F1A1D8`**  
+**Status-flag check — `FUN_00f1a1d8` @ `0x00F1A1D8` → `FUN_00d4e0ae` @ `0x00D4E0AE`**  
 `bool __thiscall FUN_00f1a1d8(client /*ECX*/, uint statusId)` → `AL != 0` =
-status active. `RET 4` (callee cleans). Disassembly-verified:
-`CMP [EBP+8],0x23F; JA -> return 0`, else `ADD ECX,0x138; JMP FUN_00f1eacd` —
-the status manager sub-object lives at `client+0x138`. The XP code uses it
-with `0x96/0xC0/0xEB` (bar fill `FUN_011154f5`) and `0x5C/0x79/0x78/0x92/0x9F/
-0xC0/0xEB` (XP dispatcher `FUN_00a1d6bc`) — the overlay polls that union
-`{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}` for the XP-speed-boost feature.
+status active (`RET 4`). Wrapper disasm: `CMP [EBP+8],0x23F; JA -> 0`, else
+`ADD ECX,0x138; JMP FUN_00e1eacd → FUN_00d4e0ae`. The impl is a pure **64-bit
+bitmask lookup**: the status-flag array lives at `client+0x138`;
+`entry = mgr + (id >> 6) * 8`, `bit = id & 0x3F` (low 32 bits at `entry+0`,
+high 32 bits at `entry+4`); ids < `0x240` → 9 qwords = 72 bytes.
+**The overlay reads the bitmask directly — no game-code calls** (calling
+`FUN_00f1a1d8` from the render path crashed the client). XP-buff flag ids:
+`0x96/0xC0/0xEB` (bar fill `FUN_011154f5`) and `0x5C/0x79/0x78/0x92/0x9F/
+0xC0/0xEB` (XP dispatcher `FUN_00a1d6bc`) — union polled for the XP speed
+boost: `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`.
 
 ### XP-skill gates ("cannot use XP when hangup" block)
 
@@ -306,8 +310,9 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 
 | Offset | Type | Meaning |
 |---|---|---|
-| `+0x138` | object | status manager sub-object (`FUN_00f1a1d8` adds ECX+0x138 before the real check) |
+| `+0x138` | 72 bytes | status-flag bitmask array (9 qwords, ids < 0x240; entry = `id >> 6`, bit = `id & 0x3F`) — decoded from `FUN_00d4e0ae`; the overlay reads it directly |
 | `+0x268` | dword | own role/UID (confirmed at FUN_00d3fb0f: projectile-target == self branch; also the target arg the hunt brain / XP icon handler pass to `FUN_011b1ec9`) |
+| `+0x26c` | dword | own id, variant B (0 on this server) |
 | `+0x9e4` | dword | VIP level (FUN_00fd3271 default branch) |
 | `+0x9ec` | dword | VIP level (FUN_00fd3271 alt branch, when the 0x57f4 flag is set) |
 | `+0xaec` | dword | XP charge bar 0–100 (full = 100; read/written by FUN_011154f5; ECX=client confirmed at FUN_00d3fb0f) |
@@ -367,13 +372,15 @@ withholds this packet by default so the server treats kills as normal gameplay.
   clicking the lit XP icon runs (`FUN_00b811a4`). One pop per fill (latch until
   the bar drops, 5s retry), rotating round-robin through the fire list.
   Requires the XP gates patched (auto-enables them).
-- **XP speed boost:** every frame poll `FUN_00f1a1d8(client, id)` for the XP
-  status ids `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`; while any is active
-  write `role+0x48=1`, `role+0x44=(boost%-100)*100`, `role+0xc0=boost%-100`
-  (cap table `0x016F7E44` raised to the boost value; restored when all speed
-  features are off). When the buff ends the fields snap back to stock 100%
-  (or the base speed slider when that's also on). Same hookless role-field
-  mechanism + my-role scanner as the base speed control (`speed.cpp`).
+- **XP speed boost:** every frame, once in-world, read the status bitmask at
+  `client+0x138` directly (NO game calls — calling the checker crashed the
+  client): bit test the XP ids `{0x5C,0x78,0x79,0x92,0x96,0x9F,0xC0,0xEB}`;
+  while any is set write `role+0x48=1`, `role+0x44=(boost%-100)*100`,
+  `role+0xc0=boost%-100` (cap table `0x016F7E44` raised to the boost value,
+  restored when all speed features are off). When the buff ends the fields
+  snap back to stock 100% (or the base speed slider when that's also on).
+  Same hookless role-field mechanism + my-role scanner as the base speed
+  control (`speed.cpp`).
 
 ---
 
@@ -412,7 +419,7 @@ Use these to locate the code after an update when signatures fail:
       inner loop does `CALL <this+0x70 getter>` then `CMP [EAX+0x5C],[EBP+0xC]`).
 - [ ] XP pseudo id: find the XP icon handler via the `"yuanshen_jdt1"` string
       xref and take the id it passes to `FUN_011b1ec9` (`0x5FDC` on this build).
-- [ ] Status check: re-find via its callers (the bar fill `FUN_011154f5` calls
-      it with `0x96/0xC0/0xEB`); wrapper shape `CMP [EBP+8],0x23?; JA; ADD ECX,
-      0x1??; JMP <impl>`; `RET 4`.
+- [ ] Status bitmask: re-find via the checker's callers (the bar fill
+      `FUN_011154f5` uses `0x96/0xC0/0xEB`); wrapper shape `CMP [EBP+8],0x23?;
+      JA; ADD ECX,0x1??; JMP <impl>`; the impl is the 64-bit bitmask lookup.
 - [ ] Confirm each AOB match is unique before trusting it.
