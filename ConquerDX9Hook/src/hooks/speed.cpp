@@ -25,10 +25,13 @@
 // (FUN_010afd05 / FUN_00de86b2 - only role classes have them), so a random
 // object carrying the same id can't win the scan.
 //
-// Looting speed: unchanged from before - the hunt brain (FUN_00f54058) only
-// ticks when  timeGetTime() >= DAT_01a5cdb4 + 1000. Only the brain reads or
-// writes that global (verified by xrefs), so forcing it to 0 every frame lets
-// the brain issue find/attack/loot orders at frame rate instead of 1/sec.
+// Looting speed: the hunt brain (FUN_00f54058) only ticks when
+//   timeGetTime() >= DAT_01a5cdb4 + 1000.
+// Only the brain ever reads or writes that global (xref-verified). First
+// version re-armed the gate EVERY frame (brain ticked at frame rate,
+// ~30-60 loot/attack orders/sec) - the server's packet rate limiter
+// disconnected the character (confirmed live). The overlay now re-arms the
+// gate at a controlled rate instead (default 250 ms = 4 ticks/sec).
 //
 // Safety: only data writes, nothing patched. The game's interval math clamps
 // divisors to >= 1 and the final interval to >= 1. All speed-up is
@@ -67,13 +70,17 @@ namespace Speed
 	const int MIN_SPEED_PERCENT = 100;  // 100% = normal speed
 	const int MAX_SPEED_PERCENT = 500;  // beyond this the server rubber-bands hard
 
+	const int MIN_LOOT_TICK_INTERVAL_MS = 50;    // faster than ~20/sec trips rate limits
+	const int MAX_LOOT_TICK_INTERVAL_MS = 1000;  // 1000 ms = stock brain rate
+
 	const uintptr_t IMAGE_BASE = 0x00400000;   // Conquer.exe image base
 	const uintptr_t IMAGE_TOP  = 0x02000000;   // vtable sanity range upper bound
 
 	// User settings.
 	bool g_speedEnabled = false;
 	int  g_speedPercent = 200;          // default 2x
-	bool g_fastLootTick = false;        // reset the brain tick gate every frame
+	bool g_fastLootTick = false;        // re-arm the brain tick gate at a safe rate
+	int  g_lootTickIntervalMs = 250;    // default: brain ticks at most every 250 ms (4/sec)
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -274,10 +281,21 @@ namespace Speed
 	{
 		if (g_fastLootTick)
 		{
-			// Force the brain's last-tick timestamp to 0 so its 1000 ms gate
-			// passes every frame. Only FUN_00f54058 reads/writes this global.
-			if (!IsBadWritePtr((void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)))
-				*(unsigned long*)HUNT_BRAIN_TICK_GLOBAL = 0;
+			// Rate-limited re-arm of the brain's 1000 ms tick gate. Zeroing the
+			// timestamp EVERY frame made the brain tick at frame rate (~30-60
+			// loot/attack orders per second) - the server's packet rate limit
+			// disconnected the character. Instead, only re-arm once the chosen
+			// interval has passed since the brain's last real tick.
+			// NOTE: the brain compares DAT_01a5cdb4 against timeGetTime();
+			// GetTickCount shares the same millisecond time base.
+			if (!IsBadReadPtr((const void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)) &&
+				!IsBadWritePtr((void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)))
+			{
+				unsigned long lastTick = *(unsigned long*)HUNT_BRAIN_TICK_GLOBAL;
+				unsigned long now = GetTickCount();
+				if (now - lastTick >= (unsigned long)g_lootTickIntervalMs)
+					*(unsigned long*)HUNT_BRAIN_TICK_GLOBAL = now - 1000;  // make the gate pass
+			}
 		}
 
 		if (g_speedEnabled)
@@ -364,7 +382,13 @@ void RenderSpeedInterface()
 	}
 
 	ImGui::Checkbox("Fast auto-hunt/loot tick", &Speed::g_fastLootTick);
-	ImGui::TextDisabled("Brain ticks every frame instead of 1/sec -> faster loot/attack orders");
+	if (Speed::g_fastLootTick)
+	{
+		ImGui::SliderInt("Loot tick interval (ms)", &Speed::g_lootTickIntervalMs,
+			Speed::MIN_LOOT_TICK_INTERVAL_MS, Speed::MAX_LOOT_TICK_INTERVAL_MS);
+		ImGui::TextDisabled("Lower = faster looting. Frame-rate ticking gets you DISCONNECTED.");
+		ImGui::TextDisabled("If the server still kicks you, raise the interval.");
+	}
 
 	if (ImGui::TreeNode("Speed Debug"))
 	{
