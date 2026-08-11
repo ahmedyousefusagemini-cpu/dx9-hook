@@ -35,12 +35,19 @@
 // gate at a controlled rate instead (default 250 ms = 4 ticks/sec).
 //
 // XP skill speed boost (2026-08-11): AUTOMATION OF THE USER'S PROVEN MANUAL
-// PROCESS - they hunt at 100%, drag the base slider to 500% when the XP
-// skill pops, and drag it back when the buff expires. One speed engine (same
-// WriteSpeedFields, same role, same cap table as the base control), percent =
-// boost slider while the XP buff is up, base slider (or stock 100%) the
-// moment it ends, re-applied on the next buff - every cycle. Both sliders
-// run 100-2000% (user asked to test maximum movement speed while hunting).
+// PROCESS. The user does this by hand and it is stable EVEN AT 2000%:
+//   hunt at 100% -> XP skill lands -> drag the slider up -> when the buff is
+//   consumed, drag it back to 100% (avoids a server disconnect).
+// The automation does the identical swap through the identical write path.
+//
+// v7 KEY FIX - the settle delay: the manual process never applies the high
+// speed in the XP skill's CAST FRAME - a human reacts a few hundred ms after
+// the buff lands. The automation applied it the very frame the buff appeared
+// (mid cast animation) - the one timing the manual process never hits, and
+// the prime suspect for the crashes (a role's cast-state interval collapsing
+// at 5-20x while the animation is being set up). The boost now waits
+// BOOST_APPLY_DELAY_MS after the buff appears before applying the slider
+// value; the snap-back on buff end stays instant.
 //
 // XP-buff detection is PURE MEMORY READS - no game-code calls. The game's
 // status checker FUN_00f1a1d8(client, id) -> FUN_00d4e0ae is just a bitmask
@@ -53,16 +60,13 @@
 // dispatcher FUN_00a1d6bc skips re-casting while 0x5C/0x79/0x78/0x92/0x9F/
 // 0xC0/0xEB are up. Union = the 8 ids polled below.
 //
-// Crash saga + the v6 investigation kit (2026-08-11, late): v5 STILL crashed
-// on click even with flag-only handlers + SEH-guarded tick. v6 adds:
+// Diagnostics kept from v6 (the v5 build still crashed on click):
 //   1. CRASH TRACER - every stage appends one line to speed_boost_trace.txt
-//      (in the game's working directory). After a crash, the LAST line names
-//      the exact stage that was running (poll / caps / write / scan / render).
+//      (game working directory; the Speed Debug tree shows the full path).
+//      After a crash, the LAST line names the exact stage that was running.
 //   2. DETECT-ONLY MODE (default ON) - polls the XP buff and shows the status
-//      line but never touches speed fields or the cap table. Bisect protocol:
-//      crash in detect-only => the detector is the culprit; no crash until
-//      detect-only is turned off => the write/cap stage is the culprit.
-// A visible build tag in the UI settles which DLL is running.
+//      line but never touches speed fields or the cap table.
+//   3. Visible build tag in the UI settles which DLL is running.
 //
 // Safety: only data writes, nothing patched, no game-code calls. The game's
 // interval math clamps divisors to >= 1 and the final interval to >= 1. All
@@ -96,11 +100,16 @@ namespace Speed
 	const size_t STATUS_FLAGS_SPAN = 9 * 8;           // ids < 0x240 -> 9 qwords = 72 bytes
 
 	const int MIN_SPEED_PERCENT = 100;   // 100% = normal speed
-	const int MAX_SPEED_PERCENT = 2000;  // user-requested test range (500 = validated ceiling)
+	const int MAX_SPEED_PERCENT = 2000;  // user-requested test range (manually validated)
 
 	// XP boost slider range - same engine, same range as the base slider.
 	const int MIN_XP_BOOST_PERCENT = 100;
 	const int MAX_XP_BOOST_PERCENT = 2000;
+
+	// The user's crash-free manual process never applies the high speed in the
+	// XP skill's cast frame - they react a moment after the buff lands. The
+	// automation does the same (see the header comment).
+	const DWORD BOOST_APPLY_DELAY_MS = 400;
 
 	const int MIN_LOOT_TICK_INTERVAL_MS = 50;    // faster than ~20/sec trips rate limits
 	const int MAX_LOOT_TICK_INTERVAL_MS = 1000;  // 1000 ms = stock brain rate
@@ -110,7 +119,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v6 (2026-08-11)";
+	const char* const BUILD_TAG = "v7 (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
@@ -133,7 +142,8 @@ namespace Speed
 	volatile int g_matchedRule = 0;             // which id rule hit (0 none, 1 A, 2 B, 3 cross)
 	volatile int g_vtableHasIntervalFn = 0;     // candidate's vtable passed the class check
 	bool g_xpBuffActive = false;                // last status poll (for the UI)
-	bool g_prevBuffActive = false;              // edge detection for the tracer
+	bool g_prevBuffActive = false;              // edge detection for the tracer + delay
+	DWORD g_buffActivatedTick = 0;              // when the current buff was first seen
 	bool g_firstPassPending = false;            // log the first tick's stages after enable
 	bool g_renderLogged = false;                // log the first boost-section render
 	bool g_anySpeedWasOn = false;               // last frame's wantSpeed (off-transition restore)
@@ -456,11 +466,14 @@ namespace Speed
 
 			if (wantSpeed)
 			{
-				// Automation of the proven manual swap: the boost slider's value
-				// is fed in while an XP skill buff runs; the moment it ends the
-				// base slider (or stock 100% when only the boost is on) takes over
-				// again, and the next buff re-applies the boost value - every cycle.
 				if (g_firstPassPending) Trace("tick: begin");
+				DWORD now = GetTickCount();
+
+				// Automation of the proven manual swap: the boost slider's value
+				// is fed in while an XP skill buff runs - but only AFTER a short
+				// settle delay, exactly like the user's manual timing (never in
+				// the XP skill's cast frame). The moment the buff ends the base
+				// slider (or stock 100%) takes over again instantly.
 				int percent = MIN_SPEED_PERCENT;
 				if (g_xpBoostEnabled)
 				{
@@ -483,12 +496,19 @@ namespace Speed
 
 					if (active != g_prevBuffActive)
 					{
-						Trace(active ? "buff: ON" : "buff: OFF");
+						Trace(active ? "buff: ON (settle delay armed)" : "buff: OFF");
+						if (active)
+							g_buffActivatedTick = now;
 						g_prevBuffActive = active;
 					}
 					g_xpBuffActive = active;
-					if (active && !g_xpBoostDetectOnly)
+
+					// Apply only after the settle delay - never in the cast frame.
+					if (active && !g_xpBoostDetectOnly &&
+						now - g_buffActivatedTick >= BOOST_APPLY_DELAY_MS)
+					{
 						percent = g_xpBoostPercent;
+					}
 				}
 				if (percent == MIN_SPEED_PERCENT && g_speedEnabled)
 					percent = g_speedPercent;
@@ -591,7 +611,8 @@ void RenderSpeedInterface()
 
 	ImGui::Spacing();
 
-	// XP boost: the manual 100% <-> 500% slider swap, automated.
+	// XP boost: the manual 100% <-> high% slider swap, automated, with the same
+	// human timing (a short settle delay after the buff lands).
 	bool xpBoost = Speed::g_xpBoostEnabled;
 	if (ImGui::Checkbox("XP skill speed boost", &xpBoost))
 		Speed::SetXpBoostEnabled(xpBoost);
@@ -610,12 +631,22 @@ void RenderSpeedInterface()
 
 		ImGui::SliderInt("XP boost speed %", &Speed::g_xpBoostPercent,
 			Speed::MIN_XP_BOOST_PERCENT, Speed::MAX_XP_BOOST_PERCENT);
+
 		if (Speed::g_xpBuffActive)
-			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "XP buff ACTIVE - boosting");
+		{
+			if (Speed::g_xpBoostDetectOnly)
+				ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "XP buff ACTIVE (detect-only: no speed change)");
+			else if (GetTickCount() - Speed::g_buffActivatedTick < Speed::BOOST_APPLY_DELAY_MS)
+				ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "XP buff ACTIVE - applying in a moment...");
+			else
+				ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "XP buff ACTIVE - boosting");
+		}
 		else
+		{
 			ImGui::TextDisabled("XP buff inactive - normal speed");
-		ImGui::TextDisabled("While an XP skill (Superman / Fatal Strike / ...) runs, speed jumps");
-		ImGui::TextDisabled("to this value; it snaps back to 100% the moment the buff ends.");
+		}
+		ImGui::TextDisabled("Applies ~0.4s after the buff lands (like your manual timing) and");
+		ImGui::TextDisabled("snaps back to 100% the instant the buff ends - no disconnect.");
 		ImGui::TextDisabled("Start at 500 or less - very high values can be unstable.");
 	}
 

@@ -82,32 +82,39 @@ UI shows the live bar value, a pop counter, the last fired id, and an
 **XP Debug** tree (learned-magic count + the detected XP skill ids) so a
 failure is diagnosable from a screenshot.
 
-⚠️ Open suspicion (2026-08-11, late): if a client crash ever correlates with
-the XP bar filling while auto-pop is enabled, re-verify the `FUN_011b1ec9`
-call contract (arg count / RET N) at the disassembly level — a callee-clean
-mismatch would corrupt the caller's stack. Not yet implicated; the user
-reportedly does the XP-skill pop MANUALLY.
+⚠️ Open suspicion (2026-08-11, late): `xp_skill.cpp::FireMagic` still calls
+game code (`FUN_011b1ec9`) via inline asm — the same class of call that
+crashed boost v1. If a client crash ever correlates with the XP bar filling
+while auto-pop is enabled, re-verify the call contract (arg count / RET N) at
+the disassembly level first. Not yet implicated (the user reports doing XP
+pops and speed swaps MANUALLY without crashes).
 
 ---
 
 ## ✅ XP skill speed boost (2026-08-11) — the manual swap, automated
 
-**Goal (user's exact ask, clarified 21:01):** the user ALREADY does this by
-hand and it is stable: hunt at 100%, drag the base speed slider to 500% when
-the XP skill pops, drag it back to 100% when the buff expires. The feature
-just automates that exact swap — same engine, same fields — plus both sliders
-were raised to 100–2000% so maximum movement speed can be tested.
+**Goal (user's exact ask, clarified 21:01 + 21:23):** the user ALREADY does
+this by hand and it is stable **even at 2000%**: hunt at 100% → the XP skill
+lands → drag the speed slider up → when the buff is consumed, drag it back to
+100% (that's how they avoid the server disconnect). The feature automates
+that exact swap through the identical write path — same engine, same fields.
 
-**Final shape (v5+):** one speed engine, two presets. Every frame the tick
-computes `percent` = boost slider while the XP buff is up, else the base
-slider (or stock 100% when only the boost is enabled), and feeds it to the
-identical `WriteSpeedFields` path the base feature uses (same role, same
-fields, same cap table). The buff poll flips the moment the XP skill ends, so
-the snap-back happens the same frame; the next buff re-applies the boost
-value — fully automatic, every cycle. Slider range 100–2000%, **default 500%
-(the user's live-validated stable value)**. A visible **build tag** is
-rendered in the Speed section so the running DLL version can be verified from
-a screenshot — stale-DLL confusion cost several crash rounds.
+**Final shape (v7):** one speed engine, two presets. Every frame the tick
+computes `percent` = boost slider while the XP buff is up (after the settle
+delay below), else the base slider (or stock 100% when only the boost is
+enabled), and feeds it to the identical `WriteSpeedFields` path the base
+feature uses (same role, same fields, same cap table). Slider range
+100–2000% on BOTH sliders (the user manually validated 2000%), default 500%.
+
+**v7 key fix — the settle delay:** the user's crash-free manual process never
+applies the high speed in the XP skill's CAST FRAME — a human reacts a few
+hundred ms after the buff lands. The automation applied it the very frame the
+buff appeared (mid cast animation) — the one timing the manual process never
+hits, and the prime suspect for the crashes (a role's cast-state interval
+collapsing at 5–20x while the animation is being set up). The boost now waits
+**400 ms** (`BOOST_APPLY_DELAY_MS`) after the buff appears before applying the
+slider value; the snap-back on buff end stays instant. UI shows three states:
+inactive / "applying in a moment..." / boosting.
 
 **Detection — the client's own status flags, read as RAW MEMORY (no calls):**
 an active XP skill shows up as status flags. The disassembly showed the real
@@ -142,9 +149,7 @@ implementation is just a bitmask lookup, replicated with pure reads:
 - **v4 (8e6164a):** default boost lowered 1000 → 500.
 - **v5 (a457b0f):** manual-swap automation framing, both sliders 100–2000%,
   visible build tag. **User confirmed running v5 — still crashed on click.**
-  Since a flag-only click + SEH-guarded tick cannot crash in analysis, v6
-  instruments the feature to find the real site:
-- **v6 (e92d72b) — investigation kit:**
+- **v6 (e92d72b) — investigation kit (still current):**
   1. **Crash tracer** — every stage (click / tick begin / poll before+after /
      caps VirtualProtect+written / role write / scan start+result / first
      render of the boost section / buff ON/OFF transitions / caught
@@ -154,8 +159,16 @@ implementation is just a bitmask lookup, replicated with pure reads:
   2. **Detect-only mode (default ON)** — polls the buff and updates the status
      line but never touches speed fields or the cap table. Bisect protocol:
      crash with detect-only ON ⇒ the detector/poll is the culprit; crash only
-     after turning detect-only OFF ⇒ the write/cap stage is the culprit; no
-     crash either way ⇒ the earlier crashes were environmental.
+     after turning detect-only OFF ⇒ the write/cap stage is the culprit.
+- **v7 — the settle delay** (the likely real fix once the user clarified the
+  manual process): never apply the boost in the XP skill's cast frame; wait
+  400 ms after the buff appears, exactly like the user's human timing.
+
+**Open question for the user:** does "crash" mean the client closes/freezes
+(client-side) or getting kicked back to the login screen (server disconnect)?
+The user reverts to 100% manually specifically to avoid a *disconnect* — if
+the "crash" is actually a disconnect, the write magnitude/timing is the
+suspect, not memory safety.
 
 **Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):**
 `role+0x48` flag + `role+0x44` divisor (uncapped, supports the full 2000% =
@@ -302,13 +315,17 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `8e6164a` | XP speed boost v4: same-engine preset swap framing, default 500% (validated ceiling) |
 | `a457b0f` | XP speed boost v5: manual-swap automation, both sliders 100–2000%, visible build tag |
 | `e92d72b` | XP speed boost v6: crash tracer (speed_boost_trace.txt) + default-on detect-only mode |
+| `a1c1b2e` | XP speed boost v7: 400 ms settle delay after the buff lands (mimics the crash-free manual timing) |
 
 ### Open / next
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
   overlay if we want it fully dialog-free (find the auto-pick config flag).
 - Verify jump-search (VIP3) engages while hunting.
 - If crashes ever correlate with auto-XP pops (not manual pops), re-verify the
-  `FUN_011b1ec9` call contract at the disassembly level.
+  `FUN_011b1ec9` call contract at the disassembly level (`FireMagic` is the last
+  remaining game-code call in the overlay).
+- Ask the user whether "crash" = client closes/freezes or = kicked to login
+  (server disconnect) — changes the suspect list entirely.
 
 ---
 
@@ -457,12 +474,12 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. **XP skill speed boost — crash investigation in progress (v6):** the feature
-   automates the user's proven manual swap (boost slider while the XP buff is
-   up, stock 100% the frame it ends) with pure-read detection and SEH-guarded
-   tick; v6 adds a crash tracer (`speed_boost_trace.txt` — last line = crashing
-   stage) and a default-on detect-only mode to bisect detector vs writes.
-   Awaiting the user's trace results.
+6. **XP skill speed boost — v7 shipped:** automates the user's proven manual
+   swap with the same timing (400 ms settle delay after the buff lands, instant
+   snap-back when it ends); both sliders 100–2000%; detection = pure-read
+   status bitmask at `client+0x138`; click handlers flip a flag only; tick is
+   SEH-guarded; crash tracer + detect-only bisect mode remain for diagnosis.
+   Awaiting confirmation (and the crash-vs-disconnect answer) from the user.
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
