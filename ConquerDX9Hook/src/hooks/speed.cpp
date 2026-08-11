@@ -33,26 +33,29 @@
 // disconnected the character (confirmed live). The overlay now re-arms the
 // gate at a controlled rate instead (default 250 ms = 4 ticks/sec).
 //
-// XP skill speed boost (2026-08-11): the client tracks an active XP skill
-// (Superman / Fatal Strike / ...) through status flags checked with
-//   FUN_00f1a1d8(client /*ECX*/, statusId)  ->  AL != 0 = active.
-// (Disasm-verified wrapper: CMP [EBP+8],0x23F; JA -> 0; else
-//  ADD ECX,0x138; JMP FUN_00f1eacd - the status manager lives at client+0x138.
-//  RET 4: callee cleans the stack arg.)
-// The flag ids come from the game's own XP code - the bar-fill function
-// FUN_011154f5 refuses to refill while 0x96/0xC0/0xEB are up, and the XP
-// dispatcher FUN_00a1d6bc skips re-casting while the per-skill flags
-// 0x5C/0x79/0x78/0x92/0x9F/0xC0/0xEB are up. Union = the 8 ids polled below.
-// While any of them is active, speed jumps to the XP-boost slider value
-// (up to 2000% = 20x - the role+0x44 path is uncapped; the cap table is
-// raised to match for the role+0xc0 path). The moment the buff ends the
-// poll flips and the fields fall back to stock (or to the base slider value
-// when normal speed control is also enabled).
+// XP skill speed boost (2026-08-11): while an XP skill buff (Superman /
+// Fatal Strike / ...) is active, speed jumps to the XP-boost slider value
+// (100-2000%); the moment the buff ends the poll flips and the fields fall
+// back to stock 100% (or to the base slider when that's also enabled).
 //
-// Safety: only data writes, nothing patched. The game's interval math clamps
-// divisors to >= 1 and the final interval to >= 1. All speed-up is
-// client-side: the server may rubber-band movement or drop loot requests at
-// extreme values, so the base slider tops out at 500%.
+// XP-buff detection is PURE MEMORY READS - no game-code calls. v1 of this
+// feature called the game's status checker FUN_00f1a1d8(client, id) per frame
+// and that CRASHED the client (calling into game code at the wrong moment).
+// The real implementation behind it (FUN_00d4e0ae) is just a bitmask lookup,
+// decoded by disassembly:
+//   status flags = 64-bit bitmask array at client+0x138 (the wrapper does
+//   ADD ECX,0x138 before tail-jumping there);
+//   entry = manager + (id >> 6) * 8, bit = id & 0x3F
+//   (low 32 bits at entry+0, high 32 bits at entry+4; ids < 0x240).
+// The flag ids come from the game's own XP code: the bar-fill function
+// FUN_011154f5 refuses to refill while 0x96/0xC0/0xEB are up, and the XP
+// dispatcher FUN_00a1d6bc skips re-casting while 0x5C/0x79/0x78/0x92/0x9F/
+// 0xC0/0xEB are up. Union = the 8 ids polled below.
+//
+// Safety: only data writes, nothing patched, no game-code calls. The game's
+// interval math clamps divisors to >= 1 and the final interval to >= 1. All
+// speed-up is client-side: the server may rubber-band movement or drop loot
+// requests at extreme values, so the base slider tops out at 500%.
 // ============================================================================
 
 namespace Speed
@@ -62,7 +65,6 @@ namespace Speed
 	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010AFD05;  // FUN_010afd05 - interval virtual (vtable check)
 	const uintptr_t ACTION_INTERVAL_CORE   = 0x00DE86B2;  // FUN_00de86b2 - master computation (vtable check)
 	const uintptr_t SPEED_CAP_TABLE        = 0x016F7E44;  // per-state nSpeedPercent caps (13 dwords)
-	const uintptr_t HAS_STATUS_FUNC        = 0x00F1A1D8;  // FUN_00f1a1d8 - client status-flag check
 
 	// Two id placements seen in the wild (this server leaves client+0x26c = 0):
 	//  A: client+0x268 <-> role+0x54   (the game's own my-role match in FUN_00d3203a:
@@ -76,6 +78,10 @@ namespace Speed
 	const size_t ROLE_SPEED_BOOST_OFFSET = 0x44;   // role+0x44: boost in 1/100 % (needs +0x48)
 	const size_t ROLE_SPEED_BOOST_FLAG   = 0x48;   // role+0x48: byte, enables the +0x44 divisor
 	const size_t ROLE_SPEED_DELTA_OFFSET = 0xc0;   // role+0xc0: nSpeedPercent delta (FUN_00deb537)
+
+	// Status flags bitmask (the XP-buff detector; see the header comment).
+	const size_t CLIENT_STATUS_FLAGS_OFFSET = 0x138;  // client+0x138: 64-bit flag array
+	const size_t STATUS_FLAGS_SPAN = 9 * 8;           // ids < 0x240 -> 9 qwords = 72 bytes
 
 	const int MIN_SPEED_PERCENT = 100;  // 100% = normal speed
 	const int MAX_SPEED_PERCENT = 500;  // beyond this the server rubber-bands hard
@@ -212,23 +218,21 @@ namespace Speed
 		g_raisedCapValue = needed;
 	}
 
-	// FUN_00f1a1d8(client /*ECX*/, statusId) -> AL != 0: status active.
-	// (RET 4 - callee cleans; verified by disassembly.)
-	bool HasStatus(int client, unsigned int statusId)
+	// Pure-read equivalent of the game's status check
+	//   FUN_00f1a1d8(client, statusId) -> FUN_00d4e0ae(client+0x138, statusId):
+	// the status flags are a 64-bit bitmask array at client+0x138;
+	// entry = (id >> 6), bit = (id & 0x3F), low word at +0, high word at +4.
+	bool IsStatusActive(int client, unsigned int statusId)
 	{
-		if (IsBadReadPtr((const void*)HAS_STATUS_FUNC, 1))
+		if (client == 0)
 			return false;
-		uintptr_t hasStatusFunc = HAS_STATUS_FUNC;
-		int result = 0;
-		__asm
-		{
-			push statusId
-			mov  ecx, client
-			call hasStatusFunc
-			movzx eax, al
-			mov  result, eax
-		}
-		return result != 0;
+		if (IsBadReadPtr((const void*)(client + CLIENT_STATUS_FLAGS_OFFSET), STATUS_FLAGS_SPAN))
+			return false;
+		uintptr_t entry = client + CLIENT_STATUS_FLAGS_OFFSET + (statusId >> 6) * 8;
+		unsigned int bit = statusId & 0x3F;
+		if (bit < 32)
+			return ((*(const unsigned int*)entry >> bit) & 1) != 0;
+		return ((*(const unsigned int*)(entry + 4) >> (bit - 32)) & 1) != 0;
 	}
 
 	// True while any XP-skill buff (Superman / Fatal Strike / ...) is running.
@@ -236,7 +240,7 @@ namespace Speed
 	{
 		for (int i = 0; i < _countof(XP_STATUS_IDS); i++)
 		{
-			if (HasStatus(client, XP_STATUS_IDS[i]))
+			if (IsStatusActive(client, XP_STATUS_IDS[i]))
 				return true;
 		}
 		return false;
@@ -397,7 +401,15 @@ namespace Speed
 			if (g_xpBoostEnabled)
 			{
 				int client = GetClientObject();
-				bool active = client != 0 && IsXpSkillActive(client);
+				bool active = false;
+				if (client != 0)
+				{
+					// Only poll once fully in the game world (ids are 0 at login).
+					unsigned int idA = 0, idB = 0;
+					GetClientIds(client, &idA, &idB);
+					if (idA != 0 || idB != 0)
+						active = IsXpSkillActive(client);
+				}
 				g_xpBuffActive = active;
 				if (active)
 					percent = g_xpBoostPercent;
