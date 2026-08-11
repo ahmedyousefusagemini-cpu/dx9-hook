@@ -129,7 +129,42 @@ value; the snap-back on buff end stays instant.
 - The poll only runs once the character is fully in the game world (the client
   id fields at `+0x268/+0x26C` are non-zero — they are 0 at login).
 
-**Crash saga + what the traces proved:**
+**🎯 THE CRASH, CAPTURED (v9 crash reporter, 2026-08-11 ~22:20):**
+
+```
+CRASH code=C0000005 addr=01257F95 accessTarget=00000000 eip=01257F95
+      esp=16C77794 ebp=16C777B4 game=00400000 dll=736F0000
+```
+
+Analysis:
+- `C0000005` = access violation; `accessTarget=00000000` = **NULL pointer
+  dereference** (a NULL object used with no field offset — e.g. `MOV x,[ECX]`
+  with ECX=0 or a `CALL [EAX]` virtual call on a NULL object).
+- The faulting instruction is at **`Conquer.exe + 0xE57F95`** (game base
+  `0x00400000`) — **inside the game's own code, NOT in our DLL** (loaded at
+  `0x736F0000`). Deterministic across three runs.
+- In the captured run, detect-only was ON and the role scan never ran
+  (`role=00000000, scan=0`) — so the boost wrote **NOTHING** to game memory.
+  The crash is therefore NOT caused by our speed/cap writes. It is the game's
+  own code dying on a NULL pointer shortly after the boost is enabled.
+- Suspect subsystems (to be identified by v10's stack walk):
+  (a) a game UI handler (handler functions live around `0x01262xxx`, near the
+      crash at `0x01257F95`) — a click leaking into the game's own UI;
+  (b) the game's render path reacting to our extra ImGui drawing;
+  (c) an anti-cheat watchdog deliberately dereferencing NULL (a deliberate
+      "crash on detection").
+- The stage traces ALSO proved the trace file itself gets cut off mid-flight
+  by antivirus interference (the code between the last logged marker and the
+  crash is provably-safe ImGui text) — v10 keeps one persistent file handle
+  open instead of re-opening per line.
+
+**v10 (bcc164d) — full crash forensics:** the crash reporter now also writes
+the full register set (EAX–EDI), the 8 faulting instruction bytes at EIP, and
+an **EBP frame-chain walk** (8 frames of return addresses) — the caller
+addresses identify WHICH game subsystem (UI handler / renderer / logic)
+called into the crashing function. `speed_boost_crash.txt`.
+
+**Crash saga timeline:**
 
 - **v1 (7973d99) — crashed on enable:** it CALLED the game status checker
   `FUN_00f1a1d8` per frame from the render path. Fixed by v2's pure-read
@@ -143,39 +178,16 @@ value; the snap-back on buff end stays instant.
 - **v6 (e92d72b):** crash tracer (`speed_boost_trace.txt`) + detect-only safe
   mode (default ON).
 - **v7/v7b (30f459a / d0fb048):** 400 ms settle delay; tracer moved to Win32
-  file APIs (C4996 `fopen` build fix). **First trace captured:**
-  ```
-  click: boost ENABLED | role=00000000 ... detectOnly=1 scan=0
-  render: boost section drawn
-  ```
-  then NOTHING — no "tick: begin" ever. The game died within one frame of the
-  click; detect-only was ON so NO speed writes happened and no role scan had
-  run. Crash is NOT in the poll/writes/caps.
-- **v8 (b08b00b):** per-stage markers (per-tick `SpeedTrace` markers wired in
-  `imgui_interface.cpp`, per-widget markers in the boost section's first
-  render, "tick: entered" at the tick top, loot block moved inside the SEH
-  guard, trace on/off checkbox). **Second trace captured:**
-  ```
-  click: boost ENABLED | ...
-  render: checkboxes ok
-  render: slider ok
-  ```
-  then NOTHING — the code between "slider ok" and "section complete" is only
-  plain ImGui text lines, which cannot crash. **Conclusion: the trace FILE is
-  being cut off mid-flight (antivirus interference on the rapidly re-opened
-  file) and the real crash happens later, invisibly to the log.**
-- **v9 (53eaa1b) — the crash catcher:** a process-wide
-  `SetUnhandledExceptionFilter` (installed lazily on the first tick) writes
-  `code/addr/accessTarget/eip/esp/ebp` + the module bases of Conquer.exe and
-  the DLL to `speed_boost_crash.txt` the moment ANY unhandled exception kills
-  the client — identifying the crash site by ADDRESS instead of by which log
-  line survived. A `SIGABRT` handler covers CRT assert/abort deaths. The
-  tracer auto-disables after 3 consecutive write failures so AV interference
-  can never stall the render thread.
-
-**Open question for the user:** does "crash" mean the client closes/freezes
-(client-side) or getting kicked back to the login screen (server disconnect)?
-The user reverts to 100% manually specifically to avoid a *disconnect*.
+  file APIs (C4996 `fopen` build fix). First trace captured — the tick never
+  ran after the click.
+- **v8 (b08b00b):** per-stage markers everywhere; the trace stopped between
+  "slider ok" and "section complete" where only provably-safe text lines live
+  → the log file itself is unreliable (AV cut-off), the crash is elsewhere.
+- **v9/v9b (53eaa1b / bd9c753):** process-wide crash reporter
+  (`SetUnhandledExceptionFilter` → `speed_boost_crash.txt`) + SIGABRT handler
+  (+ `<signal.h>` build fix). **Captured the crash line above.**
+- **v10 (bcc164d):** full forensics (registers, EIP bytes, EBP stack walk) +
+  persistent trace handle.
 
 **Integration (`src/hooks/speed.cpp`, "XP skill speed boost" checkbox):**
 `role+0x48` flag + `role+0x44` divisor (uncapped, supports the full 2000% =
@@ -325,17 +337,20 @@ client's auto-hunt dialog (the VIP spoof unlocks the checkbox so it can be ticke
 | `30f459a` | XP speed boost v7: 400 ms settle delay after the buff lands (manual timing) |
 | `d0fb048` | v7b: tracer moved to Win32 file APIs (C4996 fopen build fix) — trace captured! |
 | `b08b00b` | v8: per-stage markers across the crash window (ticks, sections, widgets); loot block inside the SEH guard; trace toggle |
-| `53eaa1b` | v9: process-wide crash reporter (speed_boost_crash.txt) + SIGABRT handler + tracer auto-disable on write failures |
+| `53eaa1b` | v9: process-wide crash reporter (speed_boost_crash.txt) + SIGABRT handler + tracer auto-disable |
+| `bd9c753` | v9b: missing `<signal.h>` include build fix |
+| `bcc164d` | v10: full crash forensics (registers, EIP bytes, EBP stack walk) + persistent trace handle |
 
 ### Open / next
+- **Identify the crashing game function at Conquer.exe+0xE57F95** using the
+  v10 forensics (register dump + instruction bytes + EBP stack walk) — the
+  caller addresses will name the subsystem (UI handler / renderer / anti-cheat).
 - Auto-pick is currently enabled via the client dialog; could be set directly from the
   overlay if we want it fully dialog-free (find the auto-pick config flag).
 - Verify jump-search (VIP3) engages while hunting.
 - If crashes ever correlate with auto-XP pops (not manual pops), re-verify the
   `FUN_011b1ec9` call contract at the disassembly level (`FireMagic` is the last
   remaining game-code call in the overlay).
-- Ask the user whether "crash" = client closes/freezes or = kicked to login
-  (server disconnect) — changes the suspect list entirely.
 
 ---
 
@@ -484,13 +499,13 @@ Handler table referencing FUN_00be7d0d: `0x016a9f70` (array of function pointers
    (layout proven from the `FUN_011a92b4` disasm), fire every XP-type skill in
    round-robin when the bar is full, one pop per fill + 5s retry. XP Debug tree
    shows what was detected/fired.
-6. **XP skill speed boost — crash investigation (v9):** the v7b/v8 traces
-   proved the log file gets cut off mid-flight (the lines between the last
-   marker and the crash are provably-safe ImGui text). v9 installs a
-   process-wide crash reporter — `speed_boost_crash.txt` captures the
-   exception code, faulting address, EIP/ESP/EBP, and both module bases at
-   the moment of death, so the crash site is identified by address. Awaiting
-   the user's v9 crash line (and the crash-vs-disconnect answer).
+6. **XP skill speed boost — crash captured, forensics in progress (v10):** the
+   crash is a NULL deref in Conquer.exe's own code at `0x01257F95` (NOT our
+   DLL), deterministic, with zero game-memory writes from the boost in the
+   captured run. v10 dumps registers, faulting instruction bytes, and an EBP
+   stack walk to `speed_boost_crash.txt` — the caller addresses will identify
+   the subsystem (game UI handler / renderer / anti-cheat). Awaiting the v10
+   crash report from the user.
 7. Optional: set auto-pick directly from the overlay (currently enabled via the client
    dialog). Find the auto-pick config flag if we want it dialog-free.
 8. Verify jump-search (VIP3) engages while hunting.
