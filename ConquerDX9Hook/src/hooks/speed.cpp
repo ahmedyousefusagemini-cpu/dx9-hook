@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <signal.h>
 #include <windows.h>
 #include <stdint.h>
 #include "imgui.h"
@@ -121,7 +122,7 @@ namespace Speed
 
 	// Rendered in the UI so the running DLL version is verifiable from a
 	// screenshot (stale-DLL confusion cost us several crash rounds).
-	const char* const BUILD_TAG = "v9 (2026-08-11)";
+	const char* const BUILD_TAG = "v9b (2026-08-11)";
 
 	// XP-buff status flag ids (see the header comment for provenance).
 	const unsigned int XP_STATUS_IDS[] = { 0x5C, 0x78, 0x79, 0x92, 0x96, 0x9F, 0xC0, 0xEB };
