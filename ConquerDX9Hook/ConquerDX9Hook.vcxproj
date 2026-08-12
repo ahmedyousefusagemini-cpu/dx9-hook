@@ -139,7 +139,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_WINDOWS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -170,7 +170,6 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -202,6 +201,7 @@
     <ClCompile Include="src\hooks\xp_skill.cpp" />
     <ClCompile Include="src\hooks\speed.cpp" />
     <ClCompile Include="src\hooks\skill_state.cpp" />
+    <ClCompile Include="src\hooks\buff_monitor.cpp" />
     <ClCompile Include="src\hooks\chams.cpp" />
     <ClCompile Include="src\hooks\string_editor.cpp" />
     <ClCompile Include="src\hooks\memory_scanner.cpp" />
