@@ -11,6 +11,7 @@ extern void ApplyXpSkillClientState();
 extern void RenderSpeedInterface();
 extern void ApplySpeedClientState();
 extern void SpeedTrace(const char* stage);
+extern void RenderSkillStateInterface();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -58,6 +59,11 @@ void RenderImGuiInterface()
 
 	RenderXpSkillInterface();
 	SpeedTrace("frame: xp section ok");
+
+	ImGui::Spacing();
+
+	RenderSkillStateInterface();
+	SpeedTrace("frame: skill state section ok");
 
 	ImGui::Spacing();
 	

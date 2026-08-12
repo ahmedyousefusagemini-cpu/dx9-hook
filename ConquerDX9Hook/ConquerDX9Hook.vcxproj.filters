@@ -85,6 +85,9 @@
     <ClCompile Include="src\hooks\speed.cpp">
       <Filter>Source Files\hooks</Filter>
     </ClCompile>
+    <ClCompile Include="src\hooks\skill_state.cpp">
+      <Filter>Source Files\hooks</Filter>
+    </ClCompile>
     <ClCompile Include="src\hooks\chams.cpp">
       <Filter>Source Files\hooks</Filter>
     </ClCompile>
