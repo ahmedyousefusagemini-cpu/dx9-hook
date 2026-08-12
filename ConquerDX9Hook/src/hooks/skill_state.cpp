@@ -24,10 +24,11 @@
 //   exactly this chain) and the interval function FUN_00de86b2 (gates every
 //   buff modifier on it).
 //
-//   The two skills' status indices live in the server data files (not the
-//   exe), so they are runtime-discovered: the debug tree lists every status
-//   bit currently set - toggle a skill in-game and the appearing index is
-//   that skill's status. The constants below get the discovered values.
+//   The two skills' status indices were mapped from the effect reconciler
+//   function (0x00FEE***) and calibrated against a live both-skills-active
+//   bitmap dump: FatalStrike reads status 46 (set while running); Celestial's
+//   candidates 479/250 were CLEAR while it ran (ruled out) - 480/47 were set,
+//   default 480. Both editable live in the debug tree.
 //
 // Read-only: no writes, no hooks - detection only, nothing the server can see.
 // ============================================================================
@@ -47,9 +48,12 @@ namespace SkillState
 	const unsigned int MAGIC_ID_FATAL_STRIKE = 6011;  // 0x177B - XP skill
 	const unsigned int MAGIC_ID_CELESTIAL    = 7030;  // 0x1B76 - weapon skill
 
-	// Status indices discovered at runtime (see the debug tree). -1 = unknown.
-	int g_fatalStatusIdx  = -1;
-	int g_celestialStatusIdx = -1;
+	// Status indices mapped from the effect reconciler (0x00FEE***), calibrated
+	// against a live both-skills-active bitmap dump: FatalStrike reads status 46
+	// (set while running); Celestial's candidates 479/250 were CLEAR while it ran
+	// (ruled out) - 480/47 were set, default 480. Both editable live below.
+	int g_fatalStatusIdx  = 46;
+	int g_celestialStatusIdx = 480;
 
 	int GetClientObject()
 	{
@@ -238,6 +242,12 @@ void RenderSkillStateInterface()
 	{
 		ImGui::Text("Client: 0x%08X", (unsigned int)client);
 		ImGui::Text("Learned magics: %u", SkillState::CountLearnedMagics(client));
+		ImGui::InputInt("FS status bit", &SkillState::g_fatalStatusIdx);
+		ImGui::InputInt("CE status bit", &SkillState::g_celestialStatusIdx);
+		ImGui::Text("candidates: 46=%d 47=%d 250=%d 479=%d 480=%d",
+			SkillState::ReadStatus(client, 46) ? 1 : 0, SkillState::ReadStatus(client, 47) ? 1 : 0,
+			SkillState::ReadStatus(client, 250) ? 1 : 0, SkillState::ReadStatus(client, 479) ? 1 : 0,
+			SkillState::ReadStatus(client, 480) ? 1 : 0);
 		ImGui::TextDisabled("Status bits set per 64-bit group (toggle a skill and");
 		ImGui::TextDisabled("watch which index appears - that is its status bit):");
 		char line[512];
