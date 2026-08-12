@@ -96,6 +96,9 @@ _ReSharper*/
 *.a
 *.lib
 
+# Except the prebuilt MinHook static lib (needed to build the project)
+!libMinHook.x86.lib
+
 # Executables
 *.exe
 *.out
@@ -113,4 +116,3 @@ MinHook.x86.dll
 .DS_Store
 Thumbs.db
 desktop.ini
-
