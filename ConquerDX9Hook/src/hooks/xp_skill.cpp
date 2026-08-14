@@ -6,6 +6,7 @@
 // buff timers from the active-icon vectors).
 extern const char* GetStatusName(int statusId);
 extern unsigned long GetStatusEndMs(int statusId);
+extern void RegisterStatusDuration(int statusId, unsigned int seconds);
 
 // ============================================================================
 // XP Skills - Conquer.exe client 7937 (image base 0x400000)
@@ -75,6 +76,7 @@ namespace XpSkill
 	const size_t MAGIC_RECORD_INFO_OFFSET      = 0x70;    // FUN_00d9612c = this + 0x70
 	const size_t MAGIC_INFO_ID_OFFSET          = 0x5c;    // magic type id
 	const size_t MAGIC_INFO_IS_XP_OFFSET       = 0x30;    // 1 = XP-type skill
+	const size_t MAGIC_INFO_DURATION_OFFSET    = 0x60;    // buff duration (seconds)
 
 	// The generic XP-skill pseudo magic id the XP icon click handler
 	// (FUN_00b811a4) fires; the server maps it to the class XP skill.
@@ -253,6 +255,14 @@ namespace XpSkill
 				continue;
 			if (*(unsigned int*)(info + MAGIC_INFO_IS_XP_OFFSET) != 1)
 				continue;
+
+			// Register the buff duration (magic-info +0x60, seconds) so the
+			// buffs module's core bit-set hook can show a live countdown even
+			// though XP skills never create a status icon.
+			unsigned int durationSec = 0;
+			if (!IsBadReadPtr((const void*)(info + MAGIC_INFO_DURATION_OFFSET), 4))
+				durationSec = *(unsigned int*)(info + MAGIC_INFO_DURATION_OFFSET);
+			RegisterStatusDuration((int)id, durationSec);
 
 			bool exists = false;
 			for (unsigned int i = 0; i < g_xpIdCount; i++)

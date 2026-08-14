@@ -74,6 +74,13 @@ namespace Buffs
 	// Prologue sanity bytes: 6A 1C B8 ?? ?? ?? ?? E8 (EH prolog).
 	const uintptr_t STATUS_APPLY_FUNC = 0x00E48D33;
 
+	// FUN_00a72eab - the core 64-bit bitfield set/clear that every status
+	// funnels through (AddStatus/ClearStatus AND the XP-skill bit-only path).
+	// XP skills set their bit WITHOUT creating a status icon, so this hook is
+	// the only way the overlay sees their activation (the icon vectors + the
+	// FUN_00e48d33 hook never fire for them).
+	const uintptr_t STATUS_BITSET_FUNC = 0x00A72EAB;
+
 	// ---- runtime state -----------------------------------------------------
 	struct BuffEntry
 	{
@@ -89,6 +96,25 @@ namespace Buffs
 	// vectors (and the apply hook). 0 = unknown / permanent (no countdown).
 	unsigned long g_statusEndMs[STATUS_MAX_ID] = {};
 	bool g_timerHookInstalled = false;
+
+	// Per-status buff duration (seconds) registered from XP/magic data
+	// (magic-info +0x60). The core bit-set hook uses it to synthesize a
+	// countdown for icon-less statuses (XP skills) that the icon vectors and
+	// FUN_00e48d33 never report.
+	unsigned int g_statusDurationSec[STATUS_MAX_ID] = {};
+	bool g_bitHookInstalled = false;
+	unsigned int g_bitSetCount = 0;
+	unsigned int g_lastBitSetId = 0xFFFFFFFF;
+	unsigned long g_lastBitSetTick = 0;
+
+	// Ring buffer of the most recent status-bit transitions - a live trace of
+	// which status id the game toggles (confirms the XP skill's real status id
+	// so the countdown registration can be matched to it).
+	struct BitEvent { unsigned int id; unsigned char set; unsigned long tick; };
+	const int BIT_EVENT_RING = 64;
+	BitEvent g_bitEvents[BIT_EVENT_RING] = {};
+	int g_bitEventIndex = 0;
+	unsigned int g_bitEventTotal = 0;
 
 	// Diagnostics.
 	int g_captureCount = 0;          // how many timer captures the hooks/reads saw
@@ -349,6 +375,68 @@ namespace Buffs
 		g_timerHookInstalled = true;
 	}
 
+	// ----------------------------------------------------------------------
+	// Core bit-field hook (FUN_00a72eab). Catches the XP skill's bit-only
+	// activation that never becomes a status icon.
+	//   __thiscall(bitfield, id, set)  ->  __fastcall(ecx, unusedEdx, id, set)
+	// ----------------------------------------------------------------------
+	typedef int (__thiscall* BitSetFn)(void* bitfield, unsigned int id, char set);
+	static BitSetFn s_originalBitSet = nullptr;
+
+	void __fastcall HkBitSet(void* bitfield, void*, unsigned int id, char set)
+	{
+		unsigned long now = GetTickCount();
+
+		if (id < (unsigned int)STATUS_MAX_ID)
+		{
+			if (set)
+			{
+				g_lastBitSetId = id;
+				g_lastBitSetTick = now;
+				g_bitSetCount++;
+
+				// Only synthesize a deadline when a duration has been
+				// registered for this status (XP skills). Icon-based statuses
+				// keep their icon-derived timers from PollIconTimers.
+				if (g_statusDurationSec[id] > 0)
+				{
+					g_statusEndMs[id] = now + (unsigned long)g_statusDurationSec[id] * 1000UL;
+					g_captureCount++;
+					g_lastCaptureId = (int)id;
+					g_lastCaptureEndMs = g_statusEndMs[id];
+				}
+			}
+			else
+			{
+				g_statusEndMs[id] = 0;   // status cleared - no more countdown
+			}
+
+			g_bitEvents[g_bitEventIndex].id = id;
+			g_bitEvents[g_bitEventIndex].set = set;
+			g_bitEvents[g_bitEventIndex].tick = now;
+			g_bitEventIndex = (g_bitEventIndex + 1) % BIT_EVENT_RING;
+			g_bitEventTotal++;
+		}
+
+		if (s_originalBitSet)
+			s_originalBitSet(bitfield, id, set);
+	}
+
+	void EnsureBitHookInstalled()
+	{
+		if (g_bitHookInstalled)
+			return;
+		if (IsBadReadPtr((const void*)STATUS_BITSET_FUNC, 8))
+			return;
+		if (MH_Initialize() != MH_OK)
+			return;
+		if (MH_CreateHook((LPVOID)STATUS_BITSET_FUNC, &HkBitSet, (LPVOID*)&s_originalBitSet) != MH_OK)
+			return;
+		if (MH_EnableHook((LPVOID)STATUS_BITSET_FUNC) != MH_OK)
+			return;
+		g_bitHookInstalled = true;
+	}
+
 	// Reads the game's own active-icon list (mgr+0xe0 / +0xec vectors) and
 	// derives each status's deadline. This mirrors what the game renders:
 	//   remaining = total - (now - startMs)/1000  (FUN_00e4e217)
@@ -441,6 +529,7 @@ namespace Buffs
 		g_statusReadOk = false;
 
 		EnsureTimerHookInstalled();
+		EnsureBitHookInstalled();
 
 		int user = GetMyUserObject();
 		if (!user)
@@ -483,6 +572,15 @@ unsigned long GetStatusEndMs(int statusId)
 	if (statusId < 0 || statusId >= (int)Buffs::STATUS_MAX_ID)
 		return 0;
 	return Buffs::g_statusEndMs[statusId];
+}
+
+// XP / magic data registers a status's buff duration (seconds) so the core
+// bit-set hook can synthesize a live countdown even for icon-less statuses
+// (XP skills). Called from xp_skill.cpp's learned-magic scan.
+void RegisterStatusDuration(int statusId, unsigned int seconds)
+{
+	if (statusId >= 0 && statusId < (int)Buffs::STATUS_MAX_ID)
+		Buffs::g_statusDurationSec[statusId] = seconds;
 }
 
 void RenderBuffsInterface()
@@ -628,6 +726,39 @@ void RenderBuffsInterface()
 			ImGui::Text("last capture: id=%d endMs=%lu (now=%lu)",
 				Buffs::g_lastCaptureId, Buffs::g_lastCaptureEndMs, GetTickCount());
 		ImGui::Text("names loaded: %d", Buffs::g_namesLoaded);
+		ImGui::TreePop();
+	}
+
+	// Core bit-set hook diagnostics. This is how the XP skill's real status id
+	// is discovered: cast the XP skill once and the latest SET events show it.
+	if (ImGui::TreeNode("Status bit monitor"))
+	{
+		ImGui::TextColored(Buffs::g_bitHookInstalled ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+			Buffs::g_bitHookInstalled ? "bitset hook: INSTALLED" : "bitset hook: NOT installed (build mismatch?)");
+		ImGui::Text("transitions: %u   sets: %u", Buffs::g_bitEventTotal, Buffs::g_bitSetCount);
+		if (Buffs::g_lastBitSetId != 0xFFFFFFFF)
+			ImGui::Text("last SET: id=%u at %lu (now=%lu)", Buffs::g_lastBitSetId,
+				Buffs::g_lastBitSetTick, GetTickCount());
+
+		ImGui::TextDisabled("Most recent transitions (newest first):");
+		int shown = 0;
+		for (int k = 0; k < Buffs::BIT_EVENT_RING && k < (int)Buffs::g_bitEventTotal; k++)
+		{
+			int idx = (Buffs::g_bitEventIndex - 1 - k + Buffs::BIT_EVENT_RING) % Buffs::BIT_EVENT_RING;
+			const Buffs::BitEvent& e = Buffs::g_bitEvents[idx];
+			if (e.set)
+			{
+				const char* name = GetStatusName((int)e.id);
+				ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "SET  id=%u  %s  end=%s",
+					e.id, name ? name : "(no name)", Buffs::FormatRemaining((int)e.id));
+			}
+			else
+			{
+				ImGui::TextDisabled("CLR  id=%u", e.id);
+			}
+			if (++shown >= 10)
+				break;
+		}
 		ImGui::TreePop();
 	}
 }
