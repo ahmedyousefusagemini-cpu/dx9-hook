@@ -355,6 +355,31 @@ The overlay MinHooks `FUN_00e48d33` (prologue `6A 1C B8`) and keeps
 `endMs = now + seconds*1000` per status id; the per-frame bitfield poll drops
 expired buffs automatically.
 
+**Active-icon vectors (VERIFIED, timer source):** the mgr keeps
+`std::vector<icon*>` at `mgr+0xe0` / `mgr+0xec` (second display group); each
+0xac-byte icon: `+0x28` = timeGetTime() at apply, `+0x2c` = total seconds,
+`+0xa8` = CUserAttrib* def (`def+0` = statusId, set by `FUN_00e4c3d2`).
+Polling these per frame gives id + remaining time for every iconed buff.
+
+**Buff DISPLAY names (VERIFIED 2026-08-14):**
+- `ini/StatusTips.ini` `Name=` values are string **KEYS**
+  (`STR_INI_STATUSTIPS_250_NAME`), not literal names.
+- The literal name comes from the language table **`ini/Cn_Res.ini`**
+  (GBK, codepage 936): `STR_INI_STATUSTIPS_250_NAME=Celestial Dance`.
+  Status 47 has no entry (→ no name).
+- The def's `+0x178` std::string is the **effect animation name**
+  (e.g. `trojanblkt` from `ani/effect.ani`), NOT the display name — do not
+  use it for the overlay.
+- ⚠️ The client's ini paths are **CWD-relative** (game launched from
+  `D:\AhmedProject\client`, not `Env_DX9\`). GetCurrentDirectory() is the
+  right base for `ini\StatusTips.ini` / `ini\Cn_Res.ini`.
+- NEXT STEP (not yet implemented): parse `ini/Cn_Res.ini` in buffs.cpp,
+  GBK→UTF-8 via MultiByteToWideChar(936)/WideCharToMultiByte(CP_UTF8), key
+  `STR_INI_STATUSTIPS_<id>_NAME`; fallback "Status <id>".
+- XP skill names: not yet resolved (magic type id @ info+0x5C indexes the
+  magic def; MagicType.dat has no literal "Superman" string — likely also a
+  STR_ key in Cn_Res.ini; search `STR_MAGIC` keys next).
+
 **Buff names** come from `ini/StatusTips.ini` (`[<id>]` blocks with `Name=`
 lines), loaded by the CUserAttribMgr loader `FUN_00e2c03c` @ `0x00E2C03C`
 (userattribmgr.cpp). CUserAttribMgr singleton = `DAT_01a56f20`, accessor
