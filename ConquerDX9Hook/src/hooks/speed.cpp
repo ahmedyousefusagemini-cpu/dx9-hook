@@ -154,6 +154,9 @@ namespace Speed
 			enabled ? percent - MIN_SPEED_PERCENT : 0;
 	}
 
+	// (forward decl - RestoreSpeedCaps is defined below SetSpeedCapsTo)
+	void RestoreSpeedCaps();
+
 	// Raises the per-state speed caps (used by the role+0xc0 path) to at least
 	// the given percent, or restores the originals when targetPercent <= 100.
 	// The table sits in read-only data, so VirtualProtect it first. Only grows
