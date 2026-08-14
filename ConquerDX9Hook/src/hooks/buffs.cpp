@@ -96,6 +96,7 @@ namespace Buffs
 	// vectors (and the apply hook). 0 = unknown / permanent (no countdown).
 	unsigned long g_statusEndMs[STATUS_MAX_ID] = {};
 	bool g_timerHookInstalled = false;
+	int g_timerHookStatus = -1;   // last MH_STATUS of the apply-hook installer (debug)
 
 	// Per-status buff duration (seconds) registered from XP/magic data
 	// (magic-info +0x60). The core bit-set hook uses it to synthesize a
@@ -103,6 +104,7 @@ namespace Buffs
 	// FUN_00e48d33 never report.
 	unsigned int g_statusDurationSec[STATUS_MAX_ID] = {};
 	bool g_bitHookInstalled = false;
+	int g_bitHookStatus = -1;     // last MH_STATUS of the bitset-hook installer (debug)
 	unsigned int g_bitSetCount = 0;
 	unsigned int g_lastBitSetId = 0xFFFFFFFF;
 	unsigned long g_lastBitSetTick = 0;
@@ -365,12 +367,15 @@ namespace Buffs
 		if (IsBadReadPtr(code, 8) || code[0] != 0x6A || code[1] != 0x1C || code[2] != 0xB8)
 			return;
 
-		if (MH_Initialize() != MH_OK)
+		g_timerHookStatus = MH_Initialize();
+		if (g_timerHookStatus != MH_OK && g_timerHookStatus != MH_ERROR_ALREADY_INITIALIZED)
 			return;
-		if (MH_CreateHook((LPVOID)STATUS_APPLY_FUNC, &HkStatusApply,
-			(LPVOID*)&s_originalApply) != MH_OK)
+		g_timerHookStatus = MH_CreateHook((LPVOID)STATUS_APPLY_FUNC, &HkStatusApply,
+			(LPVOID*)&s_originalApply);
+		if (g_timerHookStatus != MH_OK)
 			return;
-		if (MH_EnableHook((LPVOID)STATUS_APPLY_FUNC) != MH_OK)
+		g_timerHookStatus = MH_EnableHook((LPVOID)STATUS_APPLY_FUNC);
+		if (g_timerHookStatus != MH_OK)
 			return;
 		g_timerHookInstalled = true;
 	}
@@ -428,11 +433,14 @@ namespace Buffs
 			return;
 		if (IsBadReadPtr((const void*)STATUS_BITSET_FUNC, 8))
 			return;
-		if (MH_Initialize() != MH_OK)
+		g_bitHookStatus = MH_Initialize();
+		if (g_bitHookStatus != MH_OK && g_bitHookStatus != MH_ERROR_ALREADY_INITIALIZED)
 			return;
-		if (MH_CreateHook((LPVOID)STATUS_BITSET_FUNC, &HkBitSet, (LPVOID*)&s_originalBitSet) != MH_OK)
+		g_bitHookStatus = MH_CreateHook((LPVOID)STATUS_BITSET_FUNC, &HkBitSet, (LPVOID*)&s_originalBitSet);
+		if (g_bitHookStatus != MH_OK)
 			return;
-		if (MH_EnableHook((LPVOID)STATUS_BITSET_FUNC) != MH_OK)
+		g_bitHookStatus = MH_EnableHook((LPVOID)STATUS_BITSET_FUNC);
+		if (g_bitHookStatus != MH_OK)
 			return;
 		g_bitHookInstalled = true;
 	}
@@ -719,7 +727,8 @@ void RenderBuffsInterface()
 			mgr = *(int*)Buffs::MGR_GLOBAL_ADDRESS;
 		ImGui::Text("mgr: 0x%08X", (unsigned int)mgr);
 		ImGui::TextColored(Buffs::g_timerHookInstalled ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
-			Buffs::g_timerHookInstalled ? "apply hook: INSTALLED" : "apply hook: NOT installed (build mismatch?)");
+			Buffs::g_timerHookInstalled ? "apply hook: INSTALLED" : "apply hook: NOT installed");
+		ImGui::Text("apply hook MH status: %d", Buffs::g_timerHookStatus);
 		ImGui::Text("captures: %d", Buffs::g_captureCount);
 		ImGui::Text("active icons in mgr vectors: %d", Buffs::g_iconVectorCount);
 		if (Buffs::g_lastCaptureId >= 0)
@@ -734,7 +743,8 @@ void RenderBuffsInterface()
 	if (ImGui::TreeNode("Status bit monitor"))
 	{
 		ImGui::TextColored(Buffs::g_bitHookInstalled ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
-			Buffs::g_bitHookInstalled ? "bitset hook: INSTALLED" : "bitset hook: NOT installed (build mismatch?)");
+			Buffs::g_bitHookInstalled ? "bitset hook: INSTALLED" : "bitset hook: NOT installed");
+		ImGui::Text("bitset hook MH status: %d", Buffs::g_bitHookStatus);
 		ImGui::Text("transitions: %u   sets: %u", Buffs::g_bitEventTotal, Buffs::g_bitSetCount);
 		if (Buffs::g_lastBitSetId != 0xFFFFFFFF)
 			ImGui::Text("last SET: id=%u at %lu (now=%lu)", Buffs::g_lastBitSetId,
