@@ -25,13 +25,10 @@
 // (FUN_010afd05 / FUN_00de86b2 - only role classes have them), so a random
 // object carrying the same id can't win the scan.
 //
-// Looting speed: the hunt brain (FUN_00f54058) only ticks when
-// timeGetTime() >= DAT_01a5cdb4 + 1000. Only the brain reads or writes that
-// global (verified by xrefs), so forcing it to 0 lets the brain issue
-// find/attack/loot orders early. Resetting it EVERY frame made loot orders
-// go out at frame rate and the server disconnected the client, so the reset
-// is now throttled to a user interval (slider, 50-1000 ms, default 50 ms =>
-// ~20 ticks/sec).
+// Looting speed: unchanged from before - the hunt brain (FUN_00f54058) only
+// ticks when  timeGetTime() >= DAT_01a5cdb4 + 1000. Only the brain reads or
+// writes that global (verified by xrefs), so forcing it to 0 every frame lets
+// the brain issue find/attack/loot orders at frame rate instead of 1/sec.
 //
 // Safety: only data writes, nothing patched. The game's interval math clamps
 // divisors to >= 1 and the final interval to >= 1. All speed-up is
@@ -76,9 +73,7 @@ namespace Speed
 	// User settings.
 	bool g_speedEnabled = false;
 	int  g_speedPercent = 200;          // default 2x
-	bool g_fastLootTick = false;        // force the brain tick gate open
-	int  g_fastLootIntervalMs = 50;     // min delay between forced ticks (slider)
-	unsigned long g_lastFastLootReset = 0;  // GetTickCount() of last forced reset
+	bool g_fastLootTick = false;        // reset the brain tick gate every frame
 
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
@@ -279,25 +274,10 @@ namespace Speed
 	{
 		if (g_fastLootTick)
 		{
-			// Throttled: resetting the gate every frame made the brain spam loot
-			// orders at frame rate and the server disconnected us. Only reset it
-			// once per user-chosen interval instead.
-			unsigned long now = GetTickCount();
-			if (now - g_lastFastLootReset >= (unsigned long)g_fastLootIntervalMs)
-			{
-				// Force the brain's last-tick timestamp to 0 so its 1000 ms gate
-				// passes on the brain's next check. Only FUN_00f54058 reads/writes
-				// this global.
-				if (!IsBadWritePtr((void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)))
-				{
-					*(unsigned long*)HUNT_BRAIN_TICK_GLOBAL = 0;
-					g_lastFastLootReset = now;
-				}
-			}
-		}
-		else
-		{
-			g_lastFastLootReset = 0;  // re-arm: next enable ticks immediately
+			// Force the brain's last-tick timestamp to 0 so its 1000 ms gate
+			// passes every frame. Only FUN_00f54058 reads/writes this global.
+			if (!IsBadWritePtr((void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)))
+				*(unsigned long*)HUNT_BRAIN_TICK_GLOBAL = 0;
 		}
 
 		if (g_speedEnabled)
@@ -384,12 +364,7 @@ void RenderSpeedInterface()
 	}
 
 	ImGui::Checkbox("Fast auto-hunt/loot tick", &Speed::g_fastLootTick);
-	ImGui::TextDisabled("Brain ticks faster than 1/sec -> faster loot/attack orders");
-	if (Speed::g_fastLootTick)
-	{
-		ImGui::SliderInt("Loot tick interval (ms)", &Speed::g_fastLootIntervalMs, 50, 1000);
-		ImGui::TextDisabled("50 = fastest (~20 orders/sec). Raise it if the server disconnects you.");
-	}
+	ImGui::TextDisabled("Brain ticks every frame instead of 1/sec -> faster loot/attack orders");
 
 	if (ImGui::TreeNode("Speed Debug"))
 	{

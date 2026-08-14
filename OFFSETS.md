@@ -328,6 +328,40 @@ Use these to locate the code after an update when signatures fail:
 
 ---
 
+## Character Buffs / StatusIcons (VERIFIED on client 7937)
+
+The client calls character buffs **StatusIcons**. The active buffs on the
+character are a **576-bit bitfield at `C3DUser+0x138`** (72 bytes = 9×8-byte
+words): bit `id` lives at `bitfield + (id/64)*8`, bit `(id%64)`.
+
+| Function | Address | Meaning |
+|---|---|---|
+| `C3DUser::SetStatus` core | `FUN_00a72eab` @ `0x00A72EAB` | `SetStatus(bitfield, id, enable)` - 64-bit word set/clear |
+| `C3DUser::AddStatus` | `FUN_00eecff1` @ `0x00EECFF1` | `ADD ECX,0x138` then set bit (1) |
+| `C3DUser::ClearStatus` | `FUN_00ef1835` @ `0x00EF1835` | `ADD ECX,0x138` then clear bit (0) |
+| `C3DUser::ChkStatus` | `FUN_00f1a1d8` @ `0x00F1A1D8` | `ADD ECX,0x138` then bit test (`FUN_00d4e0ae`) |
+| second bitfield set/clear | `FUN_00eed011` / `FUN_00ef1855` | same pair on `user+0x1c8` |
+| Lua binder `CPlayer::Lua_AddStatus` | binder @ `0x00DA36EC` (`PUSH 0x16f2540`) | script path → AddStatus |
+| Lua binder `CPlayer::Lua_ClrStatus` | binder @ `0x00DA3711` | script path → ClearStatus |
+
+**Buff names** come from `ini/StatusTips.ini` (`[<id>]` blocks with `Name=`
+lines), loaded by the CUserAttribMgr loader `FUN_00e2c03c` @ `0x00E2C03C`
+(userattribmgr.cpp). CUserAttribMgr singleton = `DAT_01a56f20`, accessor
+`FUN_008329b1` @ `0x008329B1`, ctor `FUN_00e1b059` @ `0x00E1B059`.
+Each loaded CUserAttrib (0x198 bytes): statusId@0, displayType@4,
+priority@0xC, icon@0x10/0x14, name string@0x178.
+
+**My C3DUser** = tail of the client `+0x98` chain (same walk as `FUN_00deb082`
+used by the hunt brain) + id match `user+0x54 == client+0x268`.
+
+**Implementation note (`buffs.cpp`):** reads the 72-byte bitfield at
+`user+0x138` every frame, parses `StatusTips.ini` for names, and renders every
+named status green `[ON]` / gray `[OFF]` in the overlay (plus a raw-bits debug
+tree). The Lua-binder MinHook approach was dropped - the bitfield catches
+server-driven debuffs too (the binders only see script-applied ones).
+
+---
+
 ## Verification checklist (after re-finding on a new build)
 
 - [ ] Manager accessor signature resolves to the singleton that IsHunting reads.

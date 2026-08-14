@@ -10,6 +10,8 @@ extern void RenderXpSkillInterface();
 extern void ApplyXpSkillClientState();
 extern void RenderSpeedInterface();
 extern void ApplySpeedClientState();
+extern void RenderBuffsInterface();
+extern void ApplyBuffsClientState();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -26,6 +28,9 @@ void RenderImGuiInterface()
 
 	// Auto XP pop ticks every frame too (it must run with the menu closed).
 	ApplyXpSkillClientState();
+
+	// Buff tracking ticks every frame so add/remove hooks stay armed.
+	ApplyBuffsClientState();
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
@@ -56,6 +61,10 @@ void RenderImGuiInterface()
 	ImGui::Spacing();
 	
 	RenderSpeedInterface();
+
+	ImGui::Spacing();
+
+	RenderBuffsInterface();
 	
 	ImGui::End();
 }
