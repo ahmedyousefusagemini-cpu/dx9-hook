@@ -52,6 +52,18 @@ namespace Buffs
 	const size_t    STATUS_BITFIELD_WORDS   = 9;         // 9 * 8 bytes = 72 bytes
 	const size_t    STATUS_MAX_ID            = 576;
 
+	// CUserAttribMgr: singleton global + accessor (lazy-create).
+	const uintptr_t MGR_GLOBAL_ADDRESS = 0x01A56F20;   // DAT_01a56f20
+	const uintptr_t MGR_ACCESSOR_FUNC  = 0x008329B1;   // FUN_008329b1
+
+	// CUserAttribMgr::GetAttrib(statusId) - std::map find at mgr+0xC8,
+	// returns the 0x198-byte CUserAttrib* (0 if unknown).
+	// Name = std::string at attrib+0x178: buf[16]@+0x178, size@+0x188.
+	typedef int (__thiscall* GetAttribFn)(int mgr, int statusId);
+	const uintptr_t GET_ATTRIB_FUNC  = 0x00E27EFD;
+	const size_t    ATTRIB_NAME_STR  = 0x178;
+	const size_t    ATTRIB_STR_SIZE  = 0x188;
+
 	// FUN_00e48d33 - the server-driven status apply chokepoint:
 	//   void __thiscall(mgr, statusId, displayType, seconds, flag, extra)
 	// Prologue sanity bytes: 6A 1C B8 ?? ?? ?? ?? E8 (EH prolog).
@@ -72,6 +84,12 @@ namespace Buffs
 	// hook. 0 = unknown / permanent buff (no countdown shown).
 	unsigned long g_statusEndMs[STATUS_MAX_ID] = {};
 	bool g_timerHookInstalled = false;
+
+	// Diagnostics.
+	int g_captureCount = 0;          // how many timer captures the hook saw
+	int g_lastCaptureId = -1;
+	unsigned long g_lastCaptureEndMs = 0;
+	int g_namesLoaded = 0;
 
 	// Diagnostics for object resolution (shown in the debug tree).
 	int g_clientAddr = 0;
@@ -145,13 +163,78 @@ namespace Buffs
 		return user;
 	}
 
-	// ---- name map from ini/StatusTips.ini ----------------------------------
+	// ---- name map ----------------------------------------------------------
 
+	// Reads a MSVC std::string (buf[16]/size/cap) from a struct offset.
+	static bool ReadStdString(const unsigned char* base, size_t strOffset, char* out, size_t outSize)
+	{
+		if (!IsReadable(base + strOffset, 0x10))
+			return false;
+		size_t size = *(size_t*)(base + strOffset + 0x10);
+		const char* chars;
+		if (size < 16)
+			chars = (const char*)(base + strOffset);
+		else
+		{
+			chars = *(const char**)(base + strOffset);
+			if (!IsReadable(chars, size + 1))
+				return false;
+		}
+		size_t n = size < outSize - 1 ? size : outSize - 1;
+		memcpy(out, chars, n);
+		out[n] = '\0';
+		return true;
+	}
+
+	// Primary source: the game's own CUserAttribMgr definition map (already
+	// loaded from StatusTips.ini, so names match the client's encoding).
+	// Fallback: parse ini/StatusTips.ini from disk.
 	void LoadStatusNames()
 	{
 		if (!g_knownStatuses.empty())
 			return;
 
+		g_namesLoaded = 0;
+
+		int mgr = 0;
+		if (IsReadable((const void*)MGR_GLOBAL_ADDRESS, sizeof(int)))
+			mgr = *(int*)MGR_GLOBAL_ADDRESS;
+		if (!IsReadable((const void*)mgr, 0x200))
+			mgr = 0;
+
+		if (mgr != 0)
+		{
+			GetAttribFn getAttrib = (GetAttribFn)GET_ATTRIB_FUNC;
+			for (int id = 0; id < (int)STATUS_MAX_ID; id++)
+			{
+				__try
+				{
+					int attrib = getAttrib(mgr, id);
+					if (!attrib || !IsReadable((const void*)attrib, ATTRIB_STR_SIZE + 8))
+						continue;
+					char name[64];
+					if (!ReadStdString((const unsigned char*)attrib, ATTRIB_NAME_STR, name, sizeof(name)))
+						continue;
+					if (name[0] == '\0')
+						continue;
+
+					BuffEntry e;
+					e.statusId = id;
+					strncpy_s(e.name, name, sizeof(e.name) - 1);
+					g_knownStatuses.push_back(e);
+					g_namesLoaded++;
+				}
+				__except (EXCEPTION_EXECUTE_HANDLER)
+				{
+					break;  // don't hammer a bad function pointer
+				}
+			}
+		}
+
+		if (!g_knownStatuses.empty())
+			return;
+
+		// Fallback: parse ini/StatusTips.ini ([<id>] blocks with Name= lines).
 		char iniPath[MAX_PATH];
 		GetModuleFileNameA(GetModuleHandleA(NULL), iniPath, MAX_PATH);
 		char* slash = strrchr(iniPath, '\\');
@@ -187,6 +270,7 @@ namespace Buffs
 				e.statusId = curId;
 				strncpy_s(e.name, name, sizeof(e.name) - 1);
 				g_knownStatuses.push_back(e);
+				g_namesLoaded++;
 				curId = -1;
 			}
 		}
@@ -208,9 +292,16 @@ namespace Buffs
 		if (statusId >= 0 && statusId < (int)STATUS_MAX_ID)
 		{
 			if (seconds > 0 && seconds < 86400 * 30)
+			{
 				g_statusEndMs[statusId] = GetTickCount() + (unsigned long)seconds * 1000UL;
+				g_captureCount++;
+				g_lastCaptureId = statusId;
+				g_lastCaptureEndMs = g_statusEndMs[statusId];
+			}
 			else
+			{
 				g_statusEndMs[statusId] = 0;
+			}
 		}
 		s_originalApply(mgr, statusId, displayType, seconds, flag, extra);
 	}
@@ -416,6 +507,23 @@ void RenderBuffsInterface()
 		ImGui::Text("client+0x26c = %d (my id B)", Buffs::g_clientId26c);
 		ImGui::TextColored(Buffs::g_idMatched ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
 			Buffs::g_idMatched ? "id matched: this is my character" : "no id pair matched - check server id layout");
+		ImGui::TreePop();
+	}
+
+	// Timer hook + name source diagnostics.
+	if (ImGui::TreeNode("Timer hook"))
+	{
+		int mgr = 0;
+		if (!IsBadReadPtr((const void*)Buffs::MGR_GLOBAL_ADDRESS, sizeof(int)))
+			mgr = *(int*)Buffs::MGR_GLOBAL_ADDRESS;
+		ImGui::Text("mgr: 0x%08X", (unsigned int)mgr);
+		ImGui::TextColored(Buffs::g_timerHookInstalled ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+			Buffs::g_timerHookInstalled ? "apply hook: INSTALLED" : "apply hook: NOT installed (build mismatch?)");
+		ImGui::Text("captures: %d", Buffs::g_captureCount);
+		if (Buffs::g_lastCaptureId >= 0)
+			ImGui::Text("last capture: id=%d endMs=%lu (now=%lu)",
+				Buffs::g_lastCaptureId, Buffs::g_lastCaptureEndMs, GetTickCount());
+		ImGui::Text("names loaded: %d", Buffs::g_namesLoaded);
 		ImGui::TreePop();
 	}
 }
