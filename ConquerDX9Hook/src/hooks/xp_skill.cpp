@@ -119,6 +119,16 @@ namespace XpSkill
 	unsigned int  g_lastFiredId = 0;
 	unsigned long g_fireCount = 0;
 
+	// Per-XP-skill buff duration (seconds from magic-info +0x60), kept in step
+	// with g_xpIds so FireMagic can report each skill's duration.
+	unsigned int  g_xpDur[MAX_XP_IDS] = {};
+
+	// Last XP-skill pop - shared with the buffs module (via GetLastXpFire) so
+	// its core bit-set hook can self-learn which status bit the XP skill
+	// applied and derive that buff's countdown duration.
+	struct XpFireInfo { unsigned int magicId; unsigned int durationSec; unsigned long tick; };
+	XpFireInfo g_lastFire = { 0, 0, 0 };
+
 	// Same idea as AutoHunt::IsClientSupported - never write into an unknown
 	// build: every site must still hold its original bytes.
 	bool IsClientSupported()
@@ -268,7 +278,11 @@ namespace XpSkill
 			for (unsigned int i = 0; i < g_xpIdCount; i++)
 				if (g_xpIds[i] == id) { exists = true; break; }
 			if (!exists && g_xpIdCount < MAX_XP_IDS)
-				g_xpIds[g_xpIdCount++] = id;
+			{
+				g_xpIds[g_xpIdCount] = id;
+				g_xpDur[g_xpIdCount] = durationSec;
+				g_xpIdCount++;
+			}
 		}
 
 		// The icon's pseudo id always works when the character has it - keep it
@@ -281,8 +295,12 @@ namespace XpSkill
 			if (!exists)
 			{
 				for (unsigned int i = g_xpIdCount; i > 0; i--)
+				{
 					g_xpIds[i] = g_xpIds[i - 1];
+					g_xpDur[i] = g_xpDur[i - 1];
+				}
 				g_xpIds[0] = XP_PSEUDO_MAGIC_ID;
+				g_xpDur[0] = 0;   // pseudo id has no magic-data duration
 				g_xpIdCount++;
 			}
 		}
@@ -311,6 +329,16 @@ namespace XpSkill
 			mov  ecx, client
 			call useSkillFunc
 		}
+
+		// Record the pop so the buffs module can associate the applied status
+		// bit with this magic's duration (the status id may differ from the
+		// magic id - e.g. the 0x5FDC pseudo id is not a real status index).
+		unsigned int dur = 0;
+		for (unsigned int i = 0; i < g_xpIdCount; i++)
+			if (g_xpIds[i] == magicId) { dur = g_xpDur[i]; break; }
+		g_lastFire.magicId = magicId;
+		g_lastFire.durationSec = dur;
+		g_lastFire.tick = GetTickCount();
 	}
 
 	// Per-frame driver (runs from HookedEndScene = the game's own thread, like
@@ -383,6 +411,19 @@ namespace XpSkill
 void ApplyXpSkillClientState()
 {
 	XpSkill::AutoXpTick();
+}
+
+// Shared with buffs.cpp so its core bit-set hook can self-learn which status
+// bit the XP skill applies (the status id can differ from the magic id) and
+// derive that buff's countdown from the fired magic's duration.
+bool GetLastXpFire(unsigned int* outMagicId, unsigned int* outDurationSec, unsigned long* outTick)
+{
+	if (!outMagicId || !outDurationSec || !outTick)
+		return false;
+	*outMagicId = XpSkill::g_lastFire.magicId;
+	*outDurationSec = XpSkill::g_lastFire.durationSec;
+	*outTick = XpSkill::g_lastFire.tick;
+	return XpSkill::g_lastFire.tick != 0;
 }
 
 void RenderXpSkillInterface()

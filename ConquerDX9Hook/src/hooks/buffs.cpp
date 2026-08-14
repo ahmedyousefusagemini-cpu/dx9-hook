@@ -8,6 +8,10 @@
 #include "imgui.h"
 #include "MinHook.h"
 
+// Declared in xp_skill.cpp - returns info about the most recent XP-skill pop
+// so the core bit-set hook can self-learn the status-id -> duration mapping.
+extern bool GetLastXpFire(unsigned int* outMagicId, unsigned int* outDurationSec, unsigned long* outTick);
+
 // ============================================================================
 // Character Buffs / Status overlay - Conquer.exe client 7937 (base 0x400000)
 // ----------------------------------------------------------------------------
@@ -388,6 +392,18 @@ namespace Buffs
 	typedef int (__thiscall* BitSetFn)(void* bitfield, unsigned int id, char set);
 	static BitSetFn s_originalBitSet = nullptr;
 
+	// Current bit state at (bitfield + (id>>6)*8), bit (id&63) - mirrors the
+	// game's core setter. Used to detect "fresh" sets vs persistent re-asserts
+	// (a status like 47 that the game keeps SETting is already held, so a fresh
+	// XP buff is never confused with it).
+	static bool IsBitHeld(const void* bitfield, unsigned int id)
+	{
+		if (!bitfield || id >= (unsigned int)STATUS_MAX_ID)
+			return false;
+		const unsigned long long* words = (const unsigned long long*)bitfield;
+		return (words[id >> 6] >> (id & 63)) & 1ULL;
+	}
+
 	void __fastcall HkBitSet(void* bitfield, void*, unsigned int id, char set)
 	{
 		unsigned long now = GetTickCount();
@@ -399,6 +415,23 @@ namespace Buffs
 				g_lastBitSetId = id;
 				g_lastBitSetTick = now;
 				g_bitSetCount++;
+
+				// Self-learn the XP status id: when the client just popped an
+				// XP skill, the first FRESH status-set right after it is the XP
+				// buff. Attribute that magic's duration to this bit id so a
+				// countdown appears even though XP skills never create an icon.
+				// ("fresh" = the bit was clear before this set, so persistent
+				// re-asserted states like status 47 are never mislabeled.)
+				if (g_statusDurationSec[id] == 0 && !IsBitHeld(bitfield, id))
+				{
+					unsigned int xpMagic = 0, xpDur = 0;
+					unsigned long xpTick = 0;
+					if (GetLastXpFire(&xpMagic, &xpDur, &xpTick) && xpDur > 0 &&
+						((now - xpTick) & 0x7FFFFFFFUL) <= 3000UL)
+					{
+						g_statusDurationSec[id] = xpDur;
+					}
+				}
 
 				// Only synthesize a deadline when a duration has been
 				// registered for this status (XP skills). Icon-based statuses
@@ -657,9 +690,18 @@ void RenderBuffsInterface()
 		if (known)
 			continue;
 		ImGui::PushID((int)(i + 50000));
-		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[ON]  Status %d", activeIds[i]);
-		ImGui::SameLine();
-		ImGui::Text("  %s", Buffs::FormatRemaining(activeIds[i]));
+		unsigned long endMs = Buffs::g_statusEndMs[activeIds[i]];
+		if (endMs == 0)
+		{
+			// Always-on / no-duration status (e.g. status 47): no countdown.
+			ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[ON]  Status %d  (permanent)", activeIds[i]);
+		}
+		else
+		{
+			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[ON]  Status %d", activeIds[i]);
+			ImGui::SameLine();
+			ImGui::Text("  %s", Buffs::FormatRemaining(activeIds[i]));
+		}
 		ImGui::PopID();
 		shownAny = true;
 	}
