@@ -2,6 +2,11 @@
 #include <stdint.h>
 #include "imgui.h"
 
+// Shared status lookups from buffs.cpp (names from ini/Cn_Res.ini, live
+// buff timers from the active-icon vectors).
+extern const char* GetStatusName(int statusId);
+extern unsigned long GetStatusEndMs(int statusId);
+
 // ============================================================================
 // XP Skills - Conquer.exe client 7937 (image base 0x400000)
 // ----------------------------------------------------------------------------
@@ -425,8 +430,28 @@ void RenderXpSkillInterface()
 			{
 				ImGui::Text("Learned magics: %u", XpSkill::g_learnedCount);
 				ImGui::Text("XP skills found: %u", XpSkill::g_xpIdCount);
+				// XP skills apply statuses with the same id, so the STATUSTIPS
+				// name (ini/Cn_Res.ini) and the live buff timer apply to them.
 				for (unsigned int i = 0; i < XpSkill::g_xpIdCount; i++)
-					ImGui::BulletText("0x%04X", XpSkill::g_xpIds[i]);
+				{
+					unsigned int id = XpSkill::g_xpIds[i];
+					const char* name = GetStatusName((int)id);
+					unsigned long endMs = GetStatusEndMs((int)id);
+					unsigned long now = GetTickCount();
+					if (name && endMs != 0 && now < endMs)
+					{
+						unsigned long secs = (endMs - now + 500) / 1000;
+						ImGui::BulletText("%s (0x%04X) - buff active, %lu s", name, id, secs);
+					}
+					else if (name)
+					{
+						ImGui::BulletText("%s (0x%04X)", name, id);
+					}
+					else
+					{
+						ImGui::BulletText("0x%04X", id);
+					}
+				}
 				if (XpSkill::g_xpIdCount == 0)
 					ImGui::TextDisabled("(none detected - list rescans every 5s)");
 				ImGui::TreePop();

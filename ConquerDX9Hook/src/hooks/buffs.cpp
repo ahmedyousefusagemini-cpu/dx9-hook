@@ -30,9 +30,11 @@
 //   stores icon+0x2c = total seconds. We MinHook e48d33 and capture
 //   endMs = now + seconds*1000 per status id.
 //
-// Buff names are defined in ini/StatusTips.ini (loaded by the CUserAttribMgr
-// loader FUN_00e2c03c from userattribmgr.cpp; singleton DAT_01a56f20,
-// accessor FUN_008329b1). The file uses [<id>] blocks with Name= lines.
+// Buff names: the client's language table ini/Cn_Res.ini (GBK) holds the
+// display names under STR_INI_STATUSTIPS_<id>_NAME (e.g.
+// STR_INI_STATUSTIPS_250_NAME=Celestial Dance). StatusTips.ini Name= values
+// are only STR_ keys, and the CUserAttrib def's +0x178 string is the effect
+// animation name (e.g. "trojanblkt") - neither is displayable.
 //
 // My C3DUser is the tail of the client's +0x98 chain (same walk the auto-hunt
 // brain uses, FUN_00deb082), validated by id match: user+0x54 == client+0x268.
@@ -52,17 +54,9 @@ namespace Buffs
 	const size_t    STATUS_BITFIELD_WORDS   = 9;         // 9 * 8 bytes = 72 bytes
 	const size_t    STATUS_MAX_ID            = 576;
 
-	// CUserAttribMgr: singleton global + accessor (lazy-create).
+	// CUserAttribMgr: singleton global (DAT_01a56f20). Holds the definition
+	// map and the active-icon vectors.
 	const uintptr_t MGR_GLOBAL_ADDRESS = 0x01A56F20;   // DAT_01a56f20
-	const uintptr_t MGR_ACCESSOR_FUNC  = 0x008329B1;   // FUN_008329b1
-
-	// CUserAttribMgr::GetAttrib(statusId) - std::map find at mgr+0xC8,
-	// returns the 0x198-byte CUserAttrib* (0 if unknown).
-	// Name = std::string at attrib+0x178: buf[16]@+0x178, size@+0x188.
-	typedef int (__thiscall* GetAttribFn)(int mgr, int statusId);
-	const uintptr_t GET_ATTRIB_FUNC  = 0x00E27EFD;
-	const size_t    ATTRIB_NAME_STR  = 0x178;
-	const size_t    ATTRIB_STR_SIZE  = 0x188;
 
 	// Active status icons: std::vector<icon*> at mgr+0xe0 (and mgr+0xec for
 	// the second display group). Each 0xac-byte icon:
@@ -87,12 +81,12 @@ namespace Buffs
 		char name[64];
 	};
 
-	std::vector<BuffEntry> g_knownStatuses;   // id->name map from StatusTips.ini
+	std::vector<BuffEntry> g_knownStatuses;   // id->name map from ini/Cn_Res.ini
 	unsigned char g_statusBits[STATUS_BITFIELD_WORDS * 8] = {};
 	bool g_statusReadOk = false;
 
-	// Per-status end timestamps (GetTickCount ms) captured from the apply
-	// hook. 0 = unknown / permanent buff (no countdown shown).
+	// Per-status end timestamps (GetTickCount ms) from the active-icon
+	// vectors (and the apply hook). 0 = unknown / permanent (no countdown).
 	unsigned long g_statusEndMs[STATUS_MAX_ID] = {};
 	bool g_timerHookInstalled = false;
 
@@ -177,30 +171,102 @@ namespace Buffs
 
 	// ---- name map ----------------------------------------------------------
 
-	// Reads a MSVC std::string (buf[16]/size/cap) from a struct offset.
-	static bool ReadStdString(const unsigned char* base, size_t strOffset, char* out, size_t outSize)
+	// GBK (codepage 936) -> UTF-8 for ImGui.
+	static void GbkToUtf8(const char* gbk, char* out, size_t outSize)
 	{
-		if (!IsReadable(base + strOffset, 0x10))
-			return false;
-		size_t size = *(size_t*)(base + strOffset + 0x10);
-		const char* chars;
-		if (size < 16)
-			chars = (const char*)(base + strOffset);
-		else
-		{
-			chars = *(const char**)(base + strOffset);
-			if (!IsReadable(chars, size + 1))
-				return false;
-		}
-		size_t n = size < outSize - 1 ? size : outSize - 1;
-		memcpy(out, chars, n);
-		out[n] = '\0';
-		return true;
+		out[0] = '\0';
+		int wlen = MultiByteToWideChar(936, 0, gbk, -1, NULL, 0);
+		if (wlen <= 0)
+			return;
+		std::wstring w(wlen, L'\0');
+		MultiByteToWideChar(936, 0, gbk, -1, &w[0], wlen);
+		int ulen = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, NULL, 0, NULL, NULL);
+		if (ulen <= 0)
+			return;
+		if ((size_t)ulen > outSize)
+			ulen = (int)outSize;
+		WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out, ulen, NULL, NULL);
+		out[outSize - 1] = '\0';
 	}
 
-	// Primary source: the game's own CUserAttribMgr definition map (already
-	// loaded from StatusTips.ini, so names match the client's encoding).
-	// Fallback: parse ini/StatusTips.ini from disk.
+	// Display names come from the game's language table ini/Cn_Res.ini (GBK):
+	//   STR_INI_STATUSTIPS_250_NAME=Celestial Dance
+	// (StatusTips.ini Name= values are only STR_ keys; the CUserAttrib def's
+	// +0x178 string is the effect animation name - neither is displayable.)
+	// The client resolves these paths CWD-relative ("ini\..."), so try the
+	// current directory first, then the exe directory.
+	static bool ParseCnRes(const char* baseDir)
+	{
+		char path[MAX_PATH];
+		if (baseDir[0])
+			_snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\ini\\Cn_Res.ini", baseDir);
+		else
+			strcpy_s(path, sizeof(path), "ini\\Cn_Res.ini");
+
+		FILE* f = nullptr;
+		if (fopen_s(&f, path, "rb") != 0 || !f)
+			return false;
+
+		char line[1024];
+		bool any = false;
+		while (fgets(line, sizeof(line), f))
+		{
+			const char* key = "STR_INI_STATUSTIPS_";
+			if (strncmp(line, key, strlen(key)) != 0)
+				continue;
+
+			int id = 0;
+			size_t p = strlen(key);
+			while (line[p] >= '0' && line[p] <= '9')
+			{
+				id = id * 10 + (line[p] - '0');
+				p++;
+			}
+			if (strncmp(line + p, "_NAME=", 6) != 0 || id < 0 || id >= (int)STATUS_MAX_ID)
+				continue;
+
+			// Value is GBK up to the line end; strip CR/LF.
+			char value[512];
+			size_t v = p + 6;
+			size_t len = 0;
+			while (line[v] && line[v] != '\r' && line[v] != '\n' && len < sizeof(value) - 1)
+				value[len++] = line[v++];
+			value[len] = '\0';
+			if (len == 0)
+				continue;
+
+			// '~' is the string system's space marker.
+			for (size_t i = 0; i < len; i++)
+				if (value[i] == '~')
+					value[i] = ' ';
+
+			BuffEntry e;
+			e.statusId = id;
+			GbkToUtf8(value, e.name, sizeof(e.name));
+			if (e.name[0] == '\0')
+				strncpy_s(e.name, value, sizeof(e.name) - 1);
+
+			// First definition wins (main Cn_Res.ini beats ft/sp subdirs).
+			bool exists = false;
+			for (size_t i = 0; i < g_knownStatuses.size(); i++)
+			{
+				if (g_knownStatuses[i].statusId == id)
+				{
+					exists = true;
+					break;
+				}
+			}
+			if (!exists)
+			{
+				g_knownStatuses.push_back(e);
+				g_namesLoaded++;
+				any = true;
+			}
+		}
+		fclose(f);
+		return any;
+	}
+
 	void LoadStatusNames()
 	{
 		if (!g_knownStatuses.empty())
@@ -208,85 +274,30 @@ namespace Buffs
 
 		g_namesLoaded = 0;
 
-		int mgr = 0;
-		if (IsReadable((const void*)MGR_GLOBAL_ADDRESS, sizeof(int)))
-			mgr = *(int*)MGR_GLOBAL_ADDRESS;
-		if (!IsReadable((const void*)mgr, 0x200))
-			mgr = 0;
-
-		if (mgr != 0)
+		// CWD first (the game is launched from the client root).
+		char cwd[MAX_PATH];
+		if (GetCurrentDirectoryA(sizeof(cwd), cwd) && ParseCnRes(cwd))
+			return;
+		// Fallback: sub-language copies.
 		{
-			GetAttribFn getAttrib = (GetAttribFn)GET_ATTRIB_FUNC;
-			for (int id = 0; id < (int)STATUS_MAX_ID; id++)
-			{
-				__try
-				{
-					int attrib = getAttrib(mgr, id);
-					if (!attrib || !IsReadable((const void*)attrib, ATTRIB_STR_SIZE + 8))
-						continue;
-					char name[64];
-					if (!ReadStdString((const unsigned char*)attrib, ATTRIB_NAME_STR, name, sizeof(name)))
-						continue;
-					if (name[0] == '\0')
-						continue;
-
-					BuffEntry e;
-					e.statusId = id;
-					strncpy_s(e.name, name, sizeof(e.name) - 1);
-					g_knownStatuses.push_back(e);
-					g_namesLoaded++;
-				}
-				__except (EXCEPTION_EXECUTE_HANDLER)
-				{
-					break;  // don't hammer a bad function pointer
-				}
-			}
+			char sub[MAX_PATH];
+			_snprintf_s(sub, sizeof(sub), _TRUNCATE, "%s\\ini\\ft", cwd);
+			ParseCnRes(sub);
+			_snprintf_s(sub, sizeof(sub), _TRUNCATE, "%s\\ini\\sp", cwd);
+			ParseCnRes(sub);
 		}
-
 		if (!g_knownStatuses.empty())
 			return;
-
-		// Fallback: parse ini/StatusTips.ini ([<id>] blocks with Name= lines).
-		char iniPath[MAX_PATH];
-		GetModuleFileNameA(GetModuleHandleA(NULL), iniPath, MAX_PATH);
-		char* slash = strrchr(iniPath, '\\');
-		if (!slash)
-			return;
-		strcpy_s(slash + 1, MAX_PATH - (slash + 1 - iniPath), "ini\\StatusTips.ini");
-
-		FILE* f = nullptr;
-		if (fopen_s(&f, iniPath, "r") != 0 || !f)
-			return;
-
-		int curId = -1;
-		char line[512];
-		while (fgets(line, sizeof(line), f))
+		// Exe dir (in case the game was launched from elsewhere).
+		char exe[MAX_PATH];
+		if (GetModuleFileNameA(GetModuleHandleA(NULL), exe, sizeof(exe)))
 		{
-			// [<id>] block header.
-			if (line[0] == '[')
-			{
-				curId = atoi(line + 1);
-				continue;
-			}
-			if (curId >= 0 && strncmp(line, "Name=", 5) == 0)
-			{
-				char name[64];
-				strncpy_s(name, line + 5, sizeof(name) - 1);
-				name[sizeof(name) - 1] = '\0';
-				char* nl = strchr(name, '\n');
-				if (nl) *nl = '\0';
-				char* cr = strchr(name, '\r');
-				if (cr) *cr = '\0';
-
-				BuffEntry e;
-				e.statusId = curId;
-				strncpy_s(e.name, name, sizeof(e.name) - 1);
-				g_knownStatuses.push_back(e);
-				g_namesLoaded++;
-				curId = -1;
-			}
+			char* slash = strrchr(exe, '\\');
+			if (slash)
+				*slash = '\0';  // strip the exe name, keep the folder
+			if (ParseCnRes(exe))
+				return;
 		}
-		fclose(f);
 	}
 
 	// ---- timer hook --------------------------------------------------------
@@ -452,6 +463,28 @@ void ApplyBuffsClientState()
 	Buffs::PollBuffs();
 }
 
+// Shared lookups (used by the XP-skill section: XP skills apply statuses
+// with the same id, so the STATUSTIPS name + live timer apply to them too).
+const char* GetStatusName(int statusId)
+{
+	if (statusId >= 0 && statusId < (int)Buffs::STATUS_MAX_ID)
+	{
+		for (size_t i = 0; i < Buffs::g_knownStatuses.size(); i++)
+		{
+			if (Buffs::g_knownStatuses[i].statusId == statusId)
+				return Buffs::g_knownStatuses[i].name;
+		}
+	}
+	return nullptr;
+}
+
+unsigned long GetStatusEndMs(int statusId)
+{
+	if (statusId < 0 || statusId >= (int)Buffs::STATUS_MAX_ID)
+		return 0;
+	return Buffs::g_statusEndMs[statusId];
+}
+
 void RenderBuffsInterface()
 {
 	ImGui::Text("Character Buffs");
@@ -531,7 +564,7 @@ void RenderBuffsInterface()
 	// Collapsible list of every known status with its live state.
 	if (ImGui::TreeNode("All known statuses"))
 	{
-		ImGui::TextDisabled("(%d defined in StatusTips.ini)", (int)Buffs::g_knownStatuses.size());
+		ImGui::TextDisabled("(%d named in Cn_Res.ini)", (int)Buffs::g_knownStatuses.size());
 		for (size_t i = 0; i < Buffs::g_knownStatuses.size(); i++)
 		{
 			const Buffs::BuffEntry& b = Buffs::g_knownStatuses[i];
