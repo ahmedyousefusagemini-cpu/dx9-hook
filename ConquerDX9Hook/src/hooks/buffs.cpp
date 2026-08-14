@@ -122,6 +122,13 @@ namespace Buffs
 	int g_bitEventIndex = 0;
 	unsigned int g_bitEventTotal = 0;
 
+	// Cached pointer to MY character's status bitfield (myUser + 0x138). The
+	// core bit-set hook fires for every entity, so we filter to this one: it
+	// avoids logging other roles'/NPCs' statuses (e.g. constant id=5 toggled on
+	// them) and keeps the XP self-learning accurate.
+	void* g_myStatusBits = nullptr;
+	unsigned int g_foreignSkips = 0;
+
 	// Diagnostics.
 	int g_captureCount = 0;          // how many timer captures the hooks/reads saw
 	int g_lastCaptureId = -1;
@@ -408,7 +415,14 @@ namespace Buffs
 	{
 		unsigned long now = GetTickCount();
 
-		if (id < (unsigned int)STATUS_MAX_ID)
+		// Only track MY character's status field. FUN_00a72eab runs for every
+		// entity; other roles/NPCs (a constant id=5 toggled on them) would spam
+		// the log and could corrupt the XP self-learning.
+		bool mine = (g_myStatusBits != nullptr && bitfield == g_myStatusBits);
+		if (!mine)
+			g_foreignSkips++;
+
+		if (mine && id < (unsigned int)STATUS_MAX_ID)
 		{
 			if (set)
 			{
@@ -575,6 +589,8 @@ namespace Buffs
 		int user = GetMyUserObject();
 		if (!user)
 			return;
+
+		g_myStatusBits = (void*)(user + STATUS_BITFIELD_OFFSET);
 
 		const unsigned char* bits = (const unsigned char*)(user + STATUS_BITFIELD_OFFSET);
 		if (!IsReadable(bits, sizeof(g_statusBits)))
@@ -787,7 +803,8 @@ void RenderBuffsInterface()
 		ImGui::TextColored(Buffs::g_bitHookInstalled ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
 			Buffs::g_bitHookInstalled ? "bitset hook: INSTALLED" : "bitset hook: NOT installed");
 		ImGui::Text("bitset hook MH status: %d", Buffs::g_bitHookStatus);
-		ImGui::Text("transitions: %u   sets: %u", Buffs::g_bitEventTotal, Buffs::g_bitSetCount);
+		ImGui::Text("transitions: %u   sets: %u   (foreign skipped: %u)",
+			Buffs::g_bitEventTotal, Buffs::g_bitSetCount, Buffs::g_foreignSkips);
 		if (Buffs::g_lastBitSetId != 0xFFFFFFFF)
 			ImGui::Text("last SET: id=%u at %lu (now=%lu)", Buffs::g_lastBitSetId,
 				Buffs::g_lastBitSetTick, GetTickCount());
