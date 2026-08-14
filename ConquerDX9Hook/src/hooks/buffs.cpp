@@ -64,6 +64,17 @@ namespace Buffs
 	const size_t    ATTRIB_NAME_STR  = 0x178;
 	const size_t    ATTRIB_STR_SIZE  = 0x188;
 
+	// Active status icons: std::vector<icon*> at mgr+0xe0 (and mgr+0xec for
+	// the second display group). Each 0xac-byte icon:
+	//   +0x28 = timeGetTime() at apply, +0x2c = total seconds,
+	//   +0xa8 = CUserAttrib* def (def+0 = statusId)  [FUN_00e4c3d2]
+	const size_t    MGR_ICON_VEC_A  = 0xe0;
+	const size_t    MGR_ICON_VEC_B  = 0xec;
+	const size_t    ICON_START_MS   = 0x28;
+	const size_t    ICON_TOTAL_SEC  = 0x2c;
+	const size_t    ICON_DEF_PTR    = 0xa8;
+	const size_t    ICON_STRUCT_SIZE = 0xac;
+
 	// FUN_00e48d33 - the server-driven status apply chokepoint:
 	//   void __thiscall(mgr, statusId, displayType, seconds, flag, extra)
 	// Prologue sanity bytes: 6A 1C B8 ?? ?? ?? ?? E8 (EH prolog).
@@ -86,10 +97,11 @@ namespace Buffs
 	bool g_timerHookInstalled = false;
 
 	// Diagnostics.
-	int g_captureCount = 0;          // how many timer captures the hook saw
+	int g_captureCount = 0;          // how many timer captures the hooks/reads saw
 	int g_lastCaptureId = -1;
 	unsigned long g_lastCaptureEndMs = 0;
 	int g_namesLoaded = 0;
+	int g_iconVectorCount = 0;       // active icons found in the mgr vectors
 
 	// Diagnostics for object resolution (shown in the debug tree).
 	int g_clientAddr = 0;
@@ -326,6 +338,63 @@ namespace Buffs
 		g_timerHookInstalled = true;
 	}
 
+	// Reads the game's own active-icon list (mgr+0xe0 / +0xec vectors) and
+	// derives each status's deadline. This mirrors what the game renders:
+	//   remaining = total - (now - startMs)/1000  (FUN_00e4e217)
+	// Works for every buff the client shows an icon for, no hook required.
+	static void PollIconTimers()
+	{
+		g_iconVectorCount = 0;
+
+		int mgr = 0;
+		if (IsReadable((const void*)MGR_GLOBAL_ADDRESS, sizeof(int)))
+			mgr = *(int*)MGR_GLOBAL_ADDRESS;
+		if (!IsReadable((const void*)mgr, 0x100))
+			return;
+
+		const size_t vecOffsets[2] = { MGR_ICON_VEC_A, MGR_ICON_VEC_B };
+		for (int v = 0; v < 2; v++)
+		{
+			int begin = *(int*)(mgr + vecOffsets[v]);
+			int end = *(int*)(mgr + vecOffsets[v] + 4);
+			if (!begin || end <= begin)
+				continue;
+
+			int count = (end - begin) >> 2;
+			if (count > 64)
+				count = 64;
+
+			for (int i = 0; i < count; i++)
+			{
+				int icon = *(int*)(begin + i * 4);
+				if (!IsReadable((const void*)icon, ICON_STRUCT_SIZE))
+					continue;
+				int def = *(int*)(icon + ICON_DEF_PTR);
+				if (!IsReadable((const void*)def, 0x190))
+					continue;
+
+				int id = *(int*)def;
+				if (id < 0 || id >= (int)STATUS_MAX_ID)
+					continue;
+
+				int startMs = *(int*)(icon + ICON_START_MS);
+				int totalSec = *(int*)(icon + ICON_TOTAL_SEC);
+				if (totalSec > 0 && totalSec < 86400 * 30)
+				{
+					g_statusEndMs[id] = (unsigned long)startMs + (unsigned long)totalSec * 1000UL;
+					g_captureCount++;
+					g_lastCaptureId = id;
+					g_lastCaptureEndMs = g_statusEndMs[id];
+				}
+				else
+				{
+					g_statusEndMs[id] = 0;
+				}
+				g_iconVectorCount++;
+			}
+		}
+	}
+
 	// ---- per-frame poll ----------------------------------------------------
 
 	// Mirrors the game's ChkStatus (FUN_00d4e0ae): bit (id%64) of the 64-bit
@@ -373,6 +442,7 @@ namespace Buffs
 		memcpy(g_statusBits, bits, sizeof(g_statusBits));
 		g_statusReadOk = true;
 		LoadStatusNames();
+		PollIconTimers();
 	}
 }
 
@@ -520,6 +590,7 @@ void RenderBuffsInterface()
 		ImGui::TextColored(Buffs::g_timerHookInstalled ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
 			Buffs::g_timerHookInstalled ? "apply hook: INSTALLED" : "apply hook: NOT installed (build mismatch?)");
 		ImGui::Text("captures: %d", Buffs::g_captureCount);
+		ImGui::Text("active icons in mgr vectors: %d", Buffs::g_iconVectorCount);
 		if (Buffs::g_lastCaptureId >= 0)
 			ImGui::Text("last capture: id=%d endMs=%lu (now=%lu)",
 				Buffs::g_lastCaptureId, Buffs::g_lastCaptureEndMs, GetTickCount());
