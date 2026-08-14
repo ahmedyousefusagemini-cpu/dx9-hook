@@ -34,7 +34,8 @@ if not exist "%MSBUILD%" (
 )
 
 echo Using: %MSBUILD%
-"%MSBUILD%" "%~dp0ConquerDX9.Hook.sln" /m /nologo /verbosity:minimal /p:Configuration=%CONFIG% /p:Platform=%PLATFORM%
+rem Added /p:PlatformToolset=v145 to automatically build using the newer toolset
+"%MSBUILD%" "%~dp0ConquerDX9.Hook.sln" /m /nologo /verbosity:minimal /p:Configuration=%CONFIG% /p:Platform=%PLATFORM% /p:PlatformToolset=v145
 
 if errorlevel 1 (
     echo.
