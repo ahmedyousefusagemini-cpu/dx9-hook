@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "imgui.h"
+#include "MinHook.h"
 
 // ============================================================================
 // Character Buffs / Status overlay - Conquer.exe client 7937 (base 0x400000)
@@ -21,6 +22,13 @@
 //                                        bitfield + (id/64)*8
 //
 //   => active statuses = 72 bytes of bit flags at C3DUser+0x138 (576 bits).
+//
+// Remaining time: the server-driven apply chokepoint is FUN_00e48d33
+//   (called by the MsgUserAttrib processor FUN_01040c2e as
+//    e48d33(mgr, statusId, displayType, seconds, flag, extra)).
+//   It refreshes the icon timer via FUN_00e4c9d8(icon, seconds, type) which
+//   stores icon+0x2c = total seconds. We MinHook e48d33 and capture
+//   endMs = now + seconds*1000 per status id.
 //
 // Buff names are defined in ini/StatusTips.ini (loaded by the CUserAttribMgr
 // loader FUN_00e2c03c from userattribmgr.cpp; singleton DAT_01a56f20,
@@ -44,6 +52,11 @@ namespace Buffs
 	const size_t    STATUS_BITFIELD_WORDS   = 9;         // 9 * 8 bytes = 72 bytes
 	const size_t    STATUS_MAX_ID            = 576;
 
+	// FUN_00e48d33 - the server-driven status apply chokepoint:
+	//   void __thiscall(mgr, statusId, displayType, seconds, flag, extra)
+	// Prologue sanity bytes: 6A 1C B8 ?? ?? ?? ?? E8 (EH prolog).
+	const uintptr_t STATUS_APPLY_FUNC = 0x00E48D33;
+
 	// ---- runtime state -----------------------------------------------------
 	struct BuffEntry
 	{
@@ -54,6 +67,11 @@ namespace Buffs
 	std::vector<BuffEntry> g_knownStatuses;   // id->name map from StatusTips.ini
 	unsigned char g_statusBits[STATUS_BITFIELD_WORDS * 8] = {};
 	bool g_statusReadOk = false;
+
+	// Per-status end timestamps (GetTickCount ms) captured from the apply
+	// hook. 0 = unknown / permanent buff (no countdown shown).
+	unsigned long g_statusEndMs[STATUS_MAX_ID] = {};
+	bool g_timerHookInstalled = false;
 
 	// Diagnostics for object resolution (shown in the debug tree).
 	int g_clientAddr = 0;
@@ -175,6 +193,48 @@ namespace Buffs
 		fclose(f);
 	}
 
+	// ---- timer hook --------------------------------------------------------
+
+	typedef void (__thiscall* StatusApplyFn)(void* mgr, int statusId, int displayType,
+		int seconds, int flag, int extra);
+	static StatusApplyFn s_originalApply = nullptr;
+
+	// __fastcall detour matches the __thiscall layout (this in ECX, args on
+	// the stack). Seconds > 0 refreshes the deadline; seconds == 0 marks the
+	// status as permanent/unknown so the UI shows no countdown.
+	void __fastcall HkStatusApply(void* mgr, void*, int statusId, int displayType,
+		int seconds, int flag, int extra)
+	{
+		if (statusId >= 0 && statusId < (int)STATUS_MAX_ID)
+		{
+			if (seconds > 0 && seconds < 86400 * 30)
+				g_statusEndMs[statusId] = GetTickCount() + (unsigned long)seconds * 1000UL;
+			else
+				g_statusEndMs[statusId] = 0;
+		}
+		s_originalApply(mgr, statusId, displayType, seconds, flag, extra);
+	}
+
+	void EnsureTimerHookInstalled()
+	{
+		if (g_timerHookInstalled)
+			return;
+
+		// Sanity-check the target prologue (EH prolog: 6A 1C B8 ...).
+		const unsigned char* code = (const unsigned char*)STATUS_APPLY_FUNC;
+		if (IsBadReadPtr(code, 8) || code[0] != 0x6A || code[1] != 0x1C || code[2] != 0xB8)
+			return;
+
+		if (MH_Initialize() != MH_OK)
+			return;
+		if (MH_CreateHook((LPVOID)STATUS_APPLY_FUNC, &HkStatusApply,
+			(LPVOID*)&s_originalApply) != MH_OK)
+			return;
+		if (MH_EnableHook((LPVOID)STATUS_APPLY_FUNC) != MH_OK)
+			return;
+		g_timerHookInstalled = true;
+	}
+
 	// ---- per-frame poll ----------------------------------------------------
 
 	// Mirrors the game's ChkStatus (FUN_00d4e0ae): bit (id%64) of the 64-bit
@@ -187,9 +247,29 @@ namespace Buffs
 		return (words[id >> 6] >> (id & 63)) & 1ULL;
 	}
 
+	// "34s" / "1m 12s" / "--" for permanent or unknown-duration buffs.
+	static const char* FormatRemaining(int statusId)
+	{
+		static char buf[32];
+		unsigned long end = g_statusEndMs[statusId];
+		if (end == 0)
+			return "--";
+		unsigned long now = GetTickCount();
+		if (now >= end)
+			return "0s";
+		unsigned long secs = (end - now + 500) / 1000;
+		if (secs >= 60)
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "%lum %lus", secs / 60, secs % 60);
+		else
+			_snprintf_s(buf, sizeof(buf), _TRUNCATE, "%lus", secs);
+		return buf;
+	}
+
 	void PollBuffs()
 	{
 		g_statusReadOk = false;
+
+		EnsureTimerHookInstalled();
 
 		int user = GetMyUserObject();
 		if (!user)
@@ -256,6 +336,8 @@ void RenderBuffsInterface()
 		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[ON]  %s", b.name);
 		ImGui::SameLine();
 		ImGui::TextDisabled("id=%d", b.statusId);
+		ImGui::SameLine();
+		ImGui::Text("  %s", Buffs::FormatRemaining(b.statusId));
 		ImGui::PopID();
 		shownAny = true;
 	}
@@ -276,6 +358,8 @@ void RenderBuffsInterface()
 			continue;
 		ImGui::PushID((int)(i + 50000));
 		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[ON]  Status %d", activeIds[i]);
+		ImGui::SameLine();
+		ImGui::Text("  %s", Buffs::FormatRemaining(activeIds[i]));
 		ImGui::PopID();
 		shownAny = true;
 	}
@@ -298,6 +382,11 @@ void RenderBuffsInterface()
 				ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[OFF] %s", b.name);
 			ImGui::SameLine();
 			ImGui::TextDisabled("id=%d", b.statusId);
+			if (on)
+			{
+				ImGui::SameLine();
+				ImGui::Text("  %s", Buffs::FormatRemaining(b.statusId));
+			}
 			ImGui::PopID();
 		}
 		ImGui::TreePop();

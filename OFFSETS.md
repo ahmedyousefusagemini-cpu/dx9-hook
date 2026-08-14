@@ -344,6 +344,17 @@ words): bit `id` lives at `bitfield + (id/64)*8`, bit `(id%64)`.
 | Lua binder `CPlayer::Lua_AddStatus` | binder @ `0x00DA36EC` (`PUSH 0x16f2540`) | script path → AddStatus |
 | Lua binder `CPlayer::Lua_ClrStatus` | binder @ `0x00DA3711` | script path → ClearStatus |
 
+**Remaining time (VERIFIED):** the server-driven apply chokepoint is
+`FUN_00e48d33` @ `0x00E48D33` — called by the MsgUserAttrib processor
+`FUN_01040c2e` as `e48d33(mgr, statusId, displayType, seconds, flag, extra)`
+(stack: statusId@esp+4, displayType@esp+8, seconds@esp+0xC). It refreshes the
+icon timer via `FUN_00e4c9d8` @ `0x00E4C9D8` → `icon+0x2c = seconds`,
+`icon+0x24 = _time32(now)`, `icon+0x28 = timeGetTime()`. The icon render
+(`FUN_00e4e217`) shows remaining = `icon+0x2c - (timeGetTime()-icon+0x28)/1000`.
+The overlay MinHooks `FUN_00e48d33` (prologue `6A 1C B8`) and keeps
+`endMs = now + seconds*1000` per status id; the per-frame bitfield poll drops
+expired buffs automatically.
+
 **Buff names** come from `ini/StatusTips.ini` (`[<id>]` blocks with `Name=`
 lines), loaded by the CUserAttribMgr loader `FUN_00e2c03c` @ `0x00E2C03C`
 (userattribmgr.cpp). CUserAttribMgr singleton = `DAT_01a56f20`, accessor
