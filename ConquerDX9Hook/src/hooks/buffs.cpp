@@ -55,6 +55,15 @@ namespace Buffs
 	unsigned char g_statusBits[STATUS_BITFIELD_WORDS * 8] = {};
 	bool g_statusReadOk = false;
 
+	// Diagnostics for object resolution (shown in the debug tree).
+	int g_clientAddr = 0;
+	int g_userAddr = 0;
+	int g_userId54 = 0;
+	int g_userId268 = 0;
+	int g_clientId268 = 0;
+	int g_clientId26c = 0;
+	bool g_idMatched = false;
+
 	// ---- tiny helpers ------------------------------------------------------
 
 	bool IsReadable(const void* ptr, size_t len)
@@ -69,15 +78,20 @@ namespace Buffs
 		return *(int*)CLIENT_GLOBAL_ADDRESS;
 	}
 
-	// Walks client+0x98 to the tail node - my C3DUser (FUN_00deb082 pattern).
-	// The result is validated by the id match user+0x54 == client+0x268.
+	// Walks client+0x98 to the tail node - my C3DUser (FUN_00deb082 pattern,
+	// same walk the auto-hunt brain uses for the player position). The id
+	// checks are soft: private servers can zero one pair or the other, so any
+	// match confirms, but no match still returns the tail (GetPlayerPos proves
+	// it is the local player).
 	int GetMyUserObject()
 	{
 		int client = GetClientObject();
-		if (!IsReadable((const void*)client, 0x1000))
+		if (!IsReadable((const void*)client, 0x100))
 			return 0;
 
-		int myId = *(int*)(client + CLIENT_MY_ID_OFFSET);
+		g_clientAddr = client;
+		g_clientId268 = *(int*)(client + CLIENT_MY_ID_OFFSET);
+		g_clientId26c = *(int*)(client + 0x26c);
 
 		int user = client;
 		for (int i = 0; i < 64; i++)
@@ -90,9 +104,25 @@ namespace Buffs
 			user = next;
 		}
 
-		if (!IsReadable((const void*)(user + USER_ID_OFFSET), 4))
+		if (!IsReadable((const void*)(user + 0x268), 4))
 			return 0;
-		if (*(int*)(user + USER_ID_OFFSET) != myId)
+
+		g_userAddr = user;
+		g_userId54 = *(int*)(user + USER_ID_OFFSET);
+		g_userId268 = *(int*)(user + 0x268);
+
+		// Any known id pair confirms this is my role:
+		//   variant A : user+0x54  == client+0x268 (role-list match, FUN_00d3203a)
+		//   variant B : user+0x268 == client+0x26c (msg filter, FUN_0098c58d)
+		//   net path : user+0x268 == client+0x268 (CMsgUserAttrib handler check)
+		g_idMatched =
+			g_userId54 == g_clientId268 ||
+			g_userId268 == g_clientId26c ||
+			g_userId268 == g_clientId268;
+
+		// If the chain never advanced, the tail is just the client object
+		// itself - only trust it when an id pair actually matched.
+		if (user == client && !g_idMatched)
 			return 0;
 		return user;
 	}
@@ -283,6 +313,20 @@ void RenderBuffsInterface()
 				(unsigned int)((const unsigned int*)Buffs::g_statusBits)[w * 2],
 				(unsigned int)((const unsigned int*)Buffs::g_statusBits)[w * 2 + 1]);
 		}
+		ImGui::TreePop();
+	}
+
+	// Object resolution diagnostics - helps when a new server build moves ids.
+	if (ImGui::TreeNode("Object resolution"))
+	{
+		ImGui::Text("client: 0x%08X", (unsigned int)Buffs::g_clientAddr);
+		ImGui::Text("user  : 0x%08X", (unsigned int)Buffs::g_userAddr);
+		ImGui::Text("user+0x54  = %d (variant A role id)", Buffs::g_userId54);
+		ImGui::Text("user+0x268 = %d (variant B role id)", Buffs::g_userId268);
+		ImGui::Text("client+0x268 = %d (my id A)", Buffs::g_clientId268);
+		ImGui::Text("client+0x26c = %d (my id B)", Buffs::g_clientId26c);
+		ImGui::TextColored(Buffs::g_idMatched ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+			Buffs::g_idMatched ? "id matched: this is my character" : "no id pair matched - check server id layout");
 		ImGui::TreePop();
 	}
 }
