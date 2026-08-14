@@ -2,6 +2,11 @@
 #include <stdint.h>
 #include "imgui.h"
 
+// Buff 250 (Celestial Dance) status tracking, provided by buffs.cpp. These run
+// every frame (PollBuffs) even with the overlay menu closed.
+extern bool IsStatusActive(int statusId);
+extern unsigned long GetStatusEndMs(int statusId);
+
 // ============================================================================
 // Speed Control (CRole action speed fields) - Conquer.exe client 7937 (0x400000)
 // ----------------------------------------------------------------------------
@@ -36,7 +41,9 @@
 // Safety: only data writes, nothing patched. The game's interval math clamps
 // divisors to >= 1 and the final interval to >= 1. All speed-up is
 // client-side: the server may rubber-band movement or drop loot requests at
-// extreme values, so the slider tops out at 500%.
+// extreme values, so the manual slider tops out at 500%. The separate "Auto
+// Movement Speed" feature (below) can go up to 3000%, but only while the
+// Celestial Dance buff (status 250) is active with > 2s remaining.
 //
 // Two write paths feed the interval math every frame (same assert pattern as
 // the VIP spoof):  role+0x48=1 & role+0x44=(percent-100)*100  (the uncapped
@@ -67,8 +74,10 @@ namespace Speed
 	const size_t ROLE_SPEED_BOOST_FLAG   = 0x48;   // role+0x48: byte, enables the +0x44 divisor
 	const size_t ROLE_SPEED_DELTA_OFFSET = 0xc0;   // role+0xc0: nSpeedPercent delta (FUN_00deb537)
 
-	const int MIN_SPEED_PERCENT = 100;  // 100% = normal speed
-	const int MAX_SPEED_PERCENT = 500;  // beyond this the server rubber-bands hard
+	const int MIN_SPEED_PERCENT = 100;   // 100% = normal speed
+	const int MAX_SPEED_PERCENT = 500;   // manual slider max (server rubber-bands beyond)
+	const int AUTO_MIN_SPEED_PERCENT = 100;   // auto move-speed slider min
+	const int AUTO_MAX_SPEED_PERCENT = 3000;  // auto move-speed slider max
 
 	const uintptr_t IMAGE_BASE = 0x00400000;   // Conquer.exe image base
 	const uintptr_t IMAGE_TOP  = 0x02000000;   // vtable sanity range upper bound
@@ -80,6 +89,17 @@ namespace Speed
 	int  g_fastLootIntervalMs = 50;     // min delay between forced ticks (slider)
 	unsigned long g_lastFastLootReset = 0;  // GetTickCount() of last forced reset
 
+	// Auto Movement Speed (buff 250 Celestial Dance gated).
+	bool g_autoMoveSpeedEnabled = false;
+	int  g_autoMovePercent = 500;       // initial value 500%, adjustable 100..3000
+
+	// Always-on buff-250 tracker (updated every frame even with the menu closed).
+	bool         g_buff250Active = false;      // bit 250 set right now
+	bool         g_buff250JustStarted = false; // rising edge (0 -> 1) this frame
+	unsigned long g_buff250RemainingMs = 0;    // ms left (0 = inactive/unknown/expired)
+	bool         g_buff250Expiring = false;    // active & <= 2000 ms remaining
+	bool         g_autoBoostActive = false;    // actually writing the boost right now
+
 	// My-role cache + scan state (written by the scan thread, read per-frame).
 	volatile uintptr_t g_myRoleAddress = 0;
 	volatile long g_scanState = 0;      // 0 idle, 1 scanning, 2 done
@@ -89,6 +109,7 @@ namespace Speed
 	volatile int g_vtableHasIntervalFn = 0;     // candidate's vtable passed the class check
 	unsigned int g_originalCaps[13] = {0};      // saved SPEED_CAP_TABLE contents
 	bool g_capsRaised = false;
+	int  g_capsTarget = 0;                      // % the cap table is currently raised to
 
 	int GetClientObject()
 	{
@@ -118,35 +139,63 @@ namespace Speed
 
 	// Writes (or clears) the speed-boost fields on my role. Runs every frame so
 	// a game-side rewrite can't knock them off (same pattern as the VIP spoof).
-	void WriteSpeedFields(uintptr_t role, bool enabled)
+	// percent is the target percentage (100 = normal / no boost); enabled=false
+	// clears all fields back to stock.
+	void WriteSpeedFields(uintptr_t role, bool enabled, int percent)
 	{
 		// Path 1 (uncapped): the final divisor in FUN_00de86b2.
 		*(unsigned char*)(role + ROLE_SPEED_BOOST_FLAG) = enabled ? 1 : 0;
 		*(int*)(role + ROLE_SPEED_BOOST_OFFSET) =
-			enabled ? (g_speedPercent - MIN_SPEED_PERCENT) * 100 : 0;
+			enabled ? (percent - MIN_SPEED_PERCENT) * 100 : 0;
 		// Path 2 (nSpeedPercent, move states): the role+0xc0 delta, capped by the
 		// (raised) cap table. Never write <= -100: the "nSpeedPercent > 0" assert
 		// in FUN_00deb537 would force a zero interval.
 		*(int*)(role + ROLE_SPEED_DELTA_OFFSET) =
-			enabled ? g_speedPercent - MIN_SPEED_PERCENT : 0;
+			enabled ? percent - MIN_SPEED_PERCENT : 0;
 	}
 
-	// Raises/restores the per-state speed caps used by the role+0xc0 path.
-	// The table sits in read-only data, so VirtualProtect it first.
-	void RaiseSpeedCaps()
+	// Raises the per-state speed caps (used by the role+0xc0 path) to at least
+	// the given percent, or restores the originals when targetPercent <= 100.
+	// The table sits in read-only data, so VirtualProtect it first. Only grows
+	// the table (never shrinks while still raised) to avoid repeated protects.
+	void SetSpeedCapsTo(int targetPercent)
 	{
-		if (g_capsRaised)
+		if (targetPercent <= MIN_SPEED_PERCENT)
+		{
+			if (g_capsRaised)
+				RestoreSpeedCaps();
 			return;
+		}
+		if (g_capsRaised && g_capsTarget >= targetPercent)
+			return;
+
 		DWORD oldProtect = 0;
 		if (!VirtualProtect((void*)SPEED_CAP_TABLE, 13 * 4, PAGE_READWRITE, &oldProtect))
 			return;
+
+		if (!g_capsRaised)
+		{
+			unsigned int* caps = (unsigned int*)SPEED_CAP_TABLE;
+			for (int i = 0; i < 13; i++)
+				g_originalCaps[i] = caps[i];
+		}
 		unsigned int* caps = (unsigned int*)SPEED_CAP_TABLE;
 		for (int i = 0; i < 13; i++)
-		{
-			g_originalCaps[i] = caps[i];
-			caps[i] = (unsigned int)MAX_SPEED_PERCENT;
-		}
+			caps[i] = (unsigned int)targetPercent;
+		g_capsTarget = targetPercent;
 		g_capsRaised = true;
+	}
+
+	// Reconciles the cap table to the max % any currently-enabled feature may
+	// write (manual slider or auto move-speed), restored when none is enabled.
+	void UpdateSpeedCaps()
+	{
+		int target = MIN_SPEED_PERCENT;
+		if (g_speedEnabled && g_speedPercent > target)
+			target = g_speedPercent;
+		if (g_autoMoveSpeedEnabled && g_autoMovePercent > target)
+			target = g_autoMovePercent;
+		SetSpeedCapsTo(target);
 	}
 
 	void RestoreSpeedCaps()
@@ -160,6 +209,7 @@ namespace Speed
 				caps[i] = g_originalCaps[i];
 		}
 		g_capsRaised = false;
+		g_capsTarget = 0;
 	}
 
 	// Candidate class check: the vtable must point into the exe image, the action
@@ -262,16 +312,41 @@ namespace Speed
 	void SetSpeedEnabled(bool enabled)
 	{
 		if (!enabled && IsMyRoleWritable(g_myRoleAddress))
-			WriteSpeedFields(g_myRoleAddress, false);  // restore stock behavior
+			WriteSpeedFields(g_myRoleAddress, false, MIN_SPEED_PERCENT);  // restore stock behavior
 
 		g_speedEnabled = enabled;
-		if (enabled)
-			RaiseSpeedCaps();
-		else
-			RestoreSpeedCaps();
+		UpdateSpeedCaps();
 
 		if (enabled && g_myRoleAddress == 0)
 			StartRoleScan();
+	}
+
+	void SetAutoMoveSpeedEnabled(bool enabled)
+	{
+		if (!enabled && IsMyRoleWritable(g_myRoleAddress))
+			WriteSpeedFields(g_myRoleAddress, false, MIN_SPEED_PERCENT);  // restore stock behavior
+
+		g_autoMoveSpeedEnabled = enabled;
+		UpdateSpeedCaps();
+
+		if (enabled && g_myRoleAddress == 0)
+			StartRoleScan();
+	}
+
+	// Always-on buff-250 (Celestial Dance) tracker. Runs every frame even with
+	// the menu closed so the boost engages on the buff's rising edge and drops
+	// back to 100% the moment <= 2s remain.
+	void TrackBuff250State()
+	{
+		bool active = ::IsStatusActive(250);
+		unsigned long end = ::GetStatusEndMs(250);
+		unsigned long now = GetTickCount();
+
+		g_buff250JustStarted = active && !g_buff250Active;   // rising edge 0 -> 1
+		g_buff250Active      = active;
+		g_buff250RemainingMs = (active && end != 0 && now < end) ? (end - now) : 0;
+		g_buff250Expiring    = active && g_buff250RemainingMs != 0 && g_buff250RemainingMs <= 2000UL;
+		g_autoBoostActive    = g_autoMoveSpeedEnabled && active && !g_buff250Expiring;
 	}
 
 	// Runs every frame (even with the menu closed), like auto-hunt's pass.
@@ -300,12 +375,37 @@ namespace Speed
 			g_lastFastLootReset = 0;  // re-arm: next enable ticks immediately
 		}
 
-		if (g_speedEnabled)
+		// Always-on buff-250 (Celestial Dance) tracker - updated every frame.
+		TrackBuff250State();
+
+		// Decide the boost to write this frame. The Auto Movement Speed feature
+		// (if checked) drives the fields and takes precedence over the manual
+		// slider; it only boosts while buff 250 is active with > 2s remaining,
+		// otherwise it writes 100% (normal) so the character returns to stock
+		// speed on buff expiry / the final 2 seconds.
+		bool wantBoost = false;
+		int  boostPercent = MIN_SPEED_PERCENT;
+		if (g_autoMoveSpeedEnabled)
+		{
+			wantBoost = g_buff250Active && !g_buff250Expiring;
+			boostPercent = g_autoMovePercent;
+		}
+		else if (g_speedEnabled)
+		{
+			wantBoost = true;
+			boostPercent = g_speedPercent;
+		}
+
+		// Keep the per-state cap table high enough for the max % any enabled
+		// feature may write (auto can go up to 3000).
+		UpdateSpeedCaps();
+
+		if (wantBoost || g_speedEnabled || g_autoMoveSpeedEnabled)
 		{
 			uintptr_t role = g_myRoleAddress;
 			if (IsMyRoleWritable(role))
 			{
-				WriteSpeedFields(role, true);
+				WriteSpeedFields(role, wantBoost, boostPercent);
 			}
 			else if (g_myRoleAddress != 0)
 			{
@@ -379,6 +479,42 @@ void RenderSpeedInterface()
 				ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "My role not found yet");
 				if (ImGui::Button("Rescan"))
 					Speed::StartRoleScan();
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Auto Movement Speed (buff 250 Celestial Dance gated)
+	// ------------------------------------------------------------------
+	if (ImGui::Checkbox("Auto Movement Speed", &Speed::g_autoMoveSpeedEnabled))
+		Speed::SetAutoMoveSpeedEnabled(Speed::g_autoMoveSpeedEnabled);
+	ImGui::SameLine();
+	if (Speed::g_autoMoveSpeedEnabled)
+		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "ACTIVATED");
+	else
+		ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "NOT ACTIVATED");
+
+	if (Speed::g_autoMoveSpeedEnabled)
+	{
+		ImGui::SliderInt("Speed when Celestial Dance (id 250)", &Speed::g_autoMovePercent,
+			Speed::AUTO_MIN_SPEED_PERCENT, Speed::AUTO_MAX_SPEED_PERCENT);
+		ImGui::TextDisabled("100 = normal, 500 = 5x, 3000 = 30x. Only while buff 250 is active and > 2s remain.");
+
+		// Live buff-250 state - always tracked, even with the menu closed.
+		ImGui::Text("Celestial Dance (id 250): %s", Speed::g_buff250Active ? "ACTIVE" : "inactive");
+		if (Speed::g_buff250Active)
+		{
+			const char* boostTxt = Speed::g_autoBoostActive ? "ON" : "OFF (returning to 100%)";
+			int shownPercent = Speed::g_autoBoostActive ? Speed::g_autoMovePercent : 100;
+			ImGui::Text("Boost: %s  |  speed: %d%%", boostTxt, shownPercent);
+			if (Speed::g_buff250RemainingMs != 0)
+			{
+				unsigned long secs = (Speed::g_buff250RemainingMs + 500) / 1000;
+				ImGui::Text("Remaining: %lu s", secs);
+			}
+			else
+			{
+				ImGui::TextDisabled("Remaining: (no timer)");
 			}
 		}
 	}

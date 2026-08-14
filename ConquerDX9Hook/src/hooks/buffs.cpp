@@ -631,6 +631,19 @@ unsigned long GetStatusEndMs(int statusId)
 	return Buffs::g_statusEndMs[statusId];
 }
 
+// True while the given status id's bit is set in the current per-frame snapshot
+// of my character's status bitfield. Backed by Buffs::PaintBuff status polling
+// (PollBuffs), so it is always up to date even with the overlay menu closed.
+// Used by the Auto Movement Speed feature to gate on buff 250 (Celestial Dance).
+bool IsStatusActive(int statusId)
+{
+	if (statusId < 0 || statusId >= (int)Buffs::STATUS_MAX_ID)
+		return false;
+	if (!Buffs::g_statusReadOk)
+		return false;
+	return Buffs::TestStatusBit(Buffs::g_statusBits, statusId);
+}
+
 // XP / magic data registers a status's buff duration (seconds) so the core
 // bit-set hook can synthesize a live countdown even for icon-less statuses
 // (XP skills). Called from xp_skill.cpp's learned-magic scan.
