@@ -502,8 +502,9 @@ Equipment positions: MAIN slots 0x65..0x73 (101..115); ALT = MAIN + 0x14 =
 0x2C = swap to MAIN, 0x2D = swap to ALT, 0x198 = equip/refresh.
 
 Implementation (`gear_swap.cpp`): calls `FUN_00FF219D(hero)` via a
-`__fastcall` fn pointer when the XP bar is full (100) or the XP buff status
-is active (configurable status id, default 47) -> wear ALT; when the buff
-clears -> wear MAIN. Waits for hero+0x193C to flip (5s timeout) before
+`__fastcall` fn pointer. Trigger (configurable): when the XP bar reaches 100,
+wait `g_altDelaySec` (default 12s) then wear ALT; when the XP buff status
+(configurable id, default 47) applies, wear MAIN instantly and hold MAIN
+until the bar fills again. Waits for hero+0x193C to flip (5s timeout) before
 re-arming; 1.5s send cooldown; auto-stops after 2 consecutive unconfirmed
 sends.
