@@ -62,18 +62,20 @@ namespace GearSwap
 
 	bool IsHeroSupported()
 	{
-		// Prologue of FUN_00ff219d (verified):
-		//   68 4C 09 00 00          push 0x94C
-		//   B8 F6 E7 4A 01          mov  eax, 0x14AE7F6
-		//   E8 .. .. .. ..          call __EH_prolog3_GS
-		//   8B F1                   mov  esi, ecx
-		//   8B 86 3C 19 00 00       mov  eax, [esi+0x193C]   <- the mode read
+		// Prologue of FUN_00ff219d (verified byte-for-byte):
+		//   68 4C 09 00 00          push 0x94C                       @ 0x00
+		//   B8 F6 E7 4A 01          mov  eax, 0x14AE7F6             @ 0x05
+		//   E8 DD ED 26 00          call __EH_prolog3_GS            @ 0x0A
+		//   8B F1                   mov  esi, ecx                   @ 0x0F
+		//   8B 86 3C 19 00 00       mov  eax, [esi+0x193C]          @ 0x11  <- the mode read
 		const unsigned char* p = (const unsigned char*)SWAP_FUNC;
 		if (IsBadReadPtr(p, 0x18))
 			return false;
 		if (p[0] != 0x68 || p[1] != 0x4C)
 			return false;
-		if (p[0x10] != 0x8B || p[0x11] != 0x86 || p[0x13] != 0x19)
+		if (p[0x0F] != 0x8B || p[0x10] != 0xF1)
+			return false;
+		if (p[0x11] != 0x8B || p[0x12] != 0x86 || p[0x14] != 0x19)
 			return false;
 		return true;
 	}
