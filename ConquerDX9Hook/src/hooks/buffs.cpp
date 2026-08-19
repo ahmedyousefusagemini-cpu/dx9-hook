@@ -653,6 +653,22 @@ void RegisterStatusDuration(int statusId, unsigned int seconds)
 		Buffs::g_statusDurationSec[statusId] = seconds;
 }
 
+// True while an XP-style buff is active: a status whose bit is set AND that
+// has a magic-derived duration registered (XP skills apply statuses without
+// creating icons - their duration comes from magic-info +0x60). Used by the
+// auto gear-swap module as the swap trigger.
+bool IsXpStyleBuffActive()
+{
+	if (!Buffs::g_statusReadOk)
+		return false;
+	for (int id = 0; id < (int)Buffs::STATUS_MAX_ID; id++)
+	{
+		if (Buffs::g_statusDurationSec[id] > 0 && Buffs::TestStatusBit(Buffs::g_statusBits, id))
+			return true;
+	}
+	return false;
+}
+
 void RenderBuffsInterface()
 {
 	ImGui::Text("Character Buffs");

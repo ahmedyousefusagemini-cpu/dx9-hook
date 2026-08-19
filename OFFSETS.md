@@ -475,3 +475,34 @@ server-driven debuffs too (the binders only see script-applied ones).
 - [ ] Cap table has 13 dwords starting at 100 and ending at 200.
 - [ ] My-role match: candidate's vtable contains the interval virtual or the core fn.
 - [ ] Confirm each AOB match is unique before trusting it.
+
+---
+
+## Auto Gear Swap (native alternate-equipment feature, client 7937)
+
+The client ships a native "switch to alternate equipment" feature (the fgui
+swap button, string key `STR_SWAP_SUB_WEAPONBTNTIP` = Cn_Res.ini line 672).
+Verified chain (this build):
+
+| Address | What | Verification anchor |
+|---|---|---|
+| `0x00FF219D` | `CMyHero::SwapEquipMode` (heroitem.cpp) - THE swap. `__fastcall(ECX = hero)`, no stack args. Sends CMsgItem{action 0x2D alt / 0x2C main} (0x97B) + CMsgAction{action 0x198} (0x833) | prologue `68 4C 09 00 00 ... 8B F1 8B 86 3C 19 00 00` (reads hero+0x193C) |
+| `0x0043E581` | hero accessor - returns `DAT_01a53980` (same global as the client object) | `if (DAT==0) init; return DAT` |
+| `0x01A53980` | `DAT_01a53980` - CMyHero singleton global | shared with xp_skill/buffs |
+| hero `+0x193C` | equip mode flag: 0 = MAIN, 1 = ALT | read by FUN_00FF219D, FUN_00FCAD4C (getter) |
+| `0x00A58AA8` | swap button dispatch site: `CALL 0x0043e581; MOV ECX,EAX; CALL 0x00ff219d` | unique 3-instruction tail |
+| `0x00F0959C` | `CMsgItemPB::Process` (msgitem.pb.cc) - inbound item-action hub; `param+0x448` = action type; swap reply re-renders 8 equip slots (FUN_00ff1eff clear + FUN_00ff49c4 set pairs) when reply mode != current | registered @ 0x0170E270 table (CMsgItemPB methods) |
+| `0x00D8B8FF` | CMsgAction serialize (msg id 0x833, action type at +0x45C) | `[msg+6]=0x833` |
+| `0x00EF2E5E` | CMsgItem create/serialize (msg id 0x97B, action type at +0x448) | `[msg+6]=0x97b` |
+| `0x010CF416` | packet send | vtable[5] |
+| `0x00FCAD4C` | `CMyHero` equip-mode getter (`return *(int*)(this+0x193C)`) | all display/score callers |
+
+Equipment positions: MAIN slots 0x65..0x73 (101..115); ALT = MAIN + 0x14 =
+0x79..0x87 (121..135); special alt slots +0x384/+0x388. Action types:
+0x2C = swap to MAIN, 0x2D = swap to ALT, 0x198 = equip/refresh.
+
+Implementation (`gear_swap.cpp`): calls `FUN_00FF219D(hero)` via a
+`__fastcall` fn pointer when an XP-style buff (status bit set + magic-derived
+duration registered, `IsXpStyleBuffActive()` from buffs.cpp) becomes active
+(gear -> ALT) and when it clears (gear -> MAIN); waits for hero+0x193C to
+flip (5s timeout) before re-arming; 1.5s send cooldown.
