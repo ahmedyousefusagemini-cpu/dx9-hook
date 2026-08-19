@@ -413,6 +413,16 @@ void ApplyXpSkillClientState()
 	XpSkill::AutoXpTick();
 }
 
+// Current XP bar value (0-100). Shared with the auto gear-swap module, which
+// swaps to alternate gear when the bar fills (just before the XP pop).
+unsigned int GetXpBarValue()
+{
+	int client = XpSkill::GetClientObject();
+	if (!XpSkill::IsClientValid(client))
+		return 0;
+	return XpSkill::GetXpBarValue(client);
+}
+
 // Shared with buffs.cpp so its core bit-set hook can self-learn which status
 // bit the XP skill applies (the status id can differ from the magic id) and
 // derive that buff's countdown from the fired magic's duration.

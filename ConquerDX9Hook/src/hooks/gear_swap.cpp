@@ -4,10 +4,11 @@
 #include <string.h>
 #include "imgui.h"
 
-// Shared lookups from buffs.cpp - the auto-swap trigger is an XP-style buff:
-// a status whose bit is set AND that has a magic-derived duration registered
-// (XP skills apply statuses without creating icons).
-extern bool IsXpStyleBuffActive();
+// Shared lookups from buffs.cpp and xp_skill.cpp - the auto-swap trigger:
+//   XP bar full (100) or the XP buff status active -> wear alternate gear
+//   XP buff status cleared -> back to main gear.
+extern bool IsStatusActive(int statusId);
+extern unsigned int GetXpBarValue();
 
 // ============================================================================
 // Auto Gear Swap - Conquer.exe client 7937 (image base 0x400000)
@@ -28,9 +29,10 @@ extern bool IsXpStyleBuffActive();
 //        all 8 equipment slots (FUN_00ff1eff clear + FUN_00ff49c4 set pairs).
 //
 // So the complete native swap = FUN_00FF219D(hero) - exactly what the button
-// runs. This module just calls it when an XP-style buff becomes active
-// (gear -> ALT) and again when it clears (gear -> MAIN), waiting for the
-// +0x193C flag to flip before re-arming.
+// runs. This module calls it when the XP bar fills (gear -> ALT, right when
+// the XP skill pops) and again when the XP buff status clears (gear -> MAIN).
+// The XP buff status id is configurable (default 47 - the server applies the
+// XP buff as a regular icon status).
 // ============================================================================
 
 namespace GearSwap
@@ -42,11 +44,12 @@ namespace GearSwap
 
 	// --- configuration -----------------------------------------------------
 	bool g_autoSwap = false;
-	bool g_wearAltOnXp = true;   // true: XP buff -> ALT gear, cleared -> MAIN
+	int  g_xpBuffStatusId = 47;   // XP buff status id (server applies it as an icon status)
 
 	// --- runtime state -----------------------------------------------------
 	int  g_mode = -1;            // last read equip mode (-1 = unknown)
-	bool g_xpActive = false;     // last poll: XP-style buff active?
+	unsigned int g_xpBar = 0;    // last poll: XP bar value (0-100)
+	bool g_buffActive = false;   // last poll: XP buff status bit set?
 	int  g_pendingTarget = -1;   // swap in flight: 0 (main) / 1 (alt), -1 none
 	DWORD g_lastSwapSent = 0;
 	DWORD g_cooldownUntil = 0;
@@ -145,9 +148,13 @@ namespace GearSwap
 		if (!hero)
 			return;
 		g_mode = GetEquipMode(hero);
-		g_xpActive = IsXpStyleBuffActive();
+		g_xpBar = GetXpBarValue();
+		g_buffActive = IsStatusActive(g_xpBuffStatusId);
 
-		int desired = g_wearAltOnXp ? (g_xpActive ? 1 : 0) : (g_xpActive ? 0 : 1);
+		// ALT while the XP bar is full (the pop is imminent / just happened)
+		// or the XP buff status is held; MAIN once the buff clears.
+		bool altWanted = (g_xpBar >= 100) || g_buffActive;
+		int desired = altWanted ? 1 : 0;
 		DWORD now = GetTickCount();
 
 		// A swap is in flight - wait for the server round-trip. The client
@@ -213,7 +220,7 @@ void RenderGearSwapInterface()
 		return;
 	}
 
-	if (ImGui::Checkbox("Auto swap on XP buff", &GearSwap::g_autoSwap))
+	if (ImGui::Checkbox("Auto swap on XP bar full", &GearSwap::g_autoSwap))
 	{
 		if (!GearSwap::g_autoSwap)
 			GearSwap::g_pendingTarget = -1;
@@ -221,10 +228,18 @@ void RenderGearSwapInterface()
 
 	if (GearSwap::g_autoSwap)
 	{
-		ImGui::Checkbox("XP buff active -> wear alternate gear", &GearSwap::g_wearAltOnXp);
+		ImGui::TextDisabled("XP bar 100 -> wear alternate gear;");
+		ImGui::TextDisabled("XP buff cleared -> back to main gear.");
 
-		ImGui::TextDisabled("Swaps to alternate equipment when an XP-style buff");
-		ImGui::TextDisabled("starts, back to main equipment when it ends.");
+		int statusId = GearSwap::g_xpBuffStatusId;
+		if (ImGui::InputInt("XP buff status id", &statusId))
+		{
+			if (statusId < 0)
+				statusId = 0;
+			if (statusId > 575)
+				statusId = 575;
+			GearSwap::g_xpBuffStatusId = statusId;
+		}
 	}
 
 	ImGui::Spacing();
@@ -237,7 +252,9 @@ void RenderGearSwapInterface()
 		ImGui::Text("Equip mode: %s", modeName);
 		ImGui::SameLine();
 		ImGui::TextDisabled("(0x%08X)", (unsigned int)hero);
-		ImGui::Text("XP buff active: %s", GearSwap::g_xpActive ? "YES" : "no");
+		ImGui::Text("XP bar: %u / 100", GearSwap::g_xpBar);
+		ImGui::Text("Status %d (XP buff): %s", GearSwap::g_xpBuffStatusId,
+			GearSwap::g_buffActive ? "ACTIVE" : "off");
 		if (GearSwap::g_pendingTarget >= 0)
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Swap in flight -> %s...",
