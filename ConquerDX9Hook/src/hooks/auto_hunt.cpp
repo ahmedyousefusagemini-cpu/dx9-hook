@@ -7,10 +7,10 @@
 // Auto Hunt (CAutoHangUpMgr) - Conquer.exe client 7937 (image base 0x400000)
 // ----------------------------------------------------------------------------
 // The auto-hunt BEHAVIOR is client-driven: every frame the hunt brain
-// (FUN_00f54058) reads local game state and issues walk/attack calls. It only
-// runs while  FUN_0111621f == (client+0x5385 != 0 && mgr+0x11 != 0).
+// (FUN_00f54df8) reads local game state and issues walk/attack calls. It only
+// runs while  FUN_01117254 == (client+0x5385 != 0 && mgr+0x11 != 0).
 //
-// The in-game toggle (FUN_00bd7355) only sends the 0x855 "CMsgHangUp" notify
+// The in-game toggle (FUN_00bd8025) only sends the 0x855 "CMsgHangUp" notify
 // packet - it never writes either client-side flag. Worse, telling the server
 // "I'm auto-hunting" makes it handle XP/loot differently (the user observed the
 // XP bar resetting to zero). Since the hunting is client-driven, this feature
@@ -25,27 +25,27 @@
 // Waypoints / roam (2026-08-11): the character walks between a list of user
 // points and hunts each one, moving on when the area is clear. Built from the
 // brain's own helpers:
-//   - player pos : FUN_00deb082 walks the client's +0x98 chain to the role,
-//                  FUN_01249b80 decodes the obfuscated X/Y (secure ptr) /64.
-//   - walk to x,y: FUN_00f47df3(mgr, x, y, radius)  (__thiscall, ECX=mgr).
-//   - monster?   : FUN_00f42a88(mgr, &pair)  (__thiscall) pair[0]==0 => clear.
+//   - player pos : FUN_00debdb2 walks the client's +0x98 chain to the role,
+//                  (the obfuscated X/Y secure-pointer decode) /64.
+//   - walk to x,y: FUN_00f48b93(mgr, x, y, radius)  (__thiscall, ECX=mgr).
+//   - monster?   : FUN_00f43828(mgr, &pair)  (__thiscall) pair[0]==0 => clear.
 //   - home anchor: mgr+0x20/+0x24 - where the brain returns when there's no
 //                  target; we point it at the current waypoint.
 // ============================================================================
 
 namespace AutoHunt
 {
-	const uintptr_t TOGGLE_HANDLER_ADDRESS = 0x00BD7355;  // FUN_00bd7355 - notify packet
-	const uintptr_t MANAGER_GLOBAL_ADDRESS = 0x01A531E0;  // DAT_01a531e0 - CAutoHangUpMgr*
-	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A52960;  // DAT_01a52960 - client object*
-	const uintptr_t MANAGER_ACCESSOR_FUNC  = 0x00482705;  // FUN_00482705 - get/lazy-create mgr
+	const uintptr_t TOGGLE_HANDLER_ADDRESS = 0x00BD8025;  // FUN_00bd8025 - notify packet
+	const uintptr_t MANAGER_GLOBAL_ADDRESS = 0x01A54200;  // DAT_01a54200 - CAutoHangUpMgr*
+	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A53980;  // DAT_01a53980 - client object*
+	const uintptr_t MANAGER_ACCESSOR_FUNC  = 0x00482805;  // FUN_00482805 - get/lazy-create mgr
 
 	// Waypoint primitives (the brain's own helpers).
-	const uintptr_t WALK_FUNC        = 0x00F47DF3;  // FUN_00f47df3(mgr, x, y, radius)
-	const uintptr_t FIND_TARGET_FUNC = 0x00F42A88;  // FUN_00f42a88(mgr, &outPair)
+	const uintptr_t WALK_FUNC        = 0x00F48B93;  // FUN_00f48b93(mgr, x, y, radius)
+	const uintptr_t FIND_TARGET_FUNC = 0x00F43828;  // FUN_00f43828(mgr, &outPair)
 
 	const size_t CLIENT_AUTO_BATTLE_BYTE_OFFSET = 0x5385;  // client auto-battle byte
-	const size_t CLIENT_HUNT_GATE_OFFSET        = 0x1da0;  // brain gate (FUN_011ae8b7)
+	const size_t CLIENT_HUNT_GATE_OFFSET        = 0x1da0;  // brain gate (client-side hunt flag)
 
 	// VIP level fields read by the VIP getter FUN_00fd3271 (default / alt branch).
 	const size_t CLIENT_VIP_LEVEL_FIELD_A = 0x9e4;
@@ -131,7 +131,7 @@ namespace AutoHunt
 		return client != 0 && !IsBadReadPtr((const void*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET), 1);
 	}
 
-	// Mirrors the game's own is-hunting check (FUN_0111621f):
+	// Mirrors the game's own is-hunting check (FUN_01117254):
 	// client+0x5385 != 0 && mgr+0x11 != 0.
 	bool IsHunting()
 	{
@@ -165,8 +165,8 @@ namespace AutoHunt
 	}
 
 	// Reads the player's tile position. Replicates the game's own read:
-	// FUN_00deb082 walks the client's +0x98 chain to the role, then
-	// FUN_01249b80 decodes the obfuscated X/Y (secure-pointer) into tiles.
+	// FUN_00debdb2 walks the client's +0x98 chain to the role, then decodes
+	// the obfuscated X/Y (secure-pointer) into tiles.
 	bool GetPlayerPos(int& outX, int& outY)
 	{
 		outX = -1; outY = -1;
@@ -174,7 +174,7 @@ namespace AutoHunt
 		if (!IsClientValid(client))
 			return false;
 
-		// FUN_00deb082: follow +0x98 to the tail node (the role).
+		// FUN_00debdb2: follow +0x98 to the tail node (the role).
 		int role = client;
 		for (int i = 0; i < 64; i++)
 		{
@@ -188,7 +188,7 @@ namespace AutoHunt
 		if (IsBadReadPtr((const void*)(role + 0x20), 4))
 			return false;
 
-		// FUN_01249b80 decode: X = (*(role[0x20] ^ role[0x1c])) ^ role[0x20], then /64.
+		// The secure-pointer X/Y decode (mirrors the game's own read).
 		unsigned int r20 = *(unsigned int*)(role + 0x20);
 		unsigned int r1c = *(unsigned int*)(role + 0x1c);
 		if (r1c != 0)
@@ -219,7 +219,7 @@ namespace AutoHunt
 		*(int*)(manager + MANAGER_ANCHOR_Y_OFFSET) = y;
 	}
 
-	// The brain's own walk-to-coordinate (FUN_00f47df3). No-op if already moving.
+	// The brain's own walk-to-coordinate (FUN_00f48b93). No-op if already moving.
 	void WalkTo(int manager, int x, int y)
 	{
 		if (!IsManagerValid(manager))
@@ -227,7 +227,7 @@ namespace AutoHunt
 		((WalkFunc)WALK_FUNC)((void*)manager, x, y, 4);
 	}
 
-	// True when the brain's target finder (FUN_00f42a88) sees an attackable monster.
+	// True when the brain's target finder (FUN_00f43828) sees an attackable monster.
 	bool HasMonsterNear(int manager)
 	{
 		if (!IsManagerValid(manager))

@@ -11,13 +11,13 @@ extern unsigned long GetStatusEndMs(int statusId);
 // Speed Control (CRole action speed fields) - Conquer.exe client 7937 (0x400000)
 // ----------------------------------------------------------------------------
 // IMPORTANT LIVE FINDING (2026-08-10): in the running game, the per-role
-// action-interval virtual FUN_010afd05 is ALREADY hooked - its first 5 bytes
-// are overwritten with  E9 66 3D 26 73  (JMP 0x74313A70, a dynamically
-// allocated trampoline page). Something (server anti-cheat / launcher patch)
-// watches the classic speed-hack spot, so this module uses NO code hooks at
-// all and drives speed through the role's own speed fields instead:
+// action-interval virtual FUN_010b0a9a is ALREADY hooked - its first 5 bytes
+// are overwritten with an E9 (JMP to a dynamically allocated trampoline
+// page). Something (server anti-cheat / launcher patch) watches the classic
+// speed-hack spot, so this module uses NO code hooks at all and drives speed
+// through the role's own speed fields instead:
 //
-// Inside the master interval computation FUN_00de86b2 (3drole\role.cpp), the
+// Inside the master interval computation FUN_00de93e2 (3drole\role.cpp), the
 // final scaling for the role's current action (walk / attack / pickup) is:
 //   interval = ceil(interval * 100 / (100 + role+0x44/100))   when role+0x48 != 0
 // role+0x44 is in 1/100-percent units: 10000 -> divisor 200 -> 2x speed.
@@ -27,11 +27,11 @@ extern unsigned long GetStatusEndMs(int statusId);
 // against the role's id fields (two placements seen in the wild - this server
 // leaves client+0x26c = 0 and uses client+0x268), then VALIDATES the
 // candidate's class: its vtable must contain one of the interval functions
-// (FUN_010afd05 / FUN_00de86b2 - only role classes have them), so a random
+// (FUN_010b0a9a / FUN_00de93e2 - only role classes have them), so a random
 // object carrying the same id can't win the scan.
 //
-// Looting speed: the hunt brain (FUN_00f54058) only ticks when
-// timeGetTime() >= DAT_01a5cdb4 + 1000. Only the brain reads or writes that
+// Looting speed: the hunt brain (FUN_00f54df8) only ticks when
+// timeGetTime() >= DAT_01a5dde4 + 1000. Only the brain reads or writes that
 // global (verified by xrefs), so forcing it to 0 lets the brain issue
 // find/attack/loot orders early. Resetting it EVERY frame made loot orders
 // go out at frame rate and the server disconnected the client, so the reset
@@ -48,23 +48,23 @@ extern unsigned long GetStatusEndMs(int statusId);
 // Two write paths feed the interval math every frame (same assert pattern as
 // the VIP spoof):  role+0x48=1 & role+0x44=(percent-100)*100  (the uncapped
 // final divisor)  and  role+0xc0=percent-100  (the nSpeedPercent path in
-// FUN_00deb537, which IS capped per action-state by the 13-dword table at
-// 0x016F7E44 - so while enabled we raise that table to 500; it only affects
+// FUN_00dec267, which IS capped per action-state by the 13-dword table at
+// 0x016F8E84 - so while enabled we raise that table to 500; it only affects
 // entities with a positive +0xc0, i.e. just us).
 // ============================================================================
 
 namespace Speed
 {
-	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A52960;  // DAT_01a52960 - client object*
-	const uintptr_t HUNT_BRAIN_TICK_GLOBAL = 0x01A5CDB4;  // DAT_01a5cdb4 - last brain tick (timeGetTime)
-	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010AFD05;  // FUN_010afd05 - interval virtual (vtable check)
-	const uintptr_t ACTION_INTERVAL_CORE   = 0x00DE86B2;  // FUN_00de86b2 - master computation (vtable check)
-	const uintptr_t SPEED_CAP_TABLE        = 0x016F7E44;  // per-state nSpeedPercent caps (13 dwords)
+	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A53980;  // DAT_01a53980 - client object*
+	const uintptr_t HUNT_BRAIN_TICK_GLOBAL = 0x01A5DDE4;  // DAT_01a5dde4 - last brain tick (timeGetTime)
+	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010B0A9A;  // FUN_010b0a9a - interval virtual (vtable check)
+	const uintptr_t ACTION_INTERVAL_CORE   = 0x00DE93E2;  // FUN_00de93e2 - master computation (vtable check)
+	const uintptr_t SPEED_CAP_TABLE        = 0x016F8E84;  // per-state nSpeedPercent caps (13 dwords)
 
 	// Two id placements seen in the wild (this server leaves client+0x26c = 0):
-	//  A: client+0x268 <-> role+0x54   (the game's own my-role match in FUN_00d3203a:
+	//  A: client+0x268 <-> role+0x54   (the game's own my-role match:
 	//     "skip candidate unless role+0x54 == client+0x268")
-	//  B: client+0x26c <-> role+0x268  (FUN_0098c58d getter / msg filter FUN_01000e06)
+	//  B: client+0x26c <-> role+0x268  (the id getter / msg filter)
 	const size_t CLIENT_MY_ID_A_OFFSET = 0x268;  // client+0x268: my id (variant A)
 	const size_t CLIENT_MY_ID_B_OFFSET = 0x26c;  // client+0x26c: my id (variant B)
 	const size_t ROLE_ID_A_OFFSET      = 0x54;   // role+0x54: entity id (variant A)
@@ -72,7 +72,7 @@ namespace Speed
 	const size_t ROLE_ACTION_STATE       = 0xb4;   // role+0xb4: action state dword (< 13)
 	const size_t ROLE_SPEED_BOOST_OFFSET = 0x44;   // role+0x44: boost in 1/100 % (needs +0x48)
 	const size_t ROLE_SPEED_BOOST_FLAG   = 0x48;   // role+0x48: byte, enables the +0x44 divisor
-	const size_t ROLE_SPEED_DELTA_OFFSET = 0xc0;   // role+0xc0: nSpeedPercent delta (FUN_00deb537)
+	const size_t ROLE_SPEED_DELTA_OFFSET = 0xc0;   // role+0xc0: nSpeedPercent delta (FUN_00dec267)
 
 	const int MIN_SPEED_PERCENT = 100;   // 100% = normal speed
 	const int MAX_SPEED_PERCENT = 500;   // manual slider max (server rubber-bands beyond)
@@ -149,7 +149,7 @@ namespace Speed
 			enabled ? (percent - MIN_SPEED_PERCENT) * 100 : 0;
 		// Path 2 (nSpeedPercent, move states): the role+0xc0 delta, capped by the
 		// (raised) cap table. Never write <= -100: the "nSpeedPercent > 0" assert
-		// in FUN_00deb537 would force a zero interval.
+		// in FUN_00dec267 would force a zero interval.
 		*(int*)(role + ROLE_SPEED_DELTA_OFFSET) =
 			enabled ? percent - MIN_SPEED_PERCENT : 0;
 	}
@@ -555,7 +555,7 @@ void RenderSpeedInterface()
 		ImGui::Text("Speed caps raised: %s", Speed::g_capsRaised ? "yes" : "no");
 		char bytesText[64];
 		Speed::GetTargetBytesHex(bytesText, 16);
-		ImGui::TextDisabled("Interval fn @0x010AFD05: %s", bytesText);
+		ImGui::TextDisabled("Interval fn @0x010B0A9A: %s", bytesText);
 		ImGui::TreePop();
 	}
 }

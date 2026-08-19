@@ -7,6 +7,72 @@ update.
 
 Image base for all addresses below: `0x00400000`. Build analyzed: client 7937.
 
+> **2026-08-20: client recompiled (new build).** All addresses below were
+> re-located and VERIFIED against the new binary; the old → new migration
+> table is in the next section. The older tables further down still list
+> previous-build addresses (kept as the signature/anchor reference — every
+> entry's "Found via" mechanism still works on the new build).
+
+---
+
+## 2026-08-20 rebuild — verified old → new address table
+
+The update is a real recompile (not a uniform rebase). Per-region shifts:
+`+0x100` (0x004xxxxx accessors), `+0xD30` (0x00D9xxxx, 0x00DEBxxx, magic
+getter), `+0xD90` (0x00E5/0x00E6/0x010C region), `+0xDA0` (0x00F1/0x00F3/0x00F4),
+`+0x1020` (0x01A5xxxx globals), `+0x1035` (0x0111xxxx), `+0x1040` (0x016F7xxx
+tables), `+0x10BD` (0x011Bxxxx gates). Every entry below was re-verified by
+disassembly / byte check / xref in Ghidra.
+
+| Old (previous build) | New (this build) | What |
+|---|---|---|
+| `0x01A52960` | `0x01A53980` | client object global `DAT_01a53980` |
+| `0x01A531E0` | `0x01A54200` | CAutoHangUpMgr singleton global |
+| `0x00482705` | `0x00482805` | manager accessor (lazy-create) |
+| `0x00BD7355` | `0x00BD8025` | in-game toggle handler (0x855 notify) |
+| `0x00F2FCD5` | `0x00F30A75` | toggle impl `Toggle(mgr, flag)` |
+| `0x00E6A590` | `0x00E6B320` | CMsgHangUp packet builder (`B9 55 08 00 00`) |
+| `0x00E5E50D` | `0x00E5F29D` | CMsgHangUp ctor (candidate) |
+| `0x00E6388E` | `0x00E6252C` | CMsgHangUp dtor |
+| `0x010CE686` | `0x010CF416` | CMsgHangUp Process/send (vtable[5]) |
+| `0x00F36F4E` | `0x00F37CEE` | `CNetMsg::CreateNetMsg` factory |
+| `0x0103EF3E` | `0x0103FC75` | incoming dispatch → Lua |
+| `0x00BA2D7B` | `0x00BA3A4B` | dispatch helper (→ CQMain_OnNetMsg) |
+| `0x0111621F` | `0x01117254` | Is-hunting check (`client+0x5385 && mgr+0x11`) |
+| `0x0111524B` | `0x01116280` | auto-battle byte getter (`8A 81 85 53 00 00 C3`) |
+| `0x00F54058` | `0x00F54DF8` | per-frame hunt brain |
+| `0x01A5CDB4` | `0x01A5DDE4` | brain tick timestamp global (read+write only in the brain) |
+| `0x00F47DF3` | `0x00F48B93` | walk-to-coord (brain helper) |
+| `0x00F42A88` | `0x00F43828` | find-target (brain helper, writes `{id,dist}` pair) |
+| `0x00DEB082` | `0x00DEBDB2` | player-pos getter (client +0x98 chain walk) |
+| `0x00FD3271` | `0x00FD4038` | VIP level getter |
+| `0x01118B17` | `0x01119B4C` | VIP field-branch check |
+| `0x00F3314B` / `0x00F3316C` | `0x00F33EEB` / `0x00F33F0C` | VIP feature gates (jump-search / auto-pick) |
+| `0x010AFD05` | `0x010B0A9A` | action-interval virtual (vtable check) |
+| `0x00DE86B2` | `0x00DE93E2` | master interval computation |
+| `0x00DEB537` | `0x00DEC267` | nSpeedPercent scaler (cap-table consumer) |
+| `0x016F7E44` | `0x016F8E84` | speed cap table (13 dwords) |
+| `0x016F7E78` / `0x016F7EAC` | `0x016F8EB8` / `0x016F8EEC` | mount speed tables |
+| `0x00F93854` | `0x00F945F4` | pickup processor (roleaction.cpp) |
+| `0x00D9612C` | `0x00D96E5C` | magic-info getter (this + 0x70) |
+| `0x01115514` | `0x01116549` | XP-fill gate (`75 49` → `90 90`; FUN_011154f5 → FUN_0111652a) |
+| `0x011B21D8` | `0x011B3286` | use-skill-on-target gate — **polarity changed**: old `JZ 74 59` is now `JNZ 75 4B` → patch `EB 4B` (FUN_011b1ec9 → FUN_011b2f69) |
+| `0x011B3B21` | `0x011B4BF8` | use-skill-at-position gate — **polarity changed**: `JNZ 75 3C` → `EB 3C` (FUN_011b3503 → FUN_011b45cc) |
+| `0x011B1EC9` | `0x011B2F69` | use skill on target (callable: `__thiscall(client, magicId, selfUid, 0, 1)`) |
+| `0x011A930F` | `0x011B3B05` | magic-info +0x5C id compare (inside FUN_011b2f69) |
+| `0x01741FA4` | `0x01743024` | string `STR_CANNOT_USE_XP_WHEN_HANGUP` |
+| `0x01A56F20` | `0x01A57F40` | CUserAttribMgr singleton global |
+| `0x008329B1` | `0x00832AB1` | CUserAttribMgr accessor (reads `DAT_01a57f40`) |
+| `0x00A72EAB` | `0x00A73B7E` | status bitfield core set/clear (`C3DUser` bitfield +0x138 / +0x1c8) |
+| `0x00EECFF1` | `0x00EEDD80` | `C3DUser::AddStatus` (+0x1c8 pair: `0x00EEDDA0`) |
+| `0x00EF1835` | `0x00EF25C5` | `C3DUser::ClearStatus` |
+| `0x00F1A1D8` | `0x00F1AF78` | `C3DUser::ChkStatus` |
+| `0x00E48D33` | `0x00E49AC2` | status apply chokepoint (`6A 1C B8` prologue; 6-arg thiscall) |
+| `0x01040C2E` | `0x01041965` | MsgUserAttrib processor (calls the accessor + apply chokepoint) |
+
+Gate-patch polarity note: the old `JZ` use-skill gates became `JNZ` in this
+build (same `skip if NOT hunting` semantics after the `JNZ`→`JMP` patch).
+
 ---
 
 ## How to re-find a value after a binary update

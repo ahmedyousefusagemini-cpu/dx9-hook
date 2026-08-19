@@ -9,6 +9,43 @@ Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plu
 
 ---
 
+## 2026-08-20 — client recompiled; all hook addresses re-located and patched
+
+The Conquer.exe build updated (real recompile, not a uniform rebase). All four
+hook modules (`auto_hunt.cpp`, `xp_skill.cpp`, `speed.cpp`, `buffs.cpp`) were
+re-pointed at the new build and committed. Full old → new table + per-region
+shifts: see the migration section at the top of `OFFSETS.md`.
+
+Key re-find mechanisms that worked (repeat these on the next update):
+- **`ADD ECX,0x138` byte pattern** (`81 c1 38 01 00 00`) found the new
+  AddStatus (`0x00EEDD80`) / ClearStatus (`0x00EF25C5`) / ChkStatus
+  (`0x00F1AF78`) and the shared core bitfield setter **`0x00A73B7E`**
+  (`CMP EDI,0x240; JNC; AND EAX,0x3f; BTS ECX,EAX; SHR EDI,6` shape).
+- **Behavioral caller chain** for the status apply chokepoint: the new
+  MsgUserAttrib processor `FUN_01041965` calls the mgr accessor
+  (`thunk_FUN_00832ab1`) then the apply fn `0x00E49AC2` — identified by
+  decompiling the other msguserattrib.cpp-referencing function after
+  `FUN_01041965` was found via its prologue/caller pattern.
+- **XP-use gate polarity changed**: the old `JZ` gates are `JNZ` in the new
+  build. `IsClientSupported()` in `xp_skill.cpp` checks the original bytes,
+  so an unpatched run on the old build would have self-disabled — always
+  re-verify the original bytes when re-finding.
+- **Hunt brain exclusivity check**: `DAT_01a5dde4` (old `0x01A5CDB4` +0x1030)
+  xrefs = exactly one READ + one WRITE, both inside the new brain
+  `FUN_00f54df8` — the same exclusivity test used last time.
+- **Speed cap table**: found from the new nSpeedPercent scaler
+  `FUN_00dec267` (`MOV EDI,[EAX*4+0x16f8e84]` with the `CMP [EBP-4],0xc; JA`
+  guard) — old `0x016F7E44` +0x1040.
+- **Find-target disambiguation**: TWO functions write `{id,dist}` pairs.
+  `0x00F43828` (old +0xDA0, region-consistent) is the one the hunt brain
+  calls for the walk/attack path; `0x00F4344B` feeds the skill-cast path
+  (→ use-skill-on-target). auto_hunt.cpp uses `0x00F43828`.
+
+Doc-only follow-ups still open: CMsgHangUp ctor confirmation
+(`0x00E5F29D`), the second-bitfield ClearStatus pair for `+0x1c8`.
+
+---
+
 ## ✅ WORKING STATE (2026-08-10, late PM) — auto-hunt fully working
 
 The breakthrough was realizing the hunting is **client-driven** and the 0x855 packet is

@@ -18,20 +18,20 @@ extern bool GetLastXpFire(unsigned int* outMagicId, unsigned int* outDurationSec
 // The client calls character buffs "StatusIcons" and tracks them in a
 // 576-bit bitfield on the C3DUser (my character). All verified in Ghidra:
 //
-//   FUN_00eecff1 (C3DUser::AddStatus)  : ADD ECX,0x138; call bitfield setter
-//   FUN_00ef1835 (C3DUser::ClearStatus): ADD ECX,0x138; call bitfield clear
-//   FUN_00f1a1d8 (C3DUser::ChkStatus)  : ADD ECX,0x138; call bitfield tester
-//   FUN_00eed011 / FUN_00ef1855        : same pair on a second bitfield +0x1c8
-//   FUN_00a72eab (core setter/tester)  : bit = (id%64) of 64-bit word
+//   FUN_00eedd80 (C3DUser::AddStatus)  : ADD ECX,0x138; call bitfield setter
+//   FUN_00ef25c5 (C3DUser::ClearStatus): ADD ECX,0x138; call bitfield clear
+//   FUN_00f1af78 (C3DUser::ChkStatus)  : ADD ECX,0x138; call bitfield tester
+//   FUN_00eedda0 (AddStatus pair)      : same set on a second bitfield +0x1c8
+//   FUN_00a73b7e (core setter/tester)  : bit = (id%64) of 64-bit word
 //                                        bitfield + (id/64)*8
 //
 //   => active statuses = 72 bytes of bit flags at C3DUser+0x138 (576 bits).
 //
-// Remaining time: the server-driven apply chokepoint is FUN_00e48d33
-//   (called by the MsgUserAttrib processor FUN_01040c2e as
-//    e48d33(mgr, statusId, displayType, seconds, flag, extra)).
-//   It refreshes the icon timer via FUN_00e4c9d8(icon, seconds, type) which
-//   stores icon+0x2c = total seconds. We MinHook e48d33 and capture
+// Remaining time: the server-driven apply chokepoint is FUN_00e49ac2
+//   (called by the MsgUserAttrib processor FUN_01041965 as
+//    e49ac2(mgr, statusId, displayType, seconds, flag, extra)).
+//   It refreshes the icon timer (icon+0x2c = total seconds; icons are
+//   0xac-byte allocs from 0x01260c5e). We MinHook e49ac2 and capture
 //   endMs = now + seconds*1000 per status id.
 //
 // Buff names: the client's language table ini/Cn_Res.ini (GBK) holds the
@@ -41,7 +41,7 @@ extern bool GetLastXpFire(unsigned int* outMagicId, unsigned int* outDurationSec
 // animation name (e.g. "trojanblkt") - neither is displayable.
 //
 // My C3DUser is the tail of the client's +0x98 chain (same walk the auto-hunt
-// brain uses, FUN_00deb082), validated by id match: user+0x54 == client+0x268.
+// brain uses, FUN_00debdb2), validated by id match: user+0x54 == client+0x268.
 // ============================================================================
 
 namespace Buffs
@@ -50,7 +50,7 @@ namespace Buffs
 	bool g_buffsEnabled = true;
 
 	// ---- game constants (client 7937) --------------------------------------
-	const uintptr_t CLIENT_GLOBAL_ADDRESS = 0x01A52960;  // DAT_01a52960 - client object*
+	const uintptr_t CLIENT_GLOBAL_ADDRESS = 0x01A53980;  // DAT_01a53980 - client object*
 	const size_t    CLIENT_MY_ID_OFFSET   = 0x268;       // my entity id (variant A match)
 	const size_t    USER_ID_OFFSET        = 0x54;        // role id (variant A)
 	const size_t    USER_CHAIN_OFFSET     = 0x98;        // client->...->my C3DUser chain
@@ -58,14 +58,14 @@ namespace Buffs
 	const size_t    STATUS_BITFIELD_WORDS   = 9;         // 9 * 8 bytes = 72 bytes
 	const size_t    STATUS_MAX_ID            = 576;
 
-	// CUserAttribMgr: singleton global (DAT_01a56f20). Holds the definition
+	// CUserAttribMgr: singleton global (DAT_01a57f40). Holds the definition
 	// map and the active-icon vectors.
-	const uintptr_t MGR_GLOBAL_ADDRESS = 0x01A56F20;   // DAT_01a56f20
+	const uintptr_t MGR_GLOBAL_ADDRESS = 0x01A57F40;   // DAT_01a57f40
 
 	// Active status icons: std::vector<icon*> at mgr+0xe0 (and mgr+0xec for
 	// the second display group). Each 0xac-byte icon:
-	//   +0x28 = timeGetTime() at apply, +0x2c = total seconds,
-	//   +0xa8 = CUserAttrib* def (def+0 = statusId)  [FUN_00e4c3d2]
+//   +0x28 = timeGetTime() at apply, +0x2c = total seconds,
+//   +0xa8 = CUserAttrib* def (def+0 = statusId)
 	const size_t    MGR_ICON_VEC_A  = 0xe0;
 	const size_t    MGR_ICON_VEC_B  = 0xec;
 	const size_t    ICON_START_MS   = 0x28;
@@ -73,17 +73,17 @@ namespace Buffs
 	const size_t    ICON_DEF_PTR    = 0xa8;
 	const size_t    ICON_STRUCT_SIZE = 0xac;
 
-	// FUN_00e48d33 - the server-driven status apply chokepoint:
+	// FUN_00e49ac2 - the server-driven status apply chokepoint:
 	//   void __thiscall(mgr, statusId, displayType, seconds, flag, extra)
 	// Prologue sanity bytes: 6A 1C B8 ?? ?? ?? ?? E8 (EH prolog).
-	const uintptr_t STATUS_APPLY_FUNC = 0x00E48D33;
+	const uintptr_t STATUS_APPLY_FUNC = 0x00E49AC2;
 
-	// FUN_00a72eab - the core 64-bit bitfield set/clear that every status
+	// FUN_00a73b7e - the core 64-bit bitfield set/clear that every status
 	// funnels through (AddStatus/ClearStatus AND the XP-skill bit-only path).
 	// XP skills set their bit WITHOUT creating a status icon, so this hook is
 	// the only way the overlay sees their activation (the icon vectors + the
-	// FUN_00e48d33 hook never fire for them).
-	const uintptr_t STATUS_BITSET_FUNC = 0x00A72EAB;
+	// FUN_00e49ac2 hook never fire for them).
+	const uintptr_t STATUS_BITSET_FUNC = 0x00A73B7E;
 
 	// ---- runtime state -----------------------------------------------------
 	struct BuffEntry
@@ -105,7 +105,7 @@ namespace Buffs
 	// Per-status buff duration (seconds) registered from XP/magic data
 	// (magic-info +0x60). The core bit-set hook uses it to synthesize a
 	// countdown for icon-less statuses (XP skills) that the icon vectors and
-	// FUN_00e48d33 never report.
+	// FUN_00e49ac2 never report.
 	unsigned int g_statusDurationSec[STATUS_MAX_ID] = {};
 	bool g_bitHookInstalled = false;
 	int g_bitHookStatus = -1;     // last MH_STATUS of the bitset-hook installer (debug)
@@ -159,7 +159,7 @@ namespace Buffs
 		return *(int*)CLIENT_GLOBAL_ADDRESS;
 	}
 
-	// Walks client+0x98 to the tail node - my C3DUser (FUN_00deb082 pattern,
+	// Walks client+0x98 to the tail node - my C3DUser (FUN_00debdb2 pattern,
 	// same walk the auto-hunt brain uses for the player position). The id
 	// checks are soft: private servers can zero one pair or the other, so any
 	// match confirms, but no match still returns the tail (GetPlayerPos proves
@@ -193,8 +193,8 @@ namespace Buffs
 		g_userId268 = *(int*)(user + 0x268);
 
 		// Any known id pair confirms this is my role:
-		//   variant A : user+0x54  == client+0x268 (role-list match, FUN_00d3203a)
-		//   variant B : user+0x268 == client+0x26c (msg filter, FUN_0098c58d)
+		//   variant A : user+0x54  == client+0x268 (role-list match)
+		//   variant B : user+0x268 == client+0x26c (msg filter)
 		//   net path : user+0x268 == client+0x268 (CMsgUserAttrib handler check)
 		g_idMatched =
 			g_userId54 == g_clientId268 ||
@@ -392,7 +392,7 @@ namespace Buffs
 	}
 
 	// ----------------------------------------------------------------------
-	// Core bit-field hook (FUN_00a72eab). Catches the XP skill's bit-only
+	// Core bit-field hook (FUN_00a73b7e). Catches the XP skill's bit-only
 	// activation that never becomes a status icon.
 	//   __thiscall(bitfield, id, set)  ->  __fastcall(ecx, unusedEdx, id, set)
 	// ----------------------------------------------------------------------
@@ -415,7 +415,7 @@ namespace Buffs
 	{
 		unsigned long now = GetTickCount();
 
-		// Only track MY character's status field. FUN_00a72eab runs for every
+		// Only track MY character's status field. FUN_00a73b7e runs for every
 		// entity; other roles/NPCs (a constant id=5 toggled on them) would spam
 		// the log and could corrupt the XP self-learning.
 		bool mine = (g_myStatusBits != nullptr && bitfield == g_myStatusBits);
@@ -551,7 +551,7 @@ namespace Buffs
 
 	// ---- per-frame poll ----------------------------------------------------
 
-	// Mirrors the game's ChkStatus (FUN_00d4e0ae): bit (id%64) of the 64-bit
+	// Mirrors the game's ChkStatus (FUN_00f1af78): bit (id%64) of the 64-bit
 	// word at bitfield + (id/64)*8.
 	static bool TestStatusBit(const unsigned char* bits, int id)
 	{
