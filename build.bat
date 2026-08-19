@@ -51,7 +51,7 @@ rem ============================================================================
 rem Push compiled DLL to physical local machine via RDP
 rem ============================================================================
 set "SOURCE_DLL=%~dp0Release\D3DX9_43.dll"
-set "DEST_DIR=\\tsclient\D\AhmedProject\client\Env_DX9"
+set "DEST_DIR=\\tsclient\H\client\Env_DX9"
 
 echo.
 echo Pushing DLL to local machine (%DEST_DIR%)...
