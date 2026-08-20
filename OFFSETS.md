@@ -361,15 +361,17 @@ withholds this packet by default so the server treats kills as normal gameplay.
 - **Auto-pick (loot):** a separate VIP4-gated option. Enable it in the client's
   auto-hunt dialog (the VIP spoof unlocks the checkbox).
 - **Cancel attack animation (`speed.cpp`, 2026-08-20):** while auto-hunt is
-  hunting and `mgr+0x04 != 0` (brain attacking in range), write the extreme
-  `role+0x44` boost (default 13,000,000 → attack interval `ceil(base*100/130100)`
-  = 1 tick for melee bases) so the attack animation is skipped and attacks fire
-  at the brain-tick rate (fast-loot tick, default 50 ms). Walking keeps the
+  hunting and `mgr+0x04 != 0` (brain attacking in range), write the `role+0x44`
+  boost (slider 100–3000%, default 500 → attack interval
+  `ceil(base*100/600)` ≈ 217 ms for a 1300 ms melee base) so the attack
+  animation is largely skipped and attacks fire at the brain-tick rate
+  (fast-loot tick, default 50 ms). Walking keeps the
   manual slider speed; a stale `mgr+0x04` is cleared via the brain's finder
   (`FUN_00f43828`) when no monster is near. Attack packet = `CMsgAction` id
   0x12/0x13 sent by `FUN_00f67675` from the combat handler `FUN_0112112c`
-  (called by the brain each tick). Server tolerates ~20 attack packets/sec;
-  extreme values may still disconnect.
+  (called by the brain each tick). Server tolerates ~20 attack packets/sec —
+  the 500% cadence (~4.6/sec) is well inside it; raising the slider toward
+  3000% (~23/sec) matches the fast-loot tick that already works.
 - **Speed (client-side):** write `role+0x48=1` + `role+0x44=(pct-100)*100` and
   `role+0xc0=pct-100` every frame; raise the cap table to lift the +0xc0 clamp.
   Do NOT hook FUN_010afd05 (the server hooks it itself — seen live as an E9 jmp).

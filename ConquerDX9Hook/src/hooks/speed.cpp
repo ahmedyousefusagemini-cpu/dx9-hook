@@ -54,12 +54,13 @@ extern void ClearAutoHuntTarget();
 // Cancel Attack Animation (2026-08-20): the same +0x44 divisor scales the
 // ATTACK action's interval too (the master interval computation FUN_00de93e2
 // applies the final scaling to every action when role+0x48 != 0). So while
-// the hunt brain is attacking a monster in range (mgr+4 != 0), an extreme
-// boost collapses the attack interval to ~1 tick: the attack animation is
-// effectively skipped and the next attack packet (CMsgAction, sent by
-// FUN_00f67675 from the brain's FUN_0112112c call) fires at the brain-tick
-// rate (fast-loot tick, default 50 ms). Walking between targets is NOT
-// boosted - the boost is only written while mgr+4 holds a small tile value
+// the hunt brain is attacking a monster in range (mgr+4 != 0), a boost
+// collapses the attack interval (~1300 ms -> ~217 ms at the 500% default):
+// the attack animation is largely skipped and the next attack packet
+// (CMsgAction, sent by FUN_00f67675 from the brain's FUN_0112112c call) fires
+// at the brain-tick rate (fast-loot tick, default 50 ms). Walking between
+// targets is NOT boosted - the boost is only written while mgr+4 holds a
+// small tile value
 // (attack X; the brain writes a loot pointer there while looting, which is
 // excluded), and a stale mgr+4 left behind after a kill is cleared via the
 // brain's own finder.
@@ -99,12 +100,13 @@ namespace Speed
 	const int AUTO_MAX_SPEED_PERCENT = 3000;  // auto move-speed slider max
 
 	// Attack-only boost (animation cancel). The attack interval is
-	// ceil(base * 100 / (100 + boost/100)); boost = 13,000,000 collapses a
-	// ~1300 ms attack to 1 tick. Only written while the brain is in combat,
-	// so movement keeps the manual slider speed.
+	// ceil(base * 100 / (100 + boost/100)); boost = 3000 collapses a ~1300 ms
+	// attack to ~44 ms (~23 attacks/sec - same cadence the server already
+	// tolerates from the fast-loot tick). Only written while the brain is in
+	// combat, so movement keeps the manual slider speed.
 	const int ATTACK_MIN_SPEED_PERCENT = 100;
-	const int ATTACK_MAX_SPEED_PERCENT = 20000000;
-	const int ATTACK_DEFAULT_SPEED_PERCENT = 13000000;
+	const int ATTACK_MAX_SPEED_PERCENT = 3000;
+	const int ATTACK_DEFAULT_SPEED_PERCENT = 500;
 
 	const uintptr_t IMAGE_BASE = 0x00400000;   // Conquer.exe image base
 	const uintptr_t IMAGE_TOP  = 0x02000000;   // vtable sanity range upper bound
@@ -120,7 +122,7 @@ namespace Speed
 	bool g_autoMoveSpeedEnabled = false;
 	int  g_autoMovePercent = 500;       // initial value 500%, adjustable 100..3000
 
-	// Cancel Attack Animation (combat-only extreme boost, auto-hunt gated).
+	// Cancel Attack Animation (combat-only boost, auto-hunt gated).
 	bool g_attackSpeedEnabled = false;
 	int  g_attackSpeedPercent = ATTACK_DEFAULT_SPEED_PERCENT;
 	unsigned long g_lastAttackStateCheck = 0;  // rate limit for the mgr+4 cleanup
@@ -430,12 +432,12 @@ namespace Speed
 
 		// Decide the boost to write this frame. Cancel Attack Animation takes
 		// precedence: while the hunt brain is attacking a monster in range
-		// (mgr+4 != 0), write an extreme boost so the attack action's interval
-		// collapses to ~1 tick (animation effectively skipped; the next attack
-		// fires at the brain-tick rate). Otherwise the Auto Movement Speed
-		// feature (if checked) drives the fields and takes precedence over the
-		// manual slider; it only boosts while buff 250 is active with > 2s
-		// remaining, otherwise it writes 100% (normal) so the character
+		// (mgr+4 != 0), write the boost so the attack action's interval
+		// collapses to ~217 ms at 500% (animation largely skipped; the next
+		// attack fires at the brain-tick rate). Otherwise the Auto Movement
+		// Speed feature (if checked) drives the fields and takes precedence
+		// over the manual slider; it only boosts while buff 250 is active with
+		// > 2s remaining, otherwise it writes 100% (normal) so the character
 		// returns to stock speed on buff expiry / the final 2 seconds.
 		bool combatBoost = false;
 		if (g_attackSpeedEnabled)
@@ -479,7 +481,7 @@ namespace Speed
 		}
 
 		// Keep the per-state cap table high enough for the max % any enabled
-		// feature may write (attack can go up to 20,000,000).
+		// feature may write (attack can go up to 3000).
 		UpdateSpeedCaps();
 
 		if (wantBoost || g_speedEnabled || g_autoMoveSpeedEnabled || g_attackSpeedEnabled)
@@ -602,7 +604,7 @@ void RenderSpeedInterface()
 	}
 
 	// ------------------------------------------------------------------
-	// Cancel Attack Animation (combat-only extreme boost, auto-hunt gated)
+	// Cancel Attack Animation (combat-only boost, auto-hunt gated)
 	// ------------------------------------------------------------------
 	if (ImGui::Checkbox("Cancel attack animation (combat speed)", &Speed::g_attackSpeedEnabled))
 		Speed::SetAttackSpeedEnabled(Speed::g_attackSpeedEnabled);
@@ -616,7 +618,7 @@ void RenderSpeedInterface()
 	{
 		ImGui::SliderInt("Attack speed %", &Speed::g_attackSpeedPercent,
 			Speed::ATTACK_MIN_SPEED_PERCENT, Speed::ATTACK_MAX_SPEED_PERCENT);
-		ImGui::TextDisabled("While auto-hunt fights, the attack animation is skipped (interval -> 1 tick).");
+		ImGui::TextDisabled("While auto-hunt fights, the attack interval drops to ~217 ms (500%).");
 		ImGui::TextDisabled("Walking keeps the normal slider speed. Lower it if the server disconnects you.");
 		ImGui::Text("In combat: %s", IsAutoHuntInCombat() ? "YES" : "no");
 	}
