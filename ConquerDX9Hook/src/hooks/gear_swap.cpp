@@ -3,10 +3,11 @@
 #include <cstdio>
 #include <string.h>
 #include "imgui.h"
+#include "MinHook.h"
 
 // Shared lookups from buffs.cpp and xp_skill.cpp - the auto-swap trigger:
-//   XP bar full (100) or the XP buff status active -> wear alternate gear
-//   XP buff status cleared -> back to main gear.
+//   XP icon on screen -> wear alternate gear
+//   XP buff status active -> back to main gear.
 extern bool IsStatusActive(int statusId);
 extern unsigned int GetXpBarValue();
 
@@ -32,14 +33,17 @@ extern unsigned int GetXpBarValue();
 // runs. This module wears ALT while the XP icon is on screen and switches back
 // to MAIN the moment the XP skill activates:
 //
-//   - the server sets status 0x1B (27) to show the XP icon at its own timing
-//     after the XP bar fills (the game's icon-show gate is
-//     FUN_00f1af78(0x1b) -> CDlgXp show) -> wear ALT
+//   - icon on screen (hooked directly, see below) -> wear ALT
 //   - the XP buff status (configurable, default 47) sets = the skill
 //     activated -> wear MAIN, held until the icon clears and re-appears
 //
-// Using status 27 instead of the bar value handles the random delay between
-// the bar reaching 100 and the icon actually appearing on screen.
+// Icon detection: every code path that shows the XP icon (CDlgXp - dlgxp.cpp)
+// converges on FUN_00AE5B7B (its visibility setter). We MinHook it, remember
+// the CDlgXp instance, and each frame read its own +0xAB4 "shown" flag - the
+// exact field the game renders the icon from (1 = on screen, 0 = hidden).
+// This is ground truth for "icon on screen" - no status-id guessing, so it is
+// immune to the server's random timing between bar fill and icon pop, and to
+// status-id differences between private servers.
 // ============================================================================
 
 namespace GearSwap
@@ -49,18 +53,20 @@ namespace GearSwap
 	const uintptr_t SWAP_FUNC           = 0x00FF219D;  // FUN_00ff219d - CMyHero::SwapEquipMode
 	const size_t    EQUIP_MODE_OFFSET   = 0x193C;      // 0 = main, 1 = alternate
 
+	// CDlgXp::show - the visibility setter every XP-icon show path converges
+	// on (dlgxp.cpp). Prologue sanity bytes: 68 88 00 00 00 (EH prolog).
+	const uintptr_t XP_ICON_SHOW_FUNC = 0x00AE5B7B;
+	const size_t    ICON_VISIBLE_FLAG_OFFSET = 0xAB4;   // CDlgXp "shown" flag (1 = icon on screen)
+	const size_t    HWND_OFFSET       = 0x20;           // CWnd::m_hWnd (debug display only)
+
 	// --- configuration -----------------------------------------------------
 	bool g_autoSwap = false;
-	int  g_xpIconStatusId = 27;   // "XP icon on screen" status (0x1B - the game's
-	                              // own icon-show check: FUN_00f1af78(0x1b) gates
-	                              // CDlgXp show; the server sets it at its own
-	                              // timing after the bar fills)
 	int  g_xpBuffStatusId = 47;   // XP buff status id (server applies it as an icon status)
 
 	// --- runtime state -----------------------------------------------------
 	int  g_mode = -1;            // last read equip mode (-1 = unknown)
 	unsigned int g_xpBar = 0;    // last poll: XP bar value (0-100)
-	bool g_iconActive = false;   // last poll: XP icon status bit set? (icon on screen)
+	bool g_iconActive = false;   // last poll: XP icon window on screen?
 	bool g_buffActive = false;   // last poll: XP buff status bit set?
 	bool g_buffSeenThisFill = false; // the XP skill activated since the icon went up - hold MAIN
 	int  g_pendingTarget = -1;   // swap in flight: 0 (main) / 1 (alt), -1 none
@@ -71,8 +77,56 @@ namespace GearSwap
 	unsigned long g_confirmFail = 0;   // timeouts waiting for the flip
 	unsigned long g_skippedWhileBusy = 0;
 
+	int  g_cdlgxp = 0;           // captured CDlgXp instance (from the show hook)
+	bool g_iconHookInstalled = false;
+	int  g_iconHookStatus = 0;
+
 	char g_lastResult[48] = "idle";
 	DWORD g_lastResultTick = 0;
+
+	// --- XP icon visibility hook -------------------------------------------
+	// FUN_00AE5B7B is CDlgXp::show (this in ECX, param_2 = show flag).
+	// __fastcall detour matches the __thiscall layout (this in ECX, args on
+	// the stack, no edx arg).
+	typedef void (__thiscall* XpIconShowFn)(void* self, int show);
+	static XpIconShowFn s_originalXpIconShow = nullptr;
+
+	void __fastcall HkXpIconShow(void* self, void* /*edx*/, int show)
+	{
+		GearSwap::g_cdlgxp = (int)self;
+		GearSwap::g_iconActive = (show != 0);
+		if (s_originalXpIconShow)
+			s_originalXpIconShow(self, show);
+	}
+
+	void EnsureIconHookInstalled()
+	{
+		if (g_iconHookInstalled)
+			return;
+		if (IsBadReadPtr((const void*)XP_ICON_SHOW_FUNC, 8))
+			return;
+		g_iconHookStatus = MH_Initialize();
+		if (g_iconHookStatus != MH_OK && g_iconHookStatus != MH_ERROR_ALREADY_INITIALIZED)
+			return;
+		g_iconHookStatus = MH_CreateHook((LPVOID)XP_ICON_SHOW_FUNC, &HkXpIconShow, (LPVOID*)&s_originalXpIconShow);
+		if (g_iconHookStatus != MH_OK)
+			return;
+		g_iconHookStatus = MH_EnableHook((LPVOID)XP_ICON_SHOW_FUNC);
+		if (g_iconHookStatus != MH_OK)
+			return;
+		g_iconHookInstalled = true;
+	}
+
+	// Ground-truth check: the icon window's own "shown" flag. CDlgXp::show
+	// (FUN_00AE5B7B) sets +0xAB4 = 1 when the icon is on screen and 0 when it
+	// hides - the exact flag the game renders from. Read it on the captured
+	// instance each frame.
+	bool IsXpIconVisible()
+	{
+		if (!g_cdlgxp || IsBadReadPtr((const void*)g_cdlgxp, ICON_VISIBLE_FLAG_OFFSET + sizeof(int)))
+			return false;
+		return *(int*)(g_cdlgxp + ICON_VISIBLE_FLAG_OFFSET) != 0;
+	}
 
 	// --- sanity / support --------------------------------------------------
 
@@ -160,17 +214,26 @@ namespace GearSwap
 		int hero = GetHero();
 		if (!hero)
 			return;
+
+		EnsureIconHookInstalled();
+		if (!g_iconHookInstalled)
+		{
+			g_autoSwap = false;   // icon detection unavailable - stay off
+			SetResult("XP icon hook failed");
+			return;
+		}
+
 		g_mode = GetEquipMode(hero);
 		g_xpBar = GetXpBarValue();
-		g_iconActive = IsStatusActive(g_xpIconStatusId);
+		g_iconActive = IsXpIconVisible();
 		g_buffActive = IsStatusActive(g_xpBuffStatusId);
 		DWORD now = GetTickCount();
 
-		// The XP icon appears when the server sets status 0x1B (27) - the game's
-		// own icon-show gate (FUN_00f1af78(0x1b) -> CDlgXp show), set at the
-		// server's own timing after the bar fills. Wear ALT while the icon is
-		// on screen; the moment the XP skill activates (buff status) switch
-		// back to MAIN, held until the icon clears and re-appears.
+		// The XP icon window's real on-screen state (IsWindowVisible on the
+		// CDlgXp HWND, captured by the show hook). The server pops the icon at
+		// its own timing after the bar fills; wear ALT from the moment the
+		// icon is actually visible, and once the XP skill activates (buff
+		// status) go back to MAIN, held until the icon clears and re-appears.
 		if (!g_iconActive)
 			g_buffSeenThisFill = false;   // icon gone - re-arm for the next pop
 		if (g_buffActive)
@@ -242,7 +305,7 @@ void RenderGearSwapInterface()
 		return;
 	}
 
-	if (ImGui::Checkbox("Auto swap on XP bar full", &GearSwap::g_autoSwap))
+	if (ImGui::Checkbox("Auto swap on XP icon", &GearSwap::g_autoSwap))
 	{
 		if (!GearSwap::g_autoSwap)
 			GearSwap::g_pendingTarget = -1;
@@ -250,18 +313,8 @@ void RenderGearSwapInterface()
 
 	if (GearSwap::g_autoSwap)
 	{
-		ImGui::TextDisabled("XP icon on screen (status) -> wear ALT;");
+		ImGui::TextDisabled("XP icon on screen -> wear ALT;");
 		ImGui::TextDisabled("skill activated (buff) -> MAIN, held until the icon clears.");
-
-		int iconId = GearSwap::g_xpIconStatusId;
-		if (ImGui::InputInt("XP icon status id", &iconId))
-		{
-			if (iconId < 0)
-				iconId = 0;
-			if (iconId > 575)
-				iconId = 575;
-			GearSwap::g_xpIconStatusId = iconId;
-		}
 
 		int statusId = GearSwap::g_xpBuffStatusId;
 		if (ImGui::InputInt("XP buff status id", &statusId))
@@ -285,8 +338,7 @@ void RenderGearSwapInterface()
 		ImGui::SameLine();
 		ImGui::TextDisabled("(0x%08X)", (unsigned int)hero);
 		ImGui::Text("XP bar: %u / 100", GearSwap::g_xpBar);
-		ImGui::Text("Status %d (XP icon): %s", GearSwap::g_xpIconStatusId,
-			GearSwap::g_iconActive ? "ON SCREEN" : "off");
+		ImGui::Text("XP icon: %s", GearSwap::g_iconActive ? "ON SCREEN" : "off");
 		ImGui::Text("Status %d (XP buff): %s", GearSwap::g_xpBuffStatusId,
 			GearSwap::g_buffActive ? "ACTIVE" : "off");
 		if (GearSwap::g_autoSwap && GearSwap::g_iconActive && !GearSwap::g_buffSeenThisFill)
@@ -321,6 +373,16 @@ void RenderGearSwapInterface()
 			ImGui::Text("pending target: %d", GearSwap::g_pendingTarget);
 			ImGui::Text("last result at +%lums",
 				GearSwap::g_lastResultTick ? GetTickCount() - GearSwap::g_lastResultTick : 0);
+			ImGui::Text("XP icon hook: %s (status %d)",
+				GearSwap::g_iconHookInstalled ? "installed" : "not installed",
+				GearSwap::g_iconHookStatus);
+			ImGui::Text("CDlgXp: 0x%08X", (unsigned int)GearSwap::g_cdlgxp);
+			if (GearSwap::g_cdlgxp)
+			{
+				HWND hwnd = *(HWND*)(GearSwap::g_cdlgxp + GearSwap::HWND_OFFSET);
+				ImGui::Text("icon HWND: 0x%08X visible=%d", (unsigned int)hwnd,
+					hwnd ? (IsWindowVisible(hwnd) != FALSE) : 0);
+			}
 			ImGui::TreePop();
 		}
 	}

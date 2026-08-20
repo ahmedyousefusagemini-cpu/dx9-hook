@@ -206,6 +206,7 @@
     <ClCompile Include="src\hooks\memory_scanner.cpp" />
     <ClCompile Include="src\hooks\buffs.cpp" />
     <ClCompile Include="src\hooks\gear_swap.cpp" />
+    <ClCompile Include="src\hooks\auto_login.cpp" />
     <ClCompile Include="libs\imgui\imgui.cpp" />
     <ClCompile Include="libs\imgui\imgui_draw.cpp" />
     <ClCompile Include="libs\imgui\imgui_impl_dx9.cpp" />

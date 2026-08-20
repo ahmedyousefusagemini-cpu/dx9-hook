@@ -116,3 +116,6 @@ MinHook.x86.dll
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local editor plans
+.zcode/
