@@ -502,9 +502,10 @@ Equipment positions: MAIN slots 0x65..0x73 (101..115); ALT = MAIN + 0x14 =
 0x2C = swap to MAIN, 0x2D = swap to ALT, 0x198 = equip/refresh.
 
 Implementation (`gear_swap.cpp`): calls `FUN_00FF219D(hero)` via a
-`__fastcall` fn pointer. Trigger: when the XP icon is on screen (XP bar at
-100 - `CDlgXp`/dlgxp.cpp shows the icon on a full bar) wear ALT; when the XP
-skill activates (its status bit, configurable id, default 47, sets) wear MAIN
-and hold it until the bar fills again. Waits for hero+0x193C to flip (5s
-timeout) before re-arming; 1.5s send cooldown; auto-stops after 2
-consecutive unconfirmed sends.
+`__fastcall` fn pointer. Trigger: wear ALT while the XP icon is on screen -
+the server sets status `0x1B` (27) to show it at its own timing after the bar
+fills (the game's icon-show gate is `FUN_00f1af78(0x1b)` → CDlgXp show);
+when the XP buff status (configurable id, default 47) sets = the skill
+activated, wear MAIN and hold it until the icon clears and re-appears. Waits
+for hero+0x193C to flip (5s timeout) before re-arming; 1.5s send cooldown;
+auto-stops after 2 consecutive unconfirmed sends.
