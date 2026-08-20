@@ -41,7 +41,8 @@ void RenderImGuiInterface()
 	// Auto login (file-driven) ticks every frame: at the account screen it
 	// submits the configured credentials; on disconnect (back-to-login) it
 	// re-arms and logs back in without any overlay interaction.
-	ApplyAutoLoginClientState();
+	// DISABLED for now - re-enable by uncommenting:
+	//ApplyAutoLoginClientState();
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
