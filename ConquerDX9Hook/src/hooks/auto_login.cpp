@@ -18,55 +18,74 @@
 //   selected = 0        ; WHICH account block to use (0-based)
 //
 //   [account_0]
-//   server   = DevServer    ; server name (display only, third credential)
+//   server   = DevServer    ; fallback server name (the dialog's own selected
+//                            ; realm is used first - see below)
 //   account  = MyUser
 //   password = MyPass
 //
-//   [account_1]
-//   server   = etc
-//   account  = ...
-//   password = ...
+//   [account_1] ...        ; etc
 //
 // Reverse-engineered chain (verified in Ghidra, client 7937, base 0x400000):
 //
-//   1. The account-login dialog (CDlgLogin, myshell\dlglogin.cpp) holds the
-//      typed account as a CSimpleString at dialog+0x13B88 and the password at
-//      dialog+0x13BD0 in the SAME display window object.
+//   1. The account-login dialog lives at *(void**)0x01A53980 + 0x39B948
+//      (client object at DAT_01a53980; the dispatcher loads that base and the
+//      dialog offset in FUN_00a525b4 @0x00a525ec, the Login-button call site
+//      @0x00a5b8dd-0x00a5b8fe). The dialog's HWND is at dialog+0x20.
 //
-//   2. The "Login" button handler (FUN_008a8fba, __fastcall ECX=dialog) is the
-//      single dispatch: it resolves the realm through the server config
-//      (FUN_008827c2: GetServerInfo ACCOUNT_SERVER -> the accounting realm
-//      ip:port) and then calls the ACTUAL credential send:
+//   2. The game itself only invokes the Login handler while the dialog is
+//      visible: at 0x00a5b896/0x00a5b8eb it calls FUN_00bfee7b(dialog,1) =
+//      IsWindow/IsWindowVisible(dialog+0x20) before CALL 0x008a8fba. We gate
+//      the auto-submit on the SAME condition. Sending before the dialog is up
+//      queues the packet into a dead socket and the client silently drops it
+//      (this was the "no login sequence at boot" bug).
 //
-//          FUN_0101bfe7(account, password, serverInfo, mode, flags)
+//   3. The Login button handler (FUN_008a8fba, __fastcall ECX=dialog) reads the
+//      typed account/password from two "edit" wrapper objects inside the dialog
+//      and then calls the actual credential send:
 //
-//      - mode 0 = classic account/password  -> CMsgAccountEx
-//        ("Login Send 1 : CMsgAccountEx", 3drole\gamemain.cpp),
-//      - mode 1 = QR-code login,
-//      - mode 2 = card/poker login.
-//      On success the function calls the network send (FUN_010cf416).
-//      On a bad account it returns 0xFFFFFFFF and logs
-//      "invalid Account or Psw, size >= %d!".
+//          FUN_0101bfe7(account_cstr, password_obj, serverName_cstr, mode, port)
 //
-//   3. After logout/disconnect the game runs FUN_00a37821 (a big
+//      - account   : SSO string at dialog+0x13B88 (pair A) or dialog+0x13938
+//                    (pair B), selected by the flag byte at dialog+0x13620.
+//                    SSO layout: inline data at +0..+0xF, length at +0x14;
+//                    length > 0xF means heap (pointer at +0).
+//      - password  : wrapper object at dialog+0x13BD0 (A) / +0x13980 (B).
+//                    The send reads its string length at +0x104 (0x0101c03e,
+//                    fails >= 0x81) and hashes fields around +0x208/+0x20C.
+//                    NOTE: passing a plain char* here is WRONG - the send
+//                    interprets the pointer as this object and reads
+//                    [ptr+0x104] (garbage >= 0x81 -> "invalid Account or Psw"
+//                    -> 0xFFFFFFFF). That was the original auto-login bug.
+//      - serverName: the dialog's own selected realm string at dialog+0x13628
+//                    (c_str of the SSO string; the game uses it verbatim as
+//                    arg3 in the non-poker path at 0x008a9039).
+//      - port      : atoi(dialog+0x13BB8 SSO string), but only when the int
+//                    flag at dialog+0x13BC8 != 0, else 0 (0x008a91b2).
+//      - mode 0    = classic account/password (CMsgAccountEx).
+//      Returns 0 when the send was queued, 0xFFFFFFFF on local rejection.
+//
+//   4. After logout/disconnect the game runs FUN_00a37821 (the big
 //      "reset and return to account login" routine) which calls
-//      FUN_00c3ac82 = CQMain_BackToLogin - the single back-to-account-screen
-//      signal (it has exactly ONE caller, FUN_00a37821).
+//      FUN_00c3ac82 (CQMain_BackToLogin) from 0x00a37c4f (and 0x00a267da in an
+//      unanalyzed region - the hook catches both).
 //
 // So this module:
-//   - MinHooks FUN_0101bfe7 (the login send) and forces the configured
-//     account/password/server text into the outgoing packet every time a
-//     login is attempted - whether WE trigger it or the game does,
+//   - passes EVERY game login through unmodified (passthrough hook) - manual
+//     logins now work exactly as before; the hook only marks that an attempt
+//     is in flight so the auto-submit does not double-fire,
 //   - watches FUN_00c3ac82 (back to login) to re-arm for the next auto
 //     re-login,
-//   - auto-submits the login once when the client is back at the account
-//     login screen, so the user never has to click.
+//   - auto-submits once the dialog is visible by writing the configured
+//     credentials into the dialog's OWN fields (exactly what typing + clicking
+//     Login produces) and calling FUN_0101bfe7 with the game-identical
+//     argument shapes.
 //
-// The client-side realm/IP resolution is left entirely to the game (it picks
-// the configured server or the last selected one). The server name field in
-// the ini is displayed / matched by the client's own login dialog when the
-// client exposes it; for servers where the login screen only shows IP/port,
-// the "selected = N" row is the only thing that matters.
+// Known residual: the packet password hash reads wrapper fields around
+// +0x208/+0x20C which the game keeps in sync while typing; we only update the
+// SSO area (+0x0..+0xF, +0x14) and the +0x104 length. If the server still
+// rejects the auto-login while a manual login with the same creds works, the
+// +0x208/+0x20C hash inputs are stale - verify dynamically (watchpoint on
+// dialog+0x13BD0+0x208 while typing a password) and mirror the writes.
 // ============================================================================
 
 namespace AutoLogin
@@ -78,14 +97,29 @@ namespace AutoLogin
 	//   PUSH 0x408; MOV EAX,0x14B2D62; CALL 0x01260F55
 	const uintptr_t LOGIN_SEND_ADDRESS = 0x0101BFE7;
 
-	// FUN_00c3ac82 - CQMain_BackToLogin (only caller = FUN_00a37821)
-	//   PUSH 0x16CE374 ; CALL FUN_0043e5d1
+	// FUN_00c3ac82 - CQMain_BackToLogin (callers: FUN_00a37821 @ 0x00a37c4f
+	// and 0x00a267da).  PUSH 0x16CE374; CALL FUN_0043e5d1
 	const uintptr_t BACK_TO_LOGIN_ADDRESS = 0x00C3AC82;
 
-	// cdecl, 5 params; the caller cleans the stack (bare RET at 0x0101C250).
-	typedef int (__cdecl* LoginSendFn)(const char* account, const char* password, void* serverInfo, int mode, int flags);
+	// Client object + login dialog (see header comment).
+	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A53980; // DAT_01a53980 (runtime-set)
+	const uintptr_t LOGIN_DIALOG_OFFSET = 0x39B948;   // dialog = client + 0x39B948
+	const uintptr_t DLG_HWND_OFFSET     = 0x20;       // dialog+0x20 = HWND
+	const uintptr_t DLG_PAIR_FLAG       = 0x13620;    // byte != 0 -> pair B
+	const uintptr_t DLG_SERVER_NAME     = 0x13628;    // SSO string (selected realm)
+	const uintptr_t DLG_PORT_STR        = 0x13BB8;    // SSO string (port text)
+	const uintptr_t DLG_PORT_FLAG       = 0x13BC8;    // int != 0 -> use port text
+	const uintptr_t DLG_ACCOUNT_A       = 0x13B88;    // SSO strings, 0x48 apart
+	const uintptr_t DLG_PASSWORD_A      = 0x13BD0;    // wrapper objects
+	const uintptr_t DLG_ACCOUNT_B       = 0x13938;
+	const uintptr_t DLG_PASSWORD_B      = 0x13980;
+	const uintptr_t SSO_LEN_OFFSET      = 0x14;       // SSO: len > 0xF -> heap ptr at +0
+	const uintptr_t PASSWORD_LEN_OFFSET = 0x104;      // wrapper field the send reads as length
 
-	// void __fastcall? no - it reads no args; cdecl no-arg is fine for the hook.
+	// cdecl, 5 params; the caller cleans the stack (bare RET at 0x0101C250).
+	// NOTE: arg2 is the dialog's password WRAPPER OBJECT, not a char*.
+	typedef int (__cdecl* LoginSendFn)(const char* account, void* password, const char* serverInfo, int mode, int port);
+
 	typedef void (__cdecl* BackToLoginFn)(void);
 
 	LoginSendFn    g_OriginalLoginSend = nullptr;
@@ -110,13 +144,48 @@ namespace AutoLogin
 	// runtime state
 	// ------------------------------------------------------------------
 	bool  g_hooks = false;
-	bool  g_attemptDone = false;   // a login was sent this cycle
+	bool  g_attemptDone = false;      // a login was sent this cycle (auto or manual)
 	bool  g_backToLoginSeen = false;  // we returned to the account screen
 	unsigned long g_cycleStartTick = 0;
 	unsigned long g_lastAttemptTick = 0;
 	int   g_retryCount = 0;
 	unsigned long g_submitCount = 0;
 	char  g_lastResult[64] = "idle";
+
+	// ------------------------------------------------------------------
+	// SSO helpers for the dialog's string fields
+	// ------------------------------------------------------------------
+	// Layout used by the game's own readers (e.g. 0x008a929f):
+	//   obj+0x0..0xF inline data, obj+0x14 = length; length > 0xF -> heap,
+	//   the real data is at *(void**)obj.
+	static const char* SsoCStr(const void* obj)
+	{
+		const unsigned char* p = (const unsigned char*)obj;
+		if (*(const unsigned long*)(p + SSO_LEN_OFFSET) > 0xF)
+			return *(const char**)p;
+		return (const char*)p;
+	}
+
+	// Writes an inline SSO string (creds are short; longer ones truncate).
+	static void SsoSet(void* obj, const char* text)
+	{
+		unsigned char* p = (unsigned char*)obj;
+		size_t n = strlen(text);
+		if (n > 0xF)
+			n = 0xF;
+		memcpy(p, text, n);
+		memset(p + n, 0, 0x10 - n);
+		*(unsigned long*)(p + SSO_LEN_OFFSET) = (unsigned long)n;
+	}
+
+	// The account-login dialog (null when the client object is not up yet).
+	static void* GetLoginDialog()
+	{
+		void* client = *(void**)MAIN_CLIENT_GLOBAL;
+		if (!client)
+			return nullptr;
+		return (unsigned char*)client + LOGIN_DIALOG_OFFSET;
+	}
 
 } // namespace AutoLogin
 
@@ -202,31 +271,24 @@ static bool IsSupported()
 // ============================================================================
 // Hooks
 // ============================================================================
-int __cdecl HookedLoginSend(const char* account, const char* password, void* serverInfo, int mode, int flags)
+int __cdecl HookedLoginSend(const char* account, void* password, const char* serverInfo, int mode, int port)
 {
-	// Whatever triggers the login (our auto-submit below, or the game's own
-	// "Login" button / any relogin), force the configured account row into it.
-	if (AutoLogin::g_enabled &&
-		AutoLogin::g_account[0] &&
-		(mode == 0 || mode == 1 || mode == 2))   // classic/QR/poker all carry the account
+	// Passthrough. The game (or the user's Login click) initiated a login with
+	// ITS OWN argument shapes - pass them through untouched. The old version
+	// injected ini char* into the password slot, but FUN_0101bfe7 treats arg2
+	// as a wrapper object and reads [ptr+0x104] as its length - a char* there
+	// is garbage >= 0x81 and the send rejects with "invalid Account or Psw"
+	// (0xFFFFFFFF). That is why manual logins showed a wrong password.
+	//
+	// We only record that an attempt is in flight so the auto-submit does not
+	// double-fire while the user is logging in manually.
+	if (!AutoLogin::g_attemptDone)
 	{
-		const char* acc = AutoLogin::g_account;
-		const char* pwd = AutoLogin::g_password[0] ? AutoLogin::g_password : (password ? password : "");
-
-		// The server pointer is a CSimpleString-ish buffer; best-effort, may
-		// also be left as-is. We keep the original serverInfo (the game has
-		// already resolved the realm) but pass our account/password through.
-		account = acc;
-		password = pwd;
-
-		if (!AutoLogin::g_attemptDone)
-		{
-			AutoLogin::g_attemptDone = true;
-			strcpy_s(AutoLogin::g_lastResult, "login send (injected)");
-		}
+		AutoLogin::g_attemptDone = true;
+		strcpy_s(AutoLogin::g_lastResult, "manual login send");
 	}
 	if (AutoLogin::g_OriginalLoginSend)
-		return AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, flags);
+		return AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, port);
 	return 0;
 }
 
@@ -301,6 +363,19 @@ void AutoLoginTick()
 	if (AutoLogin::g_attemptDone)
 		return;   // a login was already sent this cycle; wait for the world.
 
+	// Gate: the game only submits while the account-login dialog is actually
+	// visible (its dispatcher checks IsWindowVisible(dialog+0x20) right before
+	// invoking the Login handler). Sending earlier queues the packet into a
+	// dead socket and the client silently drops it - the boot "nothing
+	// happens" bug.
+	void* dialog = AutoLogin::GetLoginDialog();
+	if (!dialog || !IsWindowVisible(*(HWND*)((unsigned char*)dialog + AutoLogin::DLG_HWND_OFFSET)))
+	{
+		if (AutoLogin::g_retryCount == 0)
+			strcpy_s(AutoLogin::g_lastResult, "waiting for login screen");
+		return;
+	}
+
 	// Pick the wait base: after a back-to-login use the relogin delay, else boot.
 	unsigned long waitMs = AutoLogin::g_backToLoginSeen
 		? AutoLogin::g_reloginWaitMs
@@ -318,22 +393,56 @@ void AutoLoginTick()
 		return;
 	}
 
-	// Actually send the login. This is exactly the call the game's own login
-	// button makes (FUN_0101bfe7, mode 0 = classic account/password).
-	// A small stack buffer is fine for serverInfo - the client resolves the
-	// realm itself.
-	char serverBuf[16] = { 0 };
+	// Fill the dialog's OWN credential fields - the exact inputs a manual
+	// typing + Login click would produce. Pair A/B is chosen by the same flag
+	// byte the button handler reads (0x008a91e7).
+	unsigned char* dlg = (unsigned char*)dialog;
+	unsigned char* accountObj;
+	unsigned char* pswObj;
+	if (*(unsigned char*)(dlg + AutoLogin::DLG_PAIR_FLAG) != 0)
+	{
+		accountObj = dlg + AutoLogin::DLG_ACCOUNT_B;
+		pswObj     = dlg + AutoLogin::DLG_PASSWORD_B;
+	}
+	else
+	{
+		accountObj = dlg + AutoLogin::DLG_ACCOUNT_A;
+		pswObj     = dlg + AutoLogin::DLG_PASSWORD_A;
+	}
+
+	AutoLogin::SsoSet(accountObj, AutoLogin::g_account);
+	AutoLogin::SsoSet(pswObj, AutoLogin::g_password);
+	// The send reads the password length at pswObj+0x104 and rejects >= 0x81.
+	*(unsigned long*)(pswObj + AutoLogin::PASSWORD_LEN_OFFSET) = (unsigned long)strlen(AutoLogin::g_password);
+
+	// Realm: the dialog's own selected server name (the game passes exactly
+	// this string as arg3 in the non-poker path), ini server as fallback.
+	const char* serverName = AutoLogin::SsoCStr(dlg + AutoLogin::DLG_SERVER_NAME);
+	if (!serverName || !serverName[0])
+		serverName = AutoLogin::g_server;
+
+	// Port argument: replicate the button handler (flag gate + atoi).
+	int port = 0;
+	if (*(int*)(dlg + AutoLogin::DLG_PORT_FLAG) != 0)
+	{
+		const char* ps = AutoLogin::SsoCStr(dlg + AutoLogin::DLG_PORT_STR);
+		if (ps)
+			port = atoi(ps);
+	}
+
 	AutoLogin::g_lastAttemptTick = now;
 	AutoLogin::g_retryCount++;
 
 	if (AutoLogin::g_OriginalLoginSend)
 	{
+		// Game-identical call shapes: account as c_str, password as the dialog's
+		// wrapper object, server name as char*, mode 0 = classic CMsgAccountEx.
 		int ret = AutoLogin::g_OriginalLoginSend(
-			AutoLogin::g_account,
-			AutoLogin::g_password,
-			AutoLogin::g_server[0] ? (void*)AutoLogin::g_server : (void*)serverBuf,
+			AutoLogin::SsoCStr(accountObj),
+			pswObj,
+			serverName,
 			0,
-			0);
+			port);
 		AutoLogin::g_submitCount++;
 
 		// The classic branch returns 0 when it actually queued the send,
