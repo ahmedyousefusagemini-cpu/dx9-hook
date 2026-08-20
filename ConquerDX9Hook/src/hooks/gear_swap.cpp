@@ -29,11 +29,11 @@ extern unsigned int GetXpBarValue();
 //        all 8 equipment slots (FUN_00ff1eff clear + FUN_00ff49c4 set pairs).
 //
 // So the complete native swap = FUN_00FF219D(hero) - exactly what the button
-// runs. This module wears ALT during the window between the XP bar filling
-// (100) and the XP buff applying: bar 100 -> wait (default 12s) -> ALT; the
-// XP buff status applying forces MAIN instantly, held until the next fill.
-// The XP buff status id is configurable (default 47 - the server applies the
-// XP buff as a regular icon status).
+// runs. This module wears ALT while the XP icon is on screen (the bar is full
+// - CDlgXp/dlgxp.cpp shows the icon at 100) and switches back to MAIN the
+// moment the XP skill activates (its status bit sets), holding MAIN until the
+// bar fills again. The XP buff status id is configurable (default 47 - the
+// server applies the XP buff as a regular icon status).
 // ============================================================================
 
 namespace GearSwap
@@ -46,14 +46,12 @@ namespace GearSwap
 	// --- configuration -----------------------------------------------------
 	bool g_autoSwap = false;
 	int  g_xpBuffStatusId = 47;   // XP buff status id (server applies it as an icon status)
-	int  g_altDelaySec = 12;      // seconds to wait after the bar hits 100 before wearing ALT
 
 	// --- runtime state -----------------------------------------------------
 	int  g_mode = -1;            // last read equip mode (-1 = unknown)
 	unsigned int g_xpBar = 0;    // last poll: XP bar value (0-100)
 	bool g_buffActive = false;   // last poll: XP buff status bit set?
-	DWORD g_barFullSince = 0;    // GetTickCount when the bar reached 100 (0 = not full)
-	bool g_buffSeenThisFill = false; // the XP buff applied since this fill - hold MAIN
+	bool g_buffSeenThisFill = false; // the XP skill activated since this fill - hold MAIN
 	int  g_pendingTarget = -1;   // swap in flight: 0 (main) / 1 (alt), -1 none
 	DWORD g_lastSwapSent = 0;
 	DWORD g_cooldownUntil = 0;
@@ -156,28 +154,18 @@ namespace GearSwap
 		g_buffActive = IsStatusActive(g_xpBuffStatusId);
 		DWORD now = GetTickCount();
 
-		// Fill-cycle bookkeeping: re-arm the ALT delay on each fresh fill, and
-		// latch once the XP buff has applied so MAIN is held for the rest of
-		// this fill (until the bar drops and fills again).
+		// The XP icon appears on screen exactly when the XP bar hits 100
+		// (CDlgXp / dlgxp.cpp shows it on a full bar). Wear ALT from that
+		// moment until the XP skill activates (its status bit sets), then
+		// MAIN again - held for the rest of the fill, until the bar refills.
 		bool barFull = (g_xpBar >= 100);
 		if (!barFull)
-		{
-			g_buffSeenThisFill = false;
-			g_barFullSince = 0;
-		}
-		else if (g_barFullSince == 0)
-		{
-			g_barFullSince = now;   // bar just reached 100 - start the delay
-		}
+			g_buffSeenThisFill = false;   // fill cycle reset
 		if (g_buffActive)
-			g_buffSeenThisFill = true;
+			g_buffSeenThisFill = true;    // activated - back to MAIN
 
-		// ALT window: bar full for >= the delay AND the XP buff has not applied
-		// this fill. The buff applying forces MAIN instantly; MAIN is then held
-		// until the bar reaches 100 again.
-		bool altWindow = barFull && !g_buffSeenThisFill &&
-			(now - g_barFullSince >= (DWORD)g_altDelaySec * 1000);
-		int desired = altWindow ? 1 : 0;
+		bool altWanted = barFull && !g_buffSeenThisFill;
+		int desired = altWanted ? 1 : 0;
 
 		// A swap is in flight - wait for the server round-trip. The client
 		// flips hero+0x193C when the reply lands (the same flag the button's
@@ -250,8 +238,8 @@ void RenderGearSwapInterface()
 
 	if (GearSwap::g_autoSwap)
 	{
-		ImGui::TextDisabled("Bar 100 -> wait %ds -> wear ALT;", GearSwap::g_altDelaySec);
-		ImGui::TextDisabled("XP buff active -> MAIN instantly, held until bar refills.");
+		ImGui::TextDisabled("XP icon shown (bar full) -> wear ALT;");
+		ImGui::TextDisabled("XP skill activated (buff) -> MAIN, held until next fill.");
 
 		int statusId = GearSwap::g_xpBuffStatusId;
 		if (ImGui::InputInt("XP buff status id", &statusId))
@@ -261,16 +249,6 @@ void RenderGearSwapInterface()
 			if (statusId > 575)
 				statusId = 575;
 			GearSwap::g_xpBuffStatusId = statusId;
-		}
-
-		int delaySec = GearSwap::g_altDelaySec;
-		if (ImGui::InputInt("ALT delay after bar full (s)", &delaySec))
-		{
-			if (delaySec < 1)
-				delaySec = 1;
-			if (delaySec > 120)
-				delaySec = 120;
-			GearSwap::g_altDelaySec = delaySec;
 		}
 	}
 
@@ -289,13 +267,8 @@ void RenderGearSwapInterface()
 			GearSwap::g_buffActive ? "ACTIVE" : "off");
 		if (GearSwap::g_autoSwap && GearSwap::g_xpBar >= 100 && !GearSwap::g_buffSeenThisFill)
 		{
-			unsigned long waited = GearSwap::g_barFullSince ?
-				(GetTickCount() - GearSwap::g_barFullSince) / 1000 : 0;
-			int remain = GearSwap::g_altDelaySec - (int)waited;
-			if (remain < 0)
-				remain = 0;
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
-				"ALT in %ds...", remain);
+				"XP icon up - wearing ALT until the skill activates");
 		}
 		if (GearSwap::g_pendingTarget >= 0)
 		{
