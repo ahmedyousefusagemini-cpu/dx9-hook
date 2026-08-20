@@ -57,7 +57,25 @@ namespace AutoHunt
 	const size_t MANAGER_TIMESTAMP_OFFSET    = 0x14;  // timeGetTime() of last toggle
 	const size_t MANAGER_ANCHOR_X_OFFSET     = 0x20;  // walk-back/home anchor X
 	const size_t MANAGER_ANCHOR_Y_OFFSET     = 0x24;  // walk-back/home anchor Y
+	const size_t MANAGER_TARGET_X_OFFSET     = 0x4;   // brain's attack-target X (FUN_00f54df8)
 	const size_t MANAGER_STRUCT_SIZE         = 0x44;
+
+	// True while the brain is attacking a monster in range: the hunt brain
+	// (FUN_00f54df8) writes mgr+4 = attack-position X (a small tile value)
+	// when it decides to attack in place and zeroes it when the target is out
+	// of range (walk branch). During looting the brain instead writes mgr+4 =
+	// loot pointer (heap address) - excluded by the range check so looting
+	// keeps the normal speed. After a kill the value can stay stale until the
+	// brain's next walk/attack decision - callers may ClearAutoHuntTarget()
+	// to reset it.
+	bool IsInCombat()
+	{
+		int manager = GetManagerObject();
+		if (!IsManagerValid(manager))
+			return false;
+		int value = *(int*)(manager + MANAGER_TARGET_X_OFFSET);
+		return value != 0 && value < 0x100000;
+	}
 
 	// User intent - whether the hunt brain should be engaged.
 	bool g_clientSideHunting = false;
@@ -370,6 +388,35 @@ namespace AutoHunt
 void ApplyAutoHuntClientState()
 {
 	AutoHunt::ApplyClientSideState();
+}
+
+bool IsAutoHuntHunting()
+{
+	return AutoHunt::IsHunting();
+}
+
+// The hunt brain is attacking a monster in range (mgr+4 != 0).
+bool IsAutoHuntInCombat()
+{
+	return AutoHunt::IsInCombat();
+}
+
+// The brain's target finder (FUN_00f43828) sees an attackable monster.
+bool IsAutoHuntMonsterNear()
+{
+	int manager = AutoHunt::GetManagerObject();
+	return AutoHunt::HasMonsterNear(manager);
+}
+
+// Clears the brain's attack-target X so the combat signal doesn't stick on
+// after a kill. The brain rewrites it on its next attack decision.
+void ClearAutoHuntTarget()
+{
+	int manager = AutoHunt::GetManagerObject();
+	if (manager != 0 &&
+		!IsBadReadPtr((const void*)manager, 4) &&
+		!IsBadWritePtr((void*)(manager + AutoHunt::MANAGER_TARGET_X_OFFSET), 4))
+		*(int*)(manager + AutoHunt::MANAGER_TARGET_X_OFFSET) = 0;
 }
 
 void RenderAutoHuntInterface()

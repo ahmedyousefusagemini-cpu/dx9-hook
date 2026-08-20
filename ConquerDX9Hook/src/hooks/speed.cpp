@@ -7,6 +7,12 @@
 extern bool IsStatusActive(int statusId);
 extern unsigned long GetStatusEndMs(int statusId);
 
+// Auto-hunt state (defined in auto_hunt.cpp).
+extern bool IsAutoHuntHunting();
+extern bool IsAutoHuntInCombat();
+extern bool IsAutoHuntMonsterNear();
+extern void ClearAutoHuntTarget();
+
 // ============================================================================
 // Speed Control (CRole action speed fields) - Conquer.exe client 7937 (0x400000)
 // ----------------------------------------------------------------------------
@@ -45,6 +51,19 @@ extern unsigned long GetStatusEndMs(int statusId);
 // Movement Speed" feature (below) can go up to 3000%, but only while the
 // Celestial Dance buff (status 250) is active with > 2s remaining.
 //
+// Cancel Attack Animation (2026-08-20): the same +0x44 divisor scales the
+// ATTACK action's interval too (the master interval computation FUN_00de93e2
+// applies the final scaling to every action when role+0x48 != 0). So while
+// the hunt brain is attacking a monster in range (mgr+4 != 0), an extreme
+// boost collapses the attack interval to ~1 tick: the attack animation is
+// effectively skipped and the next attack packet (CMsgAction, sent by
+// FUN_00f67675 from the brain's FUN_0112112c call) fires at the brain-tick
+// rate (fast-loot tick, default 50 ms). Walking between targets is NOT
+// boosted - the boost is only written while mgr+4 holds a small tile value
+// (attack X; the brain writes a loot pointer there while looting, which is
+// excluded), and a stale mgr+4 left behind after a kill is cleared via the
+// brain's own finder.
+//
 // Two write paths feed the interval math every frame (same assert pattern as
 // the VIP spoof):  role+0x48=1 & role+0x44=(percent-100)*100  (the uncapped
 // final divisor)  and  role+0xc0=percent-100  (the nSpeedPercent path in
@@ -79,6 +98,14 @@ namespace Speed
 	const int AUTO_MIN_SPEED_PERCENT = 100;   // auto move-speed slider min
 	const int AUTO_MAX_SPEED_PERCENT = 3000;  // auto move-speed slider max
 
+	// Attack-only boost (animation cancel). The attack interval is
+	// ceil(base * 100 / (100 + boost/100)); boost = 13,000,000 collapses a
+	// ~1300 ms attack to 1 tick. Only written while the brain is in combat,
+	// so movement keeps the manual slider speed.
+	const int ATTACK_MIN_SPEED_PERCENT = 100;
+	const int ATTACK_MAX_SPEED_PERCENT = 20000000;
+	const int ATTACK_DEFAULT_SPEED_PERCENT = 13000000;
+
 	const uintptr_t IMAGE_BASE = 0x00400000;   // Conquer.exe image base
 	const uintptr_t IMAGE_TOP  = 0x02000000;   // vtable sanity range upper bound
 
@@ -92,6 +119,11 @@ namespace Speed
 	// Auto Movement Speed (buff 250 Celestial Dance gated).
 	bool g_autoMoveSpeedEnabled = false;
 	int  g_autoMovePercent = 500;       // initial value 500%, adjustable 100..3000
+
+	// Cancel Attack Animation (combat-only extreme boost, auto-hunt gated).
+	bool g_attackSpeedEnabled = false;
+	int  g_attackSpeedPercent = ATTACK_DEFAULT_SPEED_PERCENT;
+	unsigned long g_lastAttackStateCheck = 0;  // rate limit for the mgr+4 cleanup
 
 	// Always-on buff-250 tracker (updated every frame even with the menu closed).
 	bool         g_buff250Active = false;      // bit 250 set right now
@@ -190,7 +222,8 @@ namespace Speed
 	}
 
 	// Reconciles the cap table to the max % any currently-enabled feature may
-	// write (manual slider or auto move-speed), restored when none is enabled.
+	// write (manual slider, auto move-speed, or attack boost), restored when
+	// none is enabled.
 	void UpdateSpeedCaps()
 	{
 		int target = MIN_SPEED_PERCENT;
@@ -198,6 +231,8 @@ namespace Speed
 			target = g_speedPercent;
 		if (g_autoMoveSpeedEnabled && g_autoMovePercent > target)
 			target = g_autoMovePercent;
+		if (g_attackSpeedEnabled && g_attackSpeedPercent > target)
+			target = g_attackSpeedPercent;
 		SetSpeedCapsTo(target);
 	}
 
@@ -336,6 +371,18 @@ namespace Speed
 			StartRoleScan();
 	}
 
+	void SetAttackSpeedEnabled(bool enabled)
+	{
+		if (!enabled && IsMyRoleWritable(g_myRoleAddress))
+			WriteSpeedFields(g_myRoleAddress, false, MIN_SPEED_PERCENT);  // restore stock behavior
+
+		g_attackSpeedEnabled = enabled;
+		UpdateSpeedCaps();
+
+		if (enabled && g_myRoleAddress == 0)
+			StartRoleScan();
+	}
+
 	// Always-on buff-250 (Celestial Dance) tracker. Runs every frame even with
 	// the menu closed so the boost engages on the buff's rising edge and drops
 	// back to 100% the moment <= 2s remain.
@@ -381,14 +428,46 @@ namespace Speed
 		// Always-on buff-250 (Celestial Dance) tracker - updated every frame.
 		TrackBuff250State();
 
-		// Decide the boost to write this frame. The Auto Movement Speed feature
-		// (if checked) drives the fields and takes precedence over the manual
-		// slider; it only boosts while buff 250 is active with > 2s remaining,
-		// otherwise it writes 100% (normal) so the character returns to stock
-		// speed on buff expiry / the final 2 seconds.
+		// Decide the boost to write this frame. Cancel Attack Animation takes
+		// precedence: while the hunt brain is attacking a monster in range
+		// (mgr+4 != 0), write an extreme boost so the attack action's interval
+		// collapses to ~1 tick (animation effectively skipped; the next attack
+		// fires at the brain-tick rate). Otherwise the Auto Movement Speed
+		// feature (if checked) drives the fields and takes precedence over the
+		// manual slider; it only boosts while buff 250 is active with > 2s
+		// remaining, otherwise it writes 100% (normal) so the character
+		// returns to stock speed on buff expiry / the final 2 seconds.
+		bool combatBoost = false;
+		if (g_attackSpeedEnabled)
+		{
+			if (IsAutoHuntHunting() && IsAutoHuntInCombat())
+			{
+				combatBoost = true;
+			}
+			else
+			{
+				// Kill a stale mgr+4 (the brain leaves the last attack X
+				// behind after a kill) so the combat signal doesn't stick on
+				// during idle walks. Rate-limited: the finder runs at most
+				// ~10x/sec from here.
+				unsigned long now = GetTickCount();
+				if (now - g_lastAttackStateCheck >= 100)
+				{
+					g_lastAttackStateCheck = now;
+					if (!IsAutoHuntMonsterNear())
+						ClearAutoHuntTarget();
+				}
+			}
+		}
+
 		bool wantBoost = false;
 		int  boostPercent = MIN_SPEED_PERCENT;
-		if (g_autoMoveSpeedEnabled)
+		if (combatBoost)
+		{
+			wantBoost = true;
+			boostPercent = g_attackSpeedPercent;
+		}
+		else if (g_autoMoveSpeedEnabled)
 		{
 			wantBoost = g_buff250Active && !g_buff250Expiring;
 			boostPercent = g_autoMovePercent;
@@ -400,10 +479,10 @@ namespace Speed
 		}
 
 		// Keep the per-state cap table high enough for the max % any enabled
-		// feature may write (auto can go up to 3000).
+		// feature may write (attack can go up to 20,000,000).
 		UpdateSpeedCaps();
 
-		if (wantBoost || g_speedEnabled || g_autoMoveSpeedEnabled)
+		if (wantBoost || g_speedEnabled || g_autoMoveSpeedEnabled || g_attackSpeedEnabled)
 		{
 			uintptr_t role = g_myRoleAddress;
 			if (IsMyRoleWritable(role))
@@ -522,6 +601,26 @@ void RenderSpeedInterface()
 		}
 	}
 
+	// ------------------------------------------------------------------
+	// Cancel Attack Animation (combat-only extreme boost, auto-hunt gated)
+	// ------------------------------------------------------------------
+	if (ImGui::Checkbox("Cancel attack animation (combat speed)", &Speed::g_attackSpeedEnabled))
+		Speed::SetAttackSpeedEnabled(Speed::g_attackSpeedEnabled);
+	ImGui::SameLine();
+	if (Speed::g_attackSpeedEnabled)
+		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "ACTIVATED");
+	else
+		ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "NOT ACTIVATED");
+
+	if (Speed::g_attackSpeedEnabled)
+	{
+		ImGui::SliderInt("Attack speed %", &Speed::g_attackSpeedPercent,
+			Speed::ATTACK_MIN_SPEED_PERCENT, Speed::ATTACK_MAX_SPEED_PERCENT);
+		ImGui::TextDisabled("While auto-hunt fights, the attack animation is skipped (interval -> 1 tick).");
+		ImGui::TextDisabled("Walking keeps the normal slider speed. Lower it if the server disconnects you.");
+		ImGui::Text("In combat: %s", IsAutoHuntInCombat() ? "YES" : "no");
+	}
+
 	ImGui::Checkbox("Fast auto-hunt/loot tick", &Speed::g_fastLootTick);
 	ImGui::TextDisabled("Brain ticks faster than 1/sec -> faster loot/attack orders");
 	if (Speed::g_fastLootTick)
@@ -540,6 +639,9 @@ void RenderSpeedInterface()
 			(Speed::g_scanState == 2 ? "done" : "idle"));
 		ImGui::Text("Id matches last scan: %u", Speed::g_scanIdMatches);
 		ImGui::Text("Matched rule: %d (1=A 2=B 3=cross)", Speed::g_matchedRule);
+		ImGui::Text("Attack cancel: combat=%s monsterNear=%s",
+			IsAutoHuntInCombat() ? "yes" : "no",
+			IsAutoHuntMonsterNear() ? "yes" : "no");
 		if (Speed::g_myRoleAddress != 0 &&
 			!IsBadReadPtr((const void*)Speed::g_myRoleAddress, 4) &&
 			!IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_DELTA_OFFSET), 4))

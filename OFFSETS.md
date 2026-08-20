@@ -321,7 +321,7 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 | `+0x12` | byte | per-frame gate flag (read by FUN_00f4761f; brain skips while nonzero) |
 | `+0x14` | dword | `timeGetTime()` of last toggle (written by FUN_00f2fcd5) |
 | `+0x18`/`+0x1c` | int | hunt anchor X/Y (the brain re-sets these each tick) |
-| `+0x04` | int | hunt radius (the brain re-computes it each tick) |
+| `+0x04` | int | attack-target X written by the brain (FUN_00f54df8) when attacking in range; `0` while walking / target out of range. **In-combat signal for the attack boost** — treat as combat only when `0 < value < 0x100000` (the brain writes a loot POINTER here while looting). Can go stale after a kill — clear it (`ClearAutoHuntTarget`) when the finder sees nothing |
 
 ### Speed cap table contents (client 7937)
 
@@ -360,6 +360,16 @@ withholds this packet by default so the server treats kills as normal gameplay.
   VIP4+). Client-side only — server-enforced VIP features (shop, teleport) still fail.
 - **Auto-pick (loot):** a separate VIP4-gated option. Enable it in the client's
   auto-hunt dialog (the VIP spoof unlocks the checkbox).
+- **Cancel attack animation (`speed.cpp`, 2026-08-20):** while auto-hunt is
+  hunting and `mgr+0x04 != 0` (brain attacking in range), write the extreme
+  `role+0x44` boost (default 13,000,000 → attack interval `ceil(base*100/130100)`
+  = 1 tick for melee bases) so the attack animation is skipped and attacks fire
+  at the brain-tick rate (fast-loot tick, default 50 ms). Walking keeps the
+  manual slider speed; a stale `mgr+0x04` is cleared via the brain's finder
+  (`FUN_00f43828`) when no monster is near. Attack packet = `CMsgAction` id
+  0x12/0x13 sent by `FUN_00f67675` from the combat handler `FUN_0112112c`
+  (called by the brain each tick). Server tolerates ~20 attack packets/sec;
+  extreme values may still disconnect.
 - **Speed (client-side):** write `role+0x48=1` + `role+0x44=(pct-100)*100` and
   `role+0xc0=pct-100` every frame; raise the cap table to lift the +0xc0 clamp.
   Do NOT hook FUN_010afd05 (the server hooks it itself — seen live as an E9 jmp).
