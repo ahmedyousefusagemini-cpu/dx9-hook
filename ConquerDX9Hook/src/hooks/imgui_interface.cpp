@@ -14,7 +14,6 @@ extern void RenderBuffsInterface();
 extern void ApplyBuffsClientState();
 extern void RenderGearSwapInterface();
 extern void ApplyGearSwapClientState();
-extern void ApplyAutoLoginClientState();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -37,12 +36,6 @@ void RenderImGuiInterface()
 
 	// Auto gear swap ticks every frame too (XP buff edge detection).
 	ApplyGearSwapClientState();
-
-	// Auto login (file-driven) ticks every frame: at the account screen it
-	// submits the configured credentials; on disconnect (back-to-login) it
-	// re-arms and logs back in without any overlay interaction.
-	// DISABLED for now - re-enable by uncommenting:
-	//ApplyAutoLoginClientState();
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
