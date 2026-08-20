@@ -443,7 +443,8 @@ void AutoLoginTick()
 	}
 	if (pswText && *pswText)
 	{
-		AutoLogin::SetPasswordFn(AutoLogin::SET_PASSWORD_ADDRESS)(pswObj, nullptr, pswText);
+		AutoLogin::SetPasswordFn setPsw = (AutoLogin::SetPasswordFn)AutoLogin::SET_PASSWORD_ADDRESS;
+		setPsw(pswObj, nullptr, pswText);
 	}
 
 	// Realm: the dialog's own selected server name (the game passes exactly
