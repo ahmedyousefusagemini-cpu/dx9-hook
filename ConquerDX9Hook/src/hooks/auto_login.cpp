@@ -50,8 +50,15 @@
 //                    SSO layout: inline data at +0..+0xF, length at +0x14;
 //                    length > 0xF means heap (pointer at +0).
 //      - password  : wrapper object at dialog+0x13BD0 (A) / +0x13980 (B).
-//                    The send reads its string length at +0x104 (0x0101c03e,
-//                    fails >= 0x81) and hashes fields around +0x208/+0x20C.
+//                    The send reads its length at +0x104 (0x0101c03e, fails
+//                    >= 0x81), a count at +0x100 and the ENCRYPTED text at
+//                    +0x108 (FUN_00ed335e -> VM ordinals 47/1/65).
+//                    The wrapper is CGameInputStr (encryptdata.cpp): text is
+//                    XOR-encrypted in place against the wrapper's own +0..0xFF
+//                    random key table (set once per boot by the dialog ctor);
+//                    the ONLY correct way to fill it is the game's own
+//                    SetPassword FUN_00ea1692(ECX=wrapper, text) - it writes
+//                    len@+0x104 + encrypted text@+0x108 + terminator@+0x207.
 //                    NOTE: passing a plain char* here is WRONG - the send
 //                    interprets the pointer as this object and reads
 //                    [ptr+0x104] (garbage >= 0x81 -> "invalid Account or Psw"
@@ -80,12 +87,13 @@
 //     Login produces) and calling FUN_0101bfe7 with the game-identical
 //     argument shapes.
 //
-// Known residual: the packet password hash reads wrapper fields around
-// +0x208/+0x20C which the game keeps in sync while typing; we only update the
-// SSO area (+0x0..+0xF, +0x14) and the +0x104 length. If the server still
-// rejects the auto-login while a manual login with the same creds works, the
-// +0x208/+0x20C hash inputs are stale - verify dynamically (watchpoint on
-// dialog+0x13BD0+0x208 while typing a password) and mirror the writes.
+// Known residual: none expected on the password side - the fill calls the
+// game's own CGameInputStr::SetPassword (FUN_00ea1692) on the dialog's
+// wrapper object, byte-identical to what typing produces. The only field the
+// packet hash reads that SetPassword does not touch is the +0x100 count
+// (set by the wrapper ctor); if the server still rejects the auto-login while
+// a manual login with the same creds works, verify dynamically (compare
+// wrapper+0x100 after a manual typing vs. after the auto-fill) and mirror it.
 // ============================================================================
 
 namespace AutoLogin
@@ -114,7 +122,14 @@ namespace AutoLogin
 	const uintptr_t DLG_ACCOUNT_B       = 0x13938;
 	const uintptr_t DLG_PASSWORD_B      = 0x13980;
 	const uintptr_t SSO_LEN_OFFSET      = 0x14;       // SSO: len > 0xF -> heap ptr at +0
-	const uintptr_t PASSWORD_LEN_OFFSET = 0x104;      // wrapper field the send reads as length
+
+	// FUN_00ea1692 - CGameInputStr::SetPassword (encryptdata.cpp):
+	//   __thiscall(ECX = wrapper, stack = plaintext), RET 4. Writes len@+0x104,
+	//   XOR-encrypts the text into +0x108 (key = the wrapper's own +0..0xFF
+	//   random key table installed by the dialog ctor), terminator@+0x207.
+	//   Asserts strlen(text) < 0x100 - caller must truncate.
+	const uintptr_t SET_PASSWORD_ADDRESS = 0x00EA1692;
+	typedef void(__fastcall* SetPasswordFn)(void* pswObj, void* /*edx_dummy*/, const char* text);
 
 	// cdecl, 5 params; the caller cleans the stack (bare RET at 0x0101C250).
 	// NOTE: arg2 is the dialog's password WRAPPER OBJECT, not a char*.
@@ -411,9 +426,25 @@ void AutoLoginTick()
 	}
 
 	AutoLogin::SsoSet(accountObj, AutoLogin::g_account);
-	AutoLogin::SsoSet(pswObj, AutoLogin::g_password);
-	// The send reads the password length at pswObj+0x104 and rejects >= 0x81.
-	*(unsigned long*)(pswObj + AutoLogin::PASSWORD_LEN_OFFSET) = (unsigned long)strlen(AutoLogin::g_password);
+
+	// Password: call the game's OWN CGameInputStr::SetPassword on the dialog's
+	// wrapper object. It writes len@+0x104, XOR-encrypts the text into +0x108
+	// against the wrapper's per-boot key table and nulls +0x207 - byte-identical
+	// to what typing produces. Do NOT touch the wrapper's +0..0xFF area by hand
+	// (SsoSet would clobber the key table) and do NOT write +0x108 directly
+	// (the packet hash expects the encrypted form).
+	const char* pswText = AutoLogin::g_password;
+	char pswTrunc[0x100];
+	if (pswText && strlen(pswText) >= 0x100)
+	{
+		strncpy_s(pswTrunc, pswText, 0xFF);
+		pswTrunc[0xFF] = '\0';
+		pswText = pswTrunc;
+	}
+	if (pswText && *pswText)
+	{
+		AutoLogin::SetPasswordFn(AutoLogin::SET_PASSWORD_ADDRESS)(pswObj, nullptr, pswText);
+	}
 
 	// Realm: the dialog's own selected server name (the game passes exactly
 	// this string as arg3 in the non-poker path), ini server as fallback.
