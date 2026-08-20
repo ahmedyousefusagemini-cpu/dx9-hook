@@ -14,6 +14,11 @@ extern void RenderBuffsInterface();
 extern void ApplyBuffsClientState();
 extern void RenderGearSwapInterface();
 extern void ApplyGearSwapClientState();
+extern void ApplyAutoLoginClientState();
+extern const char* GetAutoLoginStateString();
+extern bool GetAutoLoginEnabled();
+extern bool GetAutoLoginHooksInstalled();
+extern unsigned long GetAutoLoginSubmitCount();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -37,6 +42,9 @@ void RenderImGuiInterface()
 	// Auto gear swap ticks every frame too (XP buff edge detection).
 	ApplyGearSwapClientState();
 
+	// Auto login/relogin ticks every frame (boot + back-to-login detection).
+	ApplyAutoLoginClientState();
+
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
 
@@ -56,6 +64,15 @@ void RenderImGuiInterface()
 	ImGui::Checkbox("Wireframe (Chams)", &g_isWireframeEnabled);   
 	
 	ImGui::Spacing();
+	
+	if (GetAutoLoginEnabled())
+	{
+		ImGui::Text("Auto login: %s | hooks: %s | submits: %lu", 
+			GetAutoLoginStateString(),
+			GetAutoLoginHooksInstalled() ? "ok" : "missing",
+			GetAutoLoginSubmitCount());
+		ImGui::Separator();
+	}
 	
 	RenderAutoHuntInterface();
 	
