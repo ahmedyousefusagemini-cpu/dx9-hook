@@ -8,6 +8,12 @@ extern const char* GetStatusName(int statusId);
 extern unsigned long GetStatusEndMs(int statusId);
 extern void RegisterStatusDuration(int statusId, unsigned int seconds);
 
+// The game's own XP pop indicator (gear_swap.cpp): the FUN_00AE61F8 hook
+// captures the live pop panel and +0xAC8 holds the show flag, with HWND
+// visibility and the configured hero-status ids as fallbacks.
+extern bool IsXpIconVisible();
+extern void EnsureXpIconHookInstalled();
+
 // ============================================================================
 // XP Skills - Conquer.exe client 7937 (image base 0x400000)
 // ----------------------------------------------------------------------------
@@ -42,10 +48,18 @@ extern void RegisterStatusDuration(int statusId, unsigned int seconds);
 //        FUN_011b2f69  __thiscall(ECX = client, magicId, selfUid, 0, 1)
 //      selfUid = *(uint*)(client + 0x268).
 //
-//    Fire control: one pop per bar fill - after firing we wait for the bar to
-//    drop below 100 (the server resets it on a pop) before re-arming, with a
-//    5s retry in case a pop was rejected. Multiple XP skills are rotated
-//    round-robin, one per fill. Max one attempt per second.
+//    Fire control: one pop per fill - after firing we wait for the icon to
+//    clear AND the bar to drop below 100 (the server resets it on a pop)
+//    before re-arming, with a 5s retry in case a pop was rejected. Multiple
+//    XP skills are rotated round-robin, one per fill.
+//
+// 3) "Auto XP skill on icon" (v4) - the trigger is the game's own XP pop
+//    indicator (IsXpIconVisible, gear_swap.cpp): while hunting, the moment
+//    the XP icon appears on screen the skill fires on that same frame -
+//    no 1s throttle, no bar-wait. The bar>=100 check stays as a fallback for
+//    builds where the icon hook was never captured. After a pop the tick
+//    re-arms only when the icon is gone AND the bar dropped; a rejected pop
+//    (icon still up) retries every 5s.
 //
 //    The use-skill gates above are already patched by (1), and the
 //    FUN_011b2f69 gate reads the CURRENT skill's +0x30 (the attack skill
@@ -104,8 +118,7 @@ namespace XpSkill
 	bool g_autoXpSkill = false;
 	bool g_autoXpOnlyWhileHunting = true;   // default: pop during auto-hunt only
 
-	const DWORD FIRE_INTERVAL_MS      = 1000;  // same cadence as the hunt brain tick
-	const DWORD RETRY_INTERVAL_MS     = 5000;  // re-fire if the bar never dropped
+	const DWORD RETRY_INTERVAL_MS     = 5000;  // re-fire if the icon/bar never cleared
 	const DWORD LIST_SCAN_INTERVAL_MS = 5000;  // re-enumerate learned magics slowly
 
 	const unsigned int MAX_XP_IDS = 32;
@@ -363,6 +376,11 @@ namespace XpSkill
 		if (g_autoXpOnlyWhileHunting && !IsHunting())
 			return;
 
+		// The icon trigger needs the shared FUN_00AE61F8 hook (idempotent;
+		// also used by auto gear-swap). Without it the pop still fires on the
+		// full bar, but not instantly on the icon.
+		EnsureXpIconHookInstalled();
+
 		DWORD now = GetTickCount();
 
 		// Re-enumerate the learned magics slowly (picks up relogs/class changes).
@@ -373,13 +391,15 @@ namespace XpSkill
 		}
 
 		unsigned int bar = GetXpBarValue(client);
+		bool iconVisible = IsXpIconVisible();
 
-		// One pop per fill: after firing, wait for the server to consume the bar
-		// (value drops below 100) before re-arming. If it never drops, the pop
-		// was likely rejected - re-arm after a timeout and try again.
+		// One pop per fill: after firing, wait for the icon to clear AND the
+		// bar to drop below 100 (the server consumes both on a pop) before
+		// re-arming. If neither ever clears, the pop was likely rejected -
+		// re-arm after a timeout and try again.
 		if (g_waitingReset)
 		{
-			if (bar < 100)
+			if (!iconVisible && bar < 100)
 				g_waitingReset = false;
 			else if (now - g_lastFireAttempt >= RETRY_INTERVAL_MS)
 				g_waitingReset = false;
@@ -387,11 +407,12 @@ namespace XpSkill
 				return;
 		}
 
-		if (bar < 100)
+		// Trigger: the game's own XP pop icon (instant - same frame it
+		// appears), with the full bar as a fallback when no icon panel was
+		// ever captured.
+		if (!iconVisible && bar < 100)
 			return;
 		if (g_xpIdCount == 0)
-			return;
-		if (now - g_lastFireAttempt < FIRE_INTERVAL_MS)
 			return;
 
 		unsigned int id = g_xpIds[g_rotateIdx % g_xpIdCount];
@@ -457,7 +478,8 @@ void RenderXpSkillInterface()
 
 	// Auto-pop. Enabling it also turns the unlock on: without the fill patch
 	// the bar never charges while hunting, so auto-pop could never trigger.
-	if (ImGui::Checkbox("Auto XP skill when bar is full", &XpSkill::g_autoXpSkill))
+	// Fires the instant the game's XP pop icon appears (bar-full as fallback).
+	if (ImGui::Checkbox("Auto XP skill on XP icon", &XpSkill::g_autoXpSkill))
 	{
 		if (XpSkill::g_autoXpSkill)
 		{
@@ -483,6 +505,7 @@ void RenderXpSkillInterface()
 		if (XpSkill::IsClientValid(client))
 		{
 			ImGui::Text("XP bar: %u / 100", XpSkill::GetXpBarValue(client));
+			ImGui::Text("XP icon: %s", IsXpIconVisible() ? "ON SCREEN" : "off");
 			ImGui::Text("XP pops sent: %lu", XpSkill::g_fireCount);
 			if (XpSkill::g_lastFiredId != 0)
 				ImGui::Text("Last pop id: 0x%04X", XpSkill::g_lastFiredId);
@@ -520,6 +543,6 @@ void RenderXpSkillInterface()
 		}
 	}
 
-	ImGui::TextDisabled("Auto-casts your XP skills (Superman / Fatal Strike / ...)");
-	ImGui::TextDisabled("Characters with several XP skills rotate through them all.");
+	ImGui::TextDisabled("Pops the instant the XP icon appears while auto-hunting");
+	ImGui::TextDisabled("(bar-full as fallback). Fires one pop per icon.");
 }

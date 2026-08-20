@@ -368,6 +368,20 @@ void ApplyGearSwapClientState()
 	GearSwap::AutoSwapTick();
 }
 
+// Free wrapper so the XP-skill module can pop the instant the game shows the
+// XP icon (panel+0xAC8 flag, HWND visibility, or the configured status ids).
+bool IsXpIconVisible()
+{
+	return GearSwap::IsXpIconVisible();
+}
+
+// Free wrapper so the XP-skill module can install the icon-capture hook on
+// its own (the hook is shared - idempotent, also used by auto gear-swap).
+void EnsureXpIconHookInstalled()
+{
+	GearSwap::EnsureIconHookInstalled();
+}
+
 void RenderGearSwapInterface()
 {
 	ImGui::Text("Auto Gear Swap");
