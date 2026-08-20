@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <vector>
+#include <map>
 #include "imgui.h"
 #include "imgui_impl_dx9.h"
 #include "imgui_impl_win32.h"
@@ -29,12 +30,65 @@ extern LPVOID g_originalShowStringExAddress;
 // original procedure lives in g_gameWindow.originalWindowProcedure.
 static WNDPROC g_originalChildWindowProcedure = NULL;
 
+// Additional windows subclassed beyond root/render (the MFC login dialog is a
+// separate HWND created after the first frame; without its subclass the
+// overlay receives no mouse/keyboard while it is up). Maps window -> original.
+static std::map<HWND, WNDPROC> g_subclassedWindows;
+static DWORD g_lastSubclassEnumTick = 0;
+
 // Diagnostics: live counters of messages reaching the WndProc hook,
 // displayed at the top of the overlay window.
 unsigned long g_debugMouseMessageCount = 0;
 unsigned long g_debugKeyboardMessageCount = 0;
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam);
+
+static BOOL CALLBACK SubclassEnumChildren(HWND hwnd, LPARAM lParam)
+{
+	if (!hwnd || !IsWindow(hwnd) || g_subclassedWindows.find(hwnd) != g_subclassedWindows.end())
+		return TRUE;
+	WNDPROC original = (WNDPROC)SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
+	if (original)
+		g_subclassedWindows[hwnd] = original;
+	return TRUE;
+}
+
+static BOOL CALLBACK SubclassEnumProc(HWND hwnd, LPARAM lParam)
+{
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (pid != GetCurrentProcessId())
+		return TRUE; // foreign window
+	if (hwnd == g_gameWindow.gameWindowHandle || hwnd == g_gameWindow.parentWindowHandle)
+		return TRUE; // handled by the dedicated hooks
+	SubclassEnumChildren(hwnd, 0);
+	EnumChildWindows(hwnd, SubclassEnumChildren, 0);
+	return TRUE;
+}
+
+// Subclasses every process-owned top-level window and its children so the
+// overlay input hook sees messages no matter which window has focus/hit-test
+// (the MFC login dialog owns its own HWNDs). Every message is forwarded to
+// the window's original procedure, so the game UI is unaffected unless ImGui
+// requests capture.
+void SubclassAllProcessWindows()
+{
+	if (!g_gameWindow.gameWindowHandle)
+		return;
+
+	// Drop entries for destroyed windows: the OS reuses HWND values, so a
+	// stale entry would both suppress re-subclassing of the new window and
+	// forward to a dead window procedure.
+	for (std::map<HWND, WNDPROC>::iterator it = g_subclassedWindows.begin(); it != g_subclassedWindows.end(); )
+	{
+		if (IsWindow(it->first))
+			++it;
+		else
+			g_subclassedWindows.erase(it++);
+	}
+
+	EnumWindows(SubclassEnumProc, 0);
+}
 
 // Hooks the exact window the D3D9 device renders into (plus its root
 // window for keyboard input). Far more reliable than searching window
@@ -94,6 +148,15 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 	if (!g_gameWindow.direct3DDevice) 
 	{
 		g_gameWindow.direct3DDevice = device;
+	}
+
+	// Keep subclassing process windows (the MFC login dialog appears after the
+	// first frame). Throttled: the enum is cheap but not free.
+	DWORD nowTick = GetTickCount();
+	if (nowTick - g_lastSubclassEnumTick > 250)
+	{
+		g_lastSubclassEnumTick = nowTick;
+		SubclassAllProcessWindows();
 	}
 
 	if (!g_isImGuiInitialized) 
@@ -221,8 +284,37 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 	if (g_isImGuiInitialized && g_gameWindow.isGuiWindowOpen) 
 	{
 		ImGuiIO& io = ImGui::GetIO();
-		
-		ImGui_ImplWin32_WndProcHandler(windowHandle, message, wParam, lParam);
+
+		// Mouse messages from extra windows (the MFC login dialog) carry
+		// coordinates in THEIR client space; ImGui positions are relative to
+		// the render window, so remap before ImGui sees the message.
+		WPARAM imMsgWParam = wParam;
+		LPARAM imMsgLParam = lParam;
+		if (windowHandle != g_gameWindow.gameWindowHandle)
+		{
+			switch (message)
+			{
+			case WM_MOUSEMOVE:
+			case WM_LBUTTONDOWN:
+			case WM_LBUTTONUP:
+			case WM_LBUTTONDBLCLK:
+			case WM_RBUTTONDOWN:
+			case WM_RBUTTONUP:
+			case WM_RBUTTONDBLCLK:
+			case WM_MBUTTONDOWN:
+			case WM_MBUTTONUP:
+			case WM_MBUTTONDBLCLK:
+				{
+					POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+					ClientToScreen(windowHandle, &pt);
+					ScreenToClient(g_gameWindow.gameWindowHandle, &pt);
+					imMsgLParam = MAKELPARAM(pt.x, pt.y);
+				}
+				break;
+			}
+		}
+
+		ImGui_ImplWin32_WndProcHandler(windowHandle, message, imMsgWParam, imMsgLParam);
 
 		if (io.WantCaptureMouse || io.WantCaptureKeyboard) 
 		{
@@ -252,9 +344,14 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 	}
 	
 	// Forward to the correct original procedure for THIS window.
-	WNDPROC originalProcedure = (windowHandle == g_gameWindow.gameWindowHandle && g_originalChildWindowProcedure)
-		? g_originalChildWindowProcedure
-		: g_gameWindow.originalWindowProcedure;
+	WNDPROC originalProcedure = NULL;
+	std::map<HWND, WNDPROC>::iterator it = g_subclassedWindows.find(windowHandle);
+	if (it != g_subclassedWindows.end())
+		originalProcedure = it->second;
+	if (!originalProcedure)
+		originalProcedure = (windowHandle == g_gameWindow.gameWindowHandle && g_originalChildWindowProcedure)
+			? g_originalChildWindowProcedure
+			: g_gameWindow.originalWindowProcedure;
 
 	return CallWindowProcA(originalProcedure, windowHandle, message, wParam, lParam);
 }
