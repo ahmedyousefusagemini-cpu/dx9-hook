@@ -453,11 +453,17 @@ lines), loaded by the CUserAttribMgr loader `FUN_00e2c03c` @ `0x00E2C03C`
 Each loaded CUserAttrib (0x198 bytes): statusId@0, displayType@4,
 priority@0xC, icon@0x10/0x14, name string@0x178.
 
-**My C3DUser** = tail of the client `+0x98` chain (same walk as `FUN_00deb082`
-used by the hunt brain) + id match `user+0x54 == client+0x268`.
+**My C3DUser** = `DAT_01a53980` itself. Every status API (`AddStatus`
+`FUN_00eedd80`, `ClearStatus` `FUN_00ef25c5`, `ChkStatus` `FUN_00f1af78`)
+does `ADD ECX,0x138` on the object `FUN_0043e581` returns — i.e.
+`DAT_01a53980+0x138` is the ground-truth bitfield. ⚠️ The `+0x98` chain tail
+is a DIFFERENT object on some builds (the client object links other entities)
+— do NOT read statuses from the tail; use `DAT_01a53980+0x138` (the chain
+walk is kept in buffs.cpp for diagnostics only).
 
 **Implementation note (`buffs.cpp`):** reads the 72-byte bitfield at
-`user+0x138` every frame, parses `StatusTips.ini` for names, and renders every
+`DAT_01a53980+0x138` every frame (mirroring the game's own ChkStatus object —
+NOT the +0x98 chain tail), parses `StatusTips.ini` for names, and renders every
 named status green `[ON]` / gray `[OFF]` in the overlay (plus a raw-bits debug
 tree). The Lua-binder MinHook approach was dropped - the bitfield catches
 server-driven debuffs too (the binders only see script-applied ones).
@@ -496,18 +502,26 @@ Verified chain (this build):
 | `0x00EF2E5E` | CMsgItem create/serialize (msg id 0x97B, action type at +0x448) | `[msg+6]=0x97b` |
 | `0x010CF416` | packet send | vtable[5] |
 | `0x00FCAD4C` | `CMyHero` equip-mode getter (`return *(int*)(this+0x193C)`) | all display/score callers |
+| `0x00A653E4` | main-window WndProc XP-icon show gate: `ChkStatus(hero, 0xA) || ChkStatus(hero, 0x5) → FUN_005F254F` (status 5 is the EDI loaded via `PUSH 5; POP EDI` at 0x00A65346) | byte `6A 05 5F 8B B5 04 8D FF FF` |
+| `0x005F254F` | XP-icon show handler (thiscall, ECX = mainWindow+0x3B7B68) → `SetBar(mainWindow+0x408BF8, 1)` | prologue `56 8B F1 6A 00` |
+| `0x005F25BA` | XP-icon hide handler → `SetBar(mainWindow+0x408BF8, 0)` | prologue `56 8B F1 E8` |
+| `0x00AE622B` | `CDlgXp::SetBar` (dlgxp.cpp) — the modded build's real icon show/hide setter; sets `CDlgXp+0xAA8` = 1/0, then `FUN_00AE4949 → FUN_00AE6708` (render) / hides the window. Old `FUN_00AE5B7B`/`FUN_00AE5FC7` paths are dead in this build | prologue `55 8B EC 56 6A 05` |
+| `DAT_01a53980 + 0x138` | hero 576-bit status bitfield — the object/field the game's own ChkStatus reads (`FUN_00F1AF78`: `ADD ECX,0x138`); bit `(id&63)` of 64-bit word `(id>>6)` (layout per `FUN_00D4ED8E`) | `CMP [EBP+8],0x23F; JA; ADD ECX,0x138; JMP 0x00f1f86d` |
 
 Equipment positions: MAIN slots 0x65..0x73 (101..115); ALT = MAIN + 0x14 =
 0x79..0x87 (121..135); special alt slots +0x384/+0x388. Action types:
 0x2C = swap to MAIN, 0x2D = swap to ALT, 0x198 = equip/refresh.
 
 Implementation (`gear_swap.cpp`): calls `FUN_00FF219D(hero)` via a
-`__fastcall` fn pointer. Trigger: MinHooks `FUN_00AE5B7B` (CDlgXp::show -
-the visibility setter every XP-icon show path converges on), remembers the
-CDlgXp instance, and each frame reads its own `+0xAB4` "shown" flag (1 =
-icon on screen, 0 = hidden - the exact field the game renders from). Wear
-ALT while the icon is on screen; when the XP buff status (configurable id,
-default 47) sets = the skill activated, wear MAIN and hold it until the icon
-clears and re-appears. Waits for hero+0x193C to flip (5s timeout) before
-re-arming; 1.5s send cooldown; auto-stops after 2 consecutive unconfirmed
-sends.
+`__fastcall` fn pointer. Trigger: **the XP icon = the game's own show gate** —
+the modded client's main-window WndProc (0x00A653E4) shows the icon when
+`ChkStatus(hero, 10)` OR `ChkStatus(hero, 5)` is set, i.e. when the hero's
+status bitfield at `DAT_01a53980+0x138` (576 bits, bit `(id&63)` of 64-bit
+word `(id>>6)`) has bit 10 or bit 5. `gear_swap.cpp` polls that bitfield
+directly each frame (both ids configurable in the UI) and wears ALT while
+either bit is set, MAIN the moment they clear (the skill activation consumes
+the pop). The `FUN_00AE622B` (CDlgXp::SetBar) MinHook is kept as a pure
+diagnostic (captures the CDlgXp instance, +0xAA8 flag, fired counter) — the
+status bit is the real signal and cannot miss or depend on an instance being
+hooked. Waits for hero+0x193C to flip (5s timeout) before re-arming; 1.5s
+send cooldown; auto-stops after 2 consecutive unconfirmed sends.

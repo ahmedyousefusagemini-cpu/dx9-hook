@@ -40,8 +40,13 @@ extern bool GetLastXpFire(unsigned int* outMagicId, unsigned int* outDurationSec
 // are only STR_ keys, and the CUserAttrib def's +0x178 string is the effect
 // animation name (e.g. "trojanblkt") - neither is displayable.
 //
-// My C3DUser is the tail of the client's +0x98 chain (same walk the auto-hunt
-// brain uses, FUN_00debdb2), validated by id match: user+0x54 == client+0x268.
+// My C3DUser is DAT_01a53980 itself - the object FUN_0043E581 returns and
+// the object every status API reads the +0x138 bitfield from (verified in
+// Ghidra: AddStatus/ClearStatus/ChkStatus are all ADD ECX,0x138 on it). The
+// +0x98 chain tail is a DIFFERENT object on some builds (the client object
+// links other entities), so status reads and the bit-hook filter must use
+// DAT_01a53980+0x138, NOT the chain tail. The chain walk is kept for
+// diagnostics only.
 // ============================================================================
 
 namespace Buffs
@@ -122,10 +127,11 @@ namespace Buffs
 	int g_bitEventIndex = 0;
 	unsigned int g_bitEventTotal = 0;
 
-	// Cached pointer to MY character's status bitfield (myUser + 0x138). The
-	// core bit-set hook fires for every entity, so we filter to this one: it
-	// avoids logging other roles'/NPCs' statuses (e.g. constant id=5 toggled on
-	// them) and keeps the XP self-learning accurate.
+	// Cached pointer to MY character's status bitfield. The core bit-set hook
+	// fires for every entity, so we filter to the one the game itself uses:
+	// DAT_01a53980+0x138 (the object FUN_0043E581 returns - what the game's
+	// ChkStatus/AddStatus/ClearStatus all read). The +0x98 chain tail is a
+	// different object on some builds, so it must NOT be the filter target.
 	void* g_myStatusBits = nullptr;
 	unsigned int g_foreignSkips = 0;
 
@@ -586,13 +592,21 @@ namespace Buffs
 		EnsureTimerHookInstalled();
 		EnsureBitHookInstalled();
 
-		int user = GetMyUserObject();
-		if (!user)
+		// Object diagnostics only (debug tree).
+		GetMyUserObject();
+
+		// The game's own ChkStatus reads the status bitfield from
+		// DAT_01a53980+0x138 - FUN_00F1AF78 is C3DUser::ChkStatus (ADD
+		// ECX,0x138) and every call site passes FUN_0043E581() = DAT_01a53980.
+		// The +0x98 chain tail is a DIFFERENT object on some builds, so the
+		// statuses must be mirrored from exactly the field the game checks.
+		int client = GetClientObject();
+		if (!client)
 			return;
 
-		g_myStatusBits = (void*)(user + STATUS_BITFIELD_OFFSET);
+		g_myStatusBits = (void*)(client + STATUS_BITFIELD_OFFSET);
 
-		const unsigned char* bits = (const unsigned char*)(user + STATUS_BITFIELD_OFFSET);
+		const unsigned char* bits = (const unsigned char*)(client + STATUS_BITFIELD_OFFSET);
 		if (!IsReadable(bits, sizeof(g_statusBits)))
 			return;
 
