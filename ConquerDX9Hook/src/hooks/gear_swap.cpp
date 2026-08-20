@@ -28,22 +28,25 @@ extern unsigned int GetXpBarValue();
 //        all 8 equipment slots (FUN_00ff1eff clear + FUN_00ff49c4 set pairs).
 //
 // So the complete native swap = FUN_00FF219D(hero) - exactly what the button
-// runs. This module wears ALT while the XP icon is on screen and switches back
-// to MAIN the moment the icon goes away (the skill activation consumes it):
+// runs. This module wears ALT while the XP pop is on screen and switches back
+// to MAIN the moment the pop goes away (the skill activation consumes it):
 //
-//   - icon on screen -> wear ALT
-//   - icon gone (pop consumed) -> wear MAIN
+//   - pop on screen -> wear ALT
+//   - pop gone (skill activated) -> wear MAIN
 //
-// Icon detection: the modded client's main-window WndProc shows the XP icon
-// when the hero has status 10 OR status 5 active - 0x00A653E4:
-//   ChkStatus(hero, 0xA) || ChkStatus(hero, 0x5)
-//     -> FUN_005F254F -> CDlgXp::SetBar(1) (+0xAA8 = 1, render XpSkillType0)
-// and the hide handler FUN_005F25BA -> SetBar(0) clears it when the pop is
-// consumed. ChkStatus (FUN_00F1AF78: ADD ECX,0x138) reads the 576-bit status
-// bitfield at DAT_01a53980+0x138 - the exact object and field the game's own
-// check uses. We mirror that read directly per frame: no hooks, no instance,
-// immune to status-id differences between private servers (the ids are
-// configurable in the UI).
+// Pop detection (VERIFIED EMPIRICALLY on the live game): the modded client's
+// main-window WndProc drives the pop panel through FUN_00AE61F8 - the show
+// flag setter (panel+0xAC8 = 1/0):
+//   show: WndProc msg -> FUN_00601E67(mainWindow+0x3B7B68)
+//         -> FUN_00AE61F8(panel, 1) + FUN_00AD0EA2 (pick XpSkillType%u icon,
+//            MoveWindow to the right edge)
+//   hide: WndProc msg -> FUN_00AE61F8(panel, 0) + fgui hide
+// We MinHook FUN_00AE61F8 (body: MOV [ECX+0xAC8],AL / RET 4), remember the
+// panel instance(s), and each frame read +0xAC8 (plus real HWND visibility)
+// as ground truth. The CDlgXp::SetBar path (FUN_00AE622B) and the
+// status-gate path (ChkStatus status 10/5) are NOT live in this build -
+// verified: the SetBar hook never fired and statuses 10/5 stayed off while
+// the icon was up. The status ids remain configurable as a fallback.
 // ============================================================================
 
 namespace GearSwap
@@ -59,29 +62,25 @@ namespace GearSwap
 	// i.e. ((unsigned long long*)(hero+0x138))[id >> 6] >> (id & 63).
 	const size_t STATUS_BITFIELD_OFFSET = 0x138;
 
-	// The modded client's main-window WndProc shows the XP icon when either
-	// of these hero statuses is active (0x00A653E4: ChkStatus(hero, 0xA) ||
-	// ChkStatus(hero, 0x5) -> FUN_005F254F -> SetBar(1)). Configurable - some
-	// private servers use different ids for the XP pop.
+	// Fallback gate ids: the modded WndProc at 0x00A653E4 shows the XP icon
+	// when ChkStatus(hero, 0xA) || ChkStatus(hero, 0x5) is set. Verified NOT
+	// live in this build (both stayed off while the icon was up), but kept as
+	// a configurable OR-fallback for servers that DO set a status on the pop.
 	const int XP_ICON_GATE_STATUS_A = 10;
 	const int XP_ICON_GATE_STATUS_B = 5;
 
-	// CDlgXp::SetBar (dlgxp.cpp) - the modded client's real icon show/hide
-	// setter. The whole icon lifecycle funnels through it:
-	//   show: FUN_005F254F -> FUN_00AE622B(1) -> +0xAA8 = 1, render icon
-	//   hide: FUN_005F25BA -> FUN_00AE622B(0) -> +0xAA8 = 0, hide window
-	// The old FUN_00AE5B7B/FUN_00AE5FC7 paths are dead in this build (the
-	// modded renderer FUN_00AE6708 draws the icon directly), so this is the
-	// one function called on every icon state change. Prologue sanity bytes:
-	//   55                push ebp
-	//   8B EC             mov  ebp, esp
-	//   56                push esi
-	//   6A 05             push 5
-	const uintptr_t XP_ICON_SET_FUNC = 0x00AE622B;
-	const size_t    ICON_BAR_FLAG_OFFSET  = 0xAA8;  // 1 = icon bar active/visible, 0 = hidden
-	const size_t    ICON_MODE_FLAG_OFFSET  = 0xAB0;  // old-path show-mode flag (debug display)
-	const size_t    ICON_SHOWN_FLAG_OFFSET = 0xAB4;  // old-path shown flag (debug display)
-	const size_t    HWND_OFFSET            = 0x20;   // CWnd::m_hWnd (debug display only)
+	// The LIVE XP-pop show/hide setter. The modded client's main-window
+	// WndProc drives the pop panel state through this one choke point:
+	//   show: WndProc msg -> FUN_00601E67(mainWindow+0x3B7B68)
+	//         -> FUN_00AE61F8(panel, 1) : panel+0xAC8 = 1
+	//         -> FUN_00AD0EA2(panel)    : pick XpSkillType%u icon, MoveWindow
+	//   hide: WndProc msg -> FUN_00AE61F8(panel, 0) (panel+0x7C0760)
+	//         -> FUN_00C264D1(panel, 0) : fgui hide the window
+	// The old FUN_00AE622B (CDlgXp::SetBar) + status-gate path is NOT what the
+	// live game uses (verified empirically: never fired, statuses 10/5 stayed
+	// off while the icon was up). Body: MOV [ECX+0xAC8],AL / RET 4.
+	const uintptr_t XP_PANEL_SHOW_FUNC = 0x00AE61F8;
+	const size_t    XP_PANEL_SHOW_FLAG = 0xAC8;   // byte: 1 = pop shown, 0 = hidden
 
 	// --- configuration -----------------------------------------------------
 	bool g_autoSwap = false;
@@ -91,7 +90,7 @@ namespace GearSwap
 	// --- runtime state -----------------------------------------------------
 	int  g_mode = -1;            // last read equip mode (-1 = unknown)
 	unsigned int g_xpBar = 0;    // last poll: XP bar value (0-100)
-	bool g_iconActive = false;   // last poll: XP icon on screen (gate status A or B)?
+	bool g_iconActive = false;   // last poll: XP pop on screen (panel+0xAC8 / HWND / fallback status)
 	int  g_pendingTarget = -1;   // swap in flight: 0 (main) / 1 (alt), -1 none
 	DWORD g_lastSwapSent = 0;
 	DWORD g_cooldownUntil = 0;
@@ -100,7 +99,6 @@ namespace GearSwap
 	unsigned long g_confirmFail = 0;   // timeouts waiting for the flip
 	unsigned long g_skippedWhileBusy = 0;
 
-	int  g_cdlgxp = 0;           // captured CDlgXp instance (from the show hook)
 	bool g_iconHookInstalled = false;
 	int  g_iconHookStatus = 0;
 
@@ -109,55 +107,75 @@ namespace GearSwap
 
 	int GetHero();   // defined below - the CMyHero singleton (DAT_01a53980)
 
-	// --- XP icon visibility hook -------------------------------------------
-	// FUN_00AE622B is CDlgXp::SetBar (this in ECX, param_2 = show != 0). It is
-	// the single choke point the modded client uses for both directions: the
-	// show handler (FUN_005F254F) and the hide handler (FUN_005F25BA) both
-	// call it, it sets CDlgXp+0xAA8 = 1/0, and on show it renders the icon
-	// bar through FUN_00AE4949 -> FUN_00AE6708. The old FUN_00AE5B7B /
-	// FUN_00AE5FC7 functions never run in this build.
-	typedef void (__thiscall* XpIconSetFn)(void* self, int show);
-	static XpIconSetFn s_originalXpIconSet = nullptr;
+	// --- XP pop visibility hook --------------------------------------------
+	// FUN_00AE61F8 is the live show/hide setter for the XP pop panel
+	// (this in ECX, show flag on the stack): the WndProc's show handler
+	// FUN_00601E67 calls it with 1 (panel = mainWindow+0x3B7B68) and the
+	// hide handler with 0 (panel = mainWindow+0x7C0760). The client keeps
+	// both panel instances and routes every state change through this one
+	// function, so track up to two captured instances. Body bytes:
+	//   55             push ebp
+	//   8B EC          mov  ebp, esp
+	//   8A 45 08       mov  al, [ebp+8]
+	//   88 81 C8 0A 00 mov  [ecx+0xAC8], al
+	//   5D             pop  ebp
+	//   C2 04 00       ret  4
+	typedef void (__thiscall* XpPanelShowFn)(void* self, unsigned char show);
+	static XpPanelShowFn s_originalXpPanelShow = nullptr;
 	unsigned long g_iconHookFired = 0;   // detour call counter (diagnostic)
 
-	void __fastcall HkXpIconSet(void* self, void* /*edx*/, int show)
+	struct PanelSlot { int panel; unsigned char show; };
+	PanelSlot g_panels[2] = {};          // captured panel instances + last flag
+
+	void __fastcall HkXpPanelShow(void* self, void* /*edx*/, unsigned char show)
 	{
-		GearSwap::g_cdlgxp = (int)self;
-		GearSwap::g_iconHookFired++;
-		if (s_originalXpIconSet)
-			s_originalXpIconSet(self, show);
+		PanelSlot* slot = nullptr;
+		for (int i = 0; i < 2; i++)
+			if (g_panels[i].panel == (int)self) { slot = &g_panels[i]; break; }
+		if (!slot)
+			for (int i = 0; i < 2; i++)
+				if (g_panels[i].panel == 0) { slot = &g_panels[i]; break; }
+		if (slot)
+		{
+			slot->panel = (int)self;
+			slot->show = show;
+		}
+		g_iconHookFired++;
+		if (s_originalXpPanelShow)
+			s_originalXpPanelShow(self, show);
 	}
 
 	void EnsureIconHookInstalled()
 	{
 		if (g_iconHookInstalled)
 			return;
-		const unsigned char* p = (const unsigned char*)XP_ICON_SET_FUNC;
+		const unsigned char* p = (const unsigned char*)XP_PANEL_SHOW_FUNC;
 		if (IsBadReadPtr(p, 8))
 			return;
 		// Prologue must match the static binary or the hook would land on the
 		// wrong code (client builds / packer variants shift addresses).
 		if (p[0] != 0x55 || p[1] != 0x8B || p[2] != 0xEC ||
-			p[3] != 0x56 || p[4] != 0x6A || p[5] != 0x05)
+			p[3] != 0x8A || p[4] != 0x45 || p[5] != 0x08)
 			return;
 		g_iconHookStatus = MH_Initialize();
 		if (g_iconHookStatus != MH_OK && g_iconHookStatus != MH_ERROR_ALREADY_INITIALIZED)
 			return;
-		g_iconHookStatus = MH_CreateHook((LPVOID)XP_ICON_SET_FUNC, &HkXpIconSet, (LPVOID*)&s_originalXpIconSet);
+		g_iconHookStatus = MH_CreateHook((LPVOID)XP_PANEL_SHOW_FUNC, &HkXpPanelShow, (LPVOID*)&s_originalXpPanelShow);
 		if (g_iconHookStatus != MH_OK)
 			return;
-		g_iconHookStatus = MH_EnableHook((LPVOID)XP_ICON_SET_FUNC);
+		g_iconHookStatus = MH_EnableHook((LPVOID)XP_PANEL_SHOW_FUNC);
 		if (g_iconHookStatus != MH_OK)
 			return;
 		g_iconHookInstalled = true;
 	}
 
-	// Ground-truth check: the game's own ChkStatus mirror. Statuses live in
+	const size_t HWND_OFFSET = 0x20;   // CWnd::m_hWnd (ground-truth visibility check)
+
+	// Secondary gate: the game's own ChkStatus mirror. Statuses live in
 	// the 576-bit bitfield at hero+0x138 (FUN_00F1AF78 = C3DUser::ChkStatus:
 	// ADD ECX,0x138; bit layout per FUN_00D4ED8E: bit (id&63) of word (id>>6)).
-	// The modded WndProc shows the XP icon when status A or status B is set,
-	// so this is exactly what "icon on screen" means to the client - no hooks
-	// needed, and it also catches the hide the moment the pop is consumed.
+	// Not the live pop trigger in this build (verified empirically) - kept as
+	// a configurable fallback for servers that DO set a status on the pop.
 	bool IsHeroStatusActive(int statusId)
 	{
 		int hero = GetHero();
@@ -170,8 +188,27 @@ namespace GearSwap
 		return ((words[statusId >> 6] >> (statusId & 63)) & 1ULL) != 0;
 	}
 
+	// Ground-truth check: the game's own +0xAC8 show flag on the captured
+	// panel(s) - the exact field FUN_00AE61F8 writes on every pop show/hide.
+	// Falls back to real HWND visibility (CWnd::m_hWnd at +0x20), then to the
+	// configured hero-status ids (secondary, off by default of the gate).
 	bool IsXpIconVisible()
 	{
+		for (int i = 0; i < 2; i++)
+		{
+			if (!g_panels[i].panel)
+				continue;
+			if (IsBadReadPtr((const void*)g_panels[i].panel, XP_PANEL_SHOW_FLAG + 1))
+			{
+				g_panels[i] = PanelSlot{};   // panel went away - drop the stale slot
+				continue;
+			}
+			if (*(unsigned char*)(g_panels[i].panel + XP_PANEL_SHOW_FLAG) != 0)
+				return true;
+			HWND hwnd = *(HWND*)(g_panels[i].panel + HWND_OFFSET);
+			if (hwnd && IsWindowVisible(hwnd))
+				return true;
+		}
 		return IsHeroStatusActive(g_iconStatusIdA) || IsHeroStatusActive(g_iconStatusIdB);
 	}
 
@@ -262,9 +299,8 @@ namespace GearSwap
 		if (!hero)
 			return;
 
-		// The SetBar hook is purely diagnostic now (captures the CDlgXp
-		// instance + fired counter for the debug tree) - the status-bit read
-		// is the real signal and cannot fail on a valid build.
+		// The FUN_00AE61F8 hook captures the live pop panel instance(s); the
+		// +0xAC8 flag read in IsXpIconVisible() is the real signal.
 		EnsureIconHookInstalled();
 
 		g_mode = GetEquipMode(hero);
@@ -272,11 +308,11 @@ namespace GearSwap
 		g_iconActive = IsXpIconVisible();
 		DWORD now = GetTickCount();
 
-		// The client shows the icon while the hero carries the XP pop status
-		// (10 or 5) and hides it when the skill activation consumes the pop -
-		// so "icon on screen" alone drives both directions:
-		//   icon up   -> wear ALT
-		//   icon gone -> wear MAIN
+		// The pop panel's +0xAC8 show flag is 1 while the XP pop is on screen and
+		// 0 once the skill activation consumes it - so the flag alone drives
+		// both directions:
+		//   pop up   -> wear ALT
+		//   pop gone -> wear MAIN
 		bool altWanted = g_iconActive;
 		int desired = altWanted ? 1 : 0;
 
@@ -356,7 +392,7 @@ void RenderGearSwapInterface()
 
 		int statusA = GearSwap::g_iconStatusIdA;
 		int statusB = GearSwap::g_iconStatusIdB;
-		if (ImGui::InputInt("XP icon status id A", &statusA))
+		if (ImGui::InputInt("Fallback status id A", &statusA))
 		{
 			if (statusA < 0)
 				statusA = 0;
@@ -364,7 +400,7 @@ void RenderGearSwapInterface()
 				statusA = 575;
 			GearSwap::g_iconStatusIdA = statusA;
 		}
-		if (ImGui::InputInt("XP icon status id B", &statusB))
+		if (ImGui::InputInt("Fallback status id B", &statusB))
 		{
 			if (statusB < 0)
 				statusB = 0;
@@ -372,6 +408,7 @@ void RenderGearSwapInterface()
 				statusB = 575;
 			GearSwap::g_iconStatusIdB = statusB;
 		}
+		ImGui::TextDisabled("Fallback: also swap when a hero status id is active.");
 	}
 
 	ImGui::Spacing();
@@ -426,16 +463,23 @@ void RenderGearSwapInterface()
 			ImGui::Text("XP icon hook: %s (status %d, fired %lu)",
 				GearSwap::g_iconHookInstalled ? "installed" : "not installed",
 				GearSwap::g_iconHookStatus, GearSwap::g_iconHookFired);
-			ImGui::Text("CDlgXp: 0x%08X", (unsigned int)GearSwap::g_cdlgxp);
-			if (GearSwap::g_cdlgxp)
+			for (int i = 0; i < 2; i++)
 			{
-				ImGui::Text("icon flags: bar(+0xAA8)=%d mode(+0xAB0)=%d shown(+0xAB4)=%d",
-					*(int*)(GearSwap::g_cdlgxp + GearSwap::ICON_BAR_FLAG_OFFSET),
-					*(int*)(GearSwap::g_cdlgxp + GearSwap::ICON_MODE_FLAG_OFFSET),
-					*(int*)(GearSwap::g_cdlgxp + GearSwap::ICON_SHOWN_FLAG_OFFSET));
-				HWND hwnd = *(HWND*)(GearSwap::g_cdlgxp + GearSwap::HWND_OFFSET);
-				ImGui::Text("icon HWND: 0x%08X visible=%d", (unsigned int)hwnd,
-					hwnd ? (IsWindowVisible(hwnd) != FALSE) : 0);
+				ImGui::Text("XP panel[%d]: 0x%08X flag(+0xAC8)=%d%s",
+					i, (unsigned int)GearSwap::g_panels[i].panel,
+					(!GearSwap::g_panels[i].panel || IsBadReadPtr(
+						(const void*)GearSwap::g_panels[i].panel,
+						GearSwap::XP_PANEL_SHOW_FLAG + 1)) ? 0 :
+						*(unsigned char*)(GearSwap::g_panels[i].panel + GearSwap::XP_PANEL_SHOW_FLAG),
+					GearSwap::g_panels[i].panel ? "" : " (not captured yet)");
+				if (GearSwap::g_panels[i].panel && !IsBadReadPtr(
+					(const void*)GearSwap::g_panels[i].panel,
+					GearSwap::XP_PANEL_SHOW_FLAG + 1))
+				{
+					HWND hwnd = *(HWND*)(GearSwap::g_panels[i].panel + GearSwap::HWND_OFFSET);
+					ImGui::Text("  HWND: 0x%08X visible=%d", (unsigned int)hwnd,
+						hwnd ? (IsWindowVisible(hwnd) != FALSE) : 0);
+				}
 			}
 			ImGui::TreePop();
 		}
