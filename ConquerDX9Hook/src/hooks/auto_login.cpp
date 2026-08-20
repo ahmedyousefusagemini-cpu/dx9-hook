@@ -225,8 +225,8 @@ int __cdecl HookedLoginSend(const char* account, const char* password, void* ser
 			strcpy_s(AutoLogin::g_lastResult, "login send (injected)");
 		}
 	}
-	if (AutoLogin::g_originalLoginSend)
-		return AutoLogin::g_originalLoginSend(account, password, serverInfo, mode, flags);
+	if (AutoLogin::g_OriginalLoginSend)
+		return AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, flags);
 	return 0;
 }
 
