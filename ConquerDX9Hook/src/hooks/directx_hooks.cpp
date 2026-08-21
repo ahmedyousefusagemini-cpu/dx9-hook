@@ -60,7 +60,12 @@ static BOOL CALLBACK SubclassEnumProc(HWND hwnd, LPARAM lParam)
 	if (pid != GetCurrentProcessId())
 		return TRUE; // foreign window
 	if (hwnd == g_gameWindow.gameWindowHandle || hwnd == g_gameWindow.parentWindowHandle)
-		return TRUE; // handled by the dedicated hooks
+	{
+		// The windows themselves have dedicated hooks; their CHILDREN (e.g. a
+		// WS_CHILD MFC login dialog and its edit controls) still need ours.
+		EnumChildWindows(hwnd, SubclassEnumChildren, 0);
+		return TRUE;
+	}
 	SubclassEnumChildren(hwnd, 0);
 	EnumChildWindows(hwnd, SubclassEnumChildren, 0);
 	return TRUE;
