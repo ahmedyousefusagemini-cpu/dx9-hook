@@ -24,6 +24,7 @@ extern unsigned long GetAutoLoginSubmitCount();
 extern unsigned long g_debugMouseMessageCount;
 extern unsigned long g_debugKeyboardMessageCount;
 extern unsigned long g_debugSubclassedWindowCount;
+extern bool g_subclassAllWindows;
 
 void RenderImGuiInterface() 
 {
@@ -61,8 +62,9 @@ void RenderImGuiInterface()
 	// the input hook is not attached to the window receiving input.
 	// "extra wnds" = additional subclassed windows (overlay.ini
 	// [overlay] subclass_all_windows=1); 0 = only render+root hooked.
-	ImGui::Text("Input debug - mouse: %lu | keys: %lu | extra wnds: %lu",
-		g_debugMouseMessageCount, g_debugKeyboardMessageCount, g_debugSubclassedWindowCount);
+	ImGui::Text("Input debug - mouse: %lu | keys: %lu | extra wnds: %lu (%s)",
+		g_debugMouseMessageCount, g_debugKeyboardMessageCount,
+		g_debugSubclassedWindowCount, g_subclassAllWindows ? "allwnds on" : "allwnds off");
 	ImGui::Separator();
 	
 	ImGui::Checkbox("Wireframe (Chams)", &g_isWireframeEnabled);   

@@ -1,5 +1,8 @@
 #include <windows.h>
 #include <d3d9.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <vector>
 #include <map>
 #include "imgui.h"
@@ -41,14 +44,58 @@ static DWORD g_lastSubclassEnumTick = 0;
 //              behavior for the running game.
 // 1: every process window is subclassed so the overlay also receives input
 //    while the MFC login dialog owns it. Interferes with some game input,
-//    hence opt-in.
-static bool g_subclassAllWindows = false;
+//    hence opt-in. Hot-reloaded every enum tick.
+bool g_subclassAllWindows = false;
 
 // Diagnostics: live counters of messages reaching the WndProc hook,
 // displayed at the top of the overlay window.
 unsigned long g_debugMouseMessageCount = 0;
 unsigned long g_debugKeyboardMessageCount = 0;
 unsigned long g_debugSubclassedWindowCount = 0;
+
+// Reads the flag tolerating ANSI, UTF-8 and UTF-16 files (Notepad defaults
+// to UTF-16, which GetPrivateProfileIntA silently fails on -> flag stuck off).
+static bool ReadOverlayFlagFromFile(const char* iniPath)
+{
+	FILE* f = NULL;
+	if (fopen_s(&f, iniPath, "rb") != 0 || !f)
+		return false;
+	unsigned char buf[4096];
+	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	buf[n] = 0;
+
+	const unsigned char* p = buf;
+	size_t remaining = n;
+	bool wideLE = false, wideBE = false;
+	if (n >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) { p += 3; remaining -= 3; }
+	else if (n >= 2 && buf[0] == 0xFF && buf[1] == 0xFE) { wideLE = true; p += 2; remaining -= 2; }
+	else if (n >= 2 && buf[0] == 0xFE && buf[1] == 0xFF) { wideBE = true; p += 2; remaining -= 2; }
+
+	char narrow[4096];
+	size_t m = 0;
+	if (wideLE || wideBE)
+	{
+		for (size_t i = 0; i + 1 < remaining && m < sizeof(narrow) - 1; i += 2)
+			narrow[m++] = (char)(wideLE ? p[i] : p[i + 1]);
+	}
+	else
+	{
+		for (size_t i = 0; i < remaining && m < sizeof(narrow) - 1; ++i)
+			narrow[m++] = (char)p[i];
+	}
+	narrow[m] = 0;
+
+	for (char* c = narrow; *c; ++c)
+		*c = (char)(*c >= 'A' && *c <= 'Z' ? *c + 32 : *c);
+	const char* key = strstr(narrow, "subclass_all_windows");
+	if (!key)
+		return false;
+	const char* eq = strchr(key, '=');
+	if (!eq)
+		return false;
+	return atoi(eq + 1) != 0;
+}
 
 static void LoadOverlayConfig()
 {
@@ -60,7 +107,7 @@ static void LoadOverlayConfig()
 		*lastSlash = '\0';
 	char iniPath[MAX_PATH];
 	_snprintf_s(iniPath, sizeof(iniPath), _TRUNCATE, "%s\\overlay.ini", exePath);
-	g_subclassAllWindows = GetPrivateProfileIntA("overlay", "subclass_all_windows", 0, iniPath) != 0;
+	g_subclassAllWindows = ReadOverlayFlagFromFile(iniPath);
 }
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam);
@@ -194,18 +241,15 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 	}
 
 	// Opt-in: keep subclassing process windows (the MFC login dialog appears
-	// after the first frame). Throttled: the enum is cheap but not free.
-	static bool overlayConfigLoaded = false;
-	if (!overlayConfigLoaded)
-	{
-		overlayConfigLoaded = true;
-		LoadOverlayConfig();
-	}
+	// after the first frame). Throttled; the switch hot-reloads so the user
+	// can flip overlay.ini without restarting the client.
 	DWORD nowTick = GetTickCount();
-	if (g_subclassAllWindows && nowTick - g_lastSubclassEnumTick > 250)
+	if (nowTick - g_lastSubclassEnumTick > 250)
 	{
 		g_lastSubclassEnumTick = nowTick;
-		SubclassAllProcessWindows();
+		LoadOverlayConfig();
+		if (g_subclassAllWindows)
+			SubclassAllProcessWindows();
 	}
 
 	if (!g_isImGuiInitialized) 

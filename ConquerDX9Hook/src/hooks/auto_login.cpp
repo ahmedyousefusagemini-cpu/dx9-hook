@@ -164,6 +164,8 @@ namespace AutoLogin
 	unsigned long g_cycleStartTick = 0;
 	unsigned long g_lastAttemptTick = 0;
 	int   g_retryCount = 0;
+	bool  g_autoSubmitInFlight = false; // last queued send was ours (not manual)
+	int   g_failedCycles = 0;           // consecutive quick fail -> back-to-login
 	unsigned long g_submitCount = 0;
 	char  g_lastResult[64] = "idle";
 
@@ -300,6 +302,7 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	if (!AutoLogin::g_attemptDone)
 	{
 		AutoLogin::g_attemptDone = true;
+		AutoLogin::g_autoSubmitInFlight = false; // a manual send supersedes ours
 		strcpy_s(AutoLogin::g_lastResult, "manual login send");
 	}
 	if (AutoLogin::g_OriginalLoginSend)
@@ -313,11 +316,36 @@ void __cdecl HookedBackToLogin()
 	if (AutoLogin::g_OriginalBackToLogin)
 		AutoLogin::g_OriginalBackToLogin();
 
-	// The account was disconnected / logged out: re-arm a fresh login cycle.
+	// A cycle that returns to the login screen within a minute of our submit
+	// is a credential rejection (the server answer arrives in seconds).
+	// Longer sessions ending here are normal logouts/disconnects, not
+	// credential failures.
+	unsigned long now = GetTickCount();
+	bool quickFailure = AutoLogin::g_autoSubmitInFlight &&
+		(now - AutoLogin::g_lastAttemptTick) < 60000;
+	AutoLogin::g_autoSubmitInFlight = false;
+
+	if (quickFailure)
+		AutoLogin::g_failedCycles++;
+	else
+		AutoLogin::g_failedCycles = 0;
+
 	AutoLogin::g_backToLoginSeen = true;
+	AutoLogin::g_cycleStartTick = GetTickCount();
+
+	if (AutoLogin::g_failedCycles >= 3)
+	{
+		// Stop re-arming: wrong credentials would pop the server's error
+		// dialog forever, and that modal dialog disables the game window
+		// while it is up (frozen input for the user).
+		AutoLogin::g_attemptDone = true;
+		AutoLogin::g_retryCount = 0;
+		strcpy_s(AutoLogin::g_lastResult, "stopped: check creds in auto_login.ini");
+		return;
+	}
+
 	AutoLogin::g_attemptDone = false;
 	AutoLogin::g_retryCount = 0;
-	AutoLogin::g_cycleStartTick = GetTickCount();
 	strcpy_s(AutoLogin::g_lastResult, "back-to-login; re-arming");
 }
 
@@ -484,6 +512,7 @@ void AutoLoginTick()
 		if (ret == 0)
 		{
 			AutoLogin::g_attemptDone = true;
+			AutoLogin::g_autoSubmitInFlight = true;
 			strcpy_s(AutoLogin::g_lastResult, "auto-login queued (file creds)");
 		}
 		else if (AutoLogin::g_retryCount >= AutoLogin::g_maxRetries)
