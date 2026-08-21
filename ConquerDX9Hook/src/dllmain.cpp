@@ -31,6 +31,13 @@ extern uintptr_t FindMemoryPattern(uintptr_t startAddress, size_t searchLength, 
 extern HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device);
 extern HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* presentationParameters);
 
+// SEH wrapper must not have C++ objects with dtors (std::vector etc.) in same function.
+// HookInitializationThread contains std::vector -> C2712 if __try is directly inside it.
+static void SafeApplyAutoLogin()
+{
+	__try { ApplyAutoLoginClientState(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 
 void StringHookInstallThread() 
 {
@@ -99,7 +106,7 @@ void HookInitializationThread()
 						IDirect3DDevice9* dev=nullptr;
 						HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, dummyWnd, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &dev);
 						if (SUCCEEDED(hr) && dev) {
-							virtualMethodTable = *(uintptr_t***)dev;
+							virtualMethodTable = *(uintptr_t**)dev;
 							HookLog("Fallback dummy device VMT %p", virtualMethodTable);
 							dev->Release();
 						} else {
@@ -157,8 +164,8 @@ void HookInitializationThread()
 		Sleep(16);
 		// Fallback tick: ensures auto-login still progresses even if EndScene
 		// hook hasn't fired yet (device not created) or the overlay is closed.
-		// ApplyAutoLoginClientState is cheap and safe to call from any thread.
-		__try { ApplyAutoLoginClientState(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+		// Use SEH wrapper (no C++ unwind objects in the wrapper).
+		SafeApplyAutoLogin();
 
 		if (GetAsyncKeyState(VK_INSERT) & 1) 
 		{
