@@ -23,6 +23,7 @@ extern unsigned long GetAutoLoginSubmitCount();
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
 extern unsigned long g_debugKeyboardMessageCount;
+extern unsigned long g_debugSubclassedWindowCount;
 
 void RenderImGuiInterface() 
 {
@@ -58,7 +59,10 @@ void RenderImGuiInterface()
 	// Temporary diagnostics: these counters must go UP when moving/clicking
 	// the mouse over the game and when pressing keys. If they stay at 0,
 	// the input hook is not attached to the window receiving input.
-	ImGui::Text("Input debug - mouse: %lu | keys: %lu", g_debugMouseMessageCount, g_debugKeyboardMessageCount);
+	// "extra wnds" = additional subclassed windows (overlay.ini
+	// [overlay] subclass_all_windows=1); 0 = only render+root hooked.
+	ImGui::Text("Input debug - mouse: %lu | keys: %lu | extra wnds: %lu",
+		g_debugMouseMessageCount, g_debugKeyboardMessageCount, g_debugSubclassedWindowCount);
 	ImGui::Separator();
 	
 	ImGui::Checkbox("Wireframe (Chams)", &g_isWireframeEnabled);   

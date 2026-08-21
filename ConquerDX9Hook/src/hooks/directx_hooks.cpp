@@ -36,10 +36,32 @@ static WNDPROC g_originalChildWindowProcedure = NULL;
 static std::map<HWND, WNDPROC> g_subclassedWindows;
 static DWORD g_lastSubclassEnumTick = 0;
 
+// [overlay] subclass_all_windows in overlay.ini (next to the game exe).
+// 0 (default): only the render + root windows are hooked - the known-good
+//              behavior for the running game.
+// 1: every process window is subclassed so the overlay also receives input
+//    while the MFC login dialog owns it. Interferes with some game input,
+//    hence opt-in.
+static bool g_subclassAllWindows = false;
+
 // Diagnostics: live counters of messages reaching the WndProc hook,
 // displayed at the top of the overlay window.
 unsigned long g_debugMouseMessageCount = 0;
 unsigned long g_debugKeyboardMessageCount = 0;
+unsigned long g_debugSubclassedWindowCount = 0;
+
+static void LoadOverlayConfig()
+{
+	char exePath[MAX_PATH];
+	if (!GetModuleFileNameA(NULL, exePath, MAX_PATH))
+		return;
+	char* lastSlash = strrchr(exePath, '\\');
+	if (lastSlash)
+		*lastSlash = '\0';
+	char iniPath[MAX_PATH];
+	_snprintf_s(iniPath, sizeof(iniPath), _TRUNCATE, "%s\\overlay.ini", exePath);
+	g_subclassAllWindows = GetPrivateProfileIntA("overlay", "subclass_all_windows", 0, iniPath) != 0;
+}
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -107,6 +129,7 @@ void SubclassAllProcessWindows()
 	}
 
 	EnumWindows(SubclassEnumProc, 0);
+	g_debugSubclassedWindowCount = (unsigned long)g_subclassedWindows.size();
 	inProgress = false;
 }
 
@@ -170,10 +193,16 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 		g_gameWindow.direct3DDevice = device;
 	}
 
-	// Keep subclassing process windows (the MFC login dialog appears after the
-	// first frame). Throttled: the enum is cheap but not free.
+	// Opt-in: keep subclassing process windows (the MFC login dialog appears
+	// after the first frame). Throttled: the enum is cheap but not free.
+	static bool overlayConfigLoaded = false;
+	if (!overlayConfigLoaded)
+	{
+		overlayConfigLoaded = true;
+		LoadOverlayConfig();
+	}
 	DWORD nowTick = GetTickCount();
-	if (nowTick - g_lastSubclassEnumTick > 250)
+	if (g_subclassAllWindows && nowTick - g_lastSubclassEnumTick > 250)
 	{
 		g_lastSubclassEnumTick = nowTick;
 		SubclassAllProcessWindows();
