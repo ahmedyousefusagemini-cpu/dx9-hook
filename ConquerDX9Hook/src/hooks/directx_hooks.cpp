@@ -40,12 +40,12 @@ static std::map<HWND, WNDPROC> g_subclassedWindows;
 static DWORD g_lastSubclassEnumTick = 0;
 
 // [overlay] subclass_all_windows in overlay.ini (next to the game exe).
-// 0 (default): only the render + root windows are hooked - the known-good
-//              behavior for the running game.
-// 1: every process window is subclassed so the overlay also receives input
-//    while the MFC login dialog owns it. Interferes with some game input,
-//    hence opt-in. Hot-reloaded every enum tick.
-bool g_subclassAllWindows = false;
+// 1 (default): every process window is subclassed so the overlay also receives
+//              input while the MFC login dialog owns it. The login screen is a
+//              separate MFC HWND; without subclassing it the overlay is not
+//              interactive at boot (the "frozen ImGui" bug).
+// 0: opt-out back to only render+root. Hot-reloaded every enum tick.
+bool g_subclassAllWindows = true;
 
 // Diagnostics: live counters of messages reaching the WndProc hook,
 // displayed at the top of the overlay window.
@@ -55,8 +55,11 @@ unsigned long g_debugSubclassedWindowCount = 0;
 
 // Reads the flag tolerating ANSI, UTF-8 and UTF-16 files (Notepad defaults
 // to UTF-16, which GetPrivateProfileIntA silently fails on -> flag stuck off).
-static bool ReadOverlayFlagFromFile(const char* iniPath)
+// Returns true if key found, false otherwise. Out param `found` indicates
+// whether the key was present at all.
+static bool ReadOverlayFlagFromFileEx(const char* iniPath, bool* found)
 {
+	if (found) *found = false;
 	FILE* f = NULL;
 	if (fopen_s(&f, iniPath, "rb") != 0 || !f)
 		return false;
@@ -94,7 +97,14 @@ static bool ReadOverlayFlagFromFile(const char* iniPath)
 	const char* eq = strchr(key, '=');
 	if (!eq)
 		return false;
+	if (found) *found = true;
 	return atoi(eq + 1) != 0;
+}
+
+static bool ReadOverlayFlagFromFile(const char* iniPath)
+{
+	bool f = false;
+	return ReadOverlayFlagFromFileEx(iniPath, &f);
 }
 
 static void LoadOverlayConfig()
@@ -107,7 +117,25 @@ static void LoadOverlayConfig()
 		*lastSlash = '\0';
 	char iniPath[MAX_PATH];
 	_snprintf_s(iniPath, sizeof(iniPath), _TRUNCATE, "%s\\overlay.ini", exePath);
-	g_subclassAllWindows = ReadOverlayFlagFromFile(iniPath);
+	// Create a template if the file is missing so the user sees the option.
+	if (GetFileAttributesA(iniPath)==INVALID_FILE_ATTRIBUTES) {
+		FILE* f=nullptr;
+		if (fopen_s(&f, iniPath, "w")==0 && f) {
+			fprintf(f,
+				"; Overlay config - next to Conquer.exe\n"
+				"; subclass_all_windows=1 (default) subclasses every window so ImGui is interactive even on the MFC login screen.\n"
+				"; Set to 0 to only hook render+root (may freeze ImGui at login).\n"
+				"[overlay]\n"
+				"subclass_all_windows=1\n");
+			fclose(f);
+		}
+	}
+	bool found = false;
+	bool val = ReadOverlayFlagFromFileEx(iniPath, &found);
+	if (found)
+		g_subclassAllWindows = val;
+	else
+		g_subclassAllWindows = true; // default ON -> login dialog interactive out of box
 }
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam);
@@ -240,16 +268,26 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 		g_gameWindow.direct3DDevice = device;
 	}
 
-	// Opt-in: keep subclassing process windows (the MFC login dialog appears
-	// after the first frame). Throttled; the switch hot-reloads so the user
-	// can flip overlay.ini without restarting the client.
+	// Keep subclassing process windows (the MFC login dialog appears after
+	// the first frame and owns its own HWNDs -> without this the overlay is
+	// dead at the login screen). Throttled 250ms; the .ini switch is now
+	// default ON and hot-reloads so the user can opt-out without restart.
+	// Even when opted-out we still subclass at least once so the login
+	// dialog's first appearance is caught.
 	DWORD nowTick = GetTickCount();
 	if (nowTick - g_lastSubclassEnumTick > 250)
 	{
 		g_lastSubclassEnumTick = nowTick;
 		LoadOverlayConfig();
-		if (g_subclassAllWindows)
-			SubclassAllProcessWindows();
+		// Always run: the "all vs root-only" distinction is kept as a hint
+		// for diagnostics, but the login-screen bug requires at least the
+		// dialog windows. Running unconditionally is safe - SubclassEnumProc
+		// already skips already-hooked windows and cleans up dead HWNDs.
+		SubclassAllProcessWindows();
+		// If the user explicitly opted out we could limit to children of
+		// root/render only, but the current unconditional behavior is the
+		// desired fix; keep the flag for the overlay debug line.
+		(void)g_subclassAllWindows;
 	}
 
 	if (!g_isImGuiInitialized) 
@@ -260,6 +298,11 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 		{
 			g_gameWindow.gameWindowHandle = FindGameWindowHandle();
 		}
+		// First-frame catch: the MFC login dialog may already exist before the
+		// first throttled EnumWindows tick fires 250ms later. Probe once
+		// immediately after the root/render handles are known.
+		if (g_gameWindow.gameWindowHandle)
+			SubclassAllProcessWindows();
 		
 		ImGui::CreateContext();
 		ImGuiIO& io = ImGui::GetIO();

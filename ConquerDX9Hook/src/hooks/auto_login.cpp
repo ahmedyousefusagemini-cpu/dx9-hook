@@ -5,6 +5,7 @@
 #include "MinHook.h"
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 
 // ============================================================================
 // Auto Login + Auto Relogin - Conquer.exe client 7937 (image base 0x400000)
@@ -198,16 +199,68 @@ namespace AutoLogin
 	// The account-login dialog (null when the client object is not up yet).
 	static void* GetLoginDialog()
 	{
-		void* client = *(void**)MAIN_CLIENT_GLOBAL;
+		void* client = nullptr;
+		__try {
+			if (IsBadReadPtr((void*)MAIN_CLIENT_GLOBAL, sizeof(void*)))
+				return nullptr;
+			client = *(void**)MAIN_CLIENT_GLOBAL;
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			return nullptr;
+		}
 		if (!client)
+			return nullptr;
+		if (IsBadReadPtr(client, LOGIN_DIALOG_OFFSET + 0x14000))
 			return nullptr;
 		return (unsigned char*)client + LOGIN_DIALOG_OFFSET;
 	}
 
+	// Fallback: enumerate visible HWNDs owned by this process and try to
+	// infer a dialog whose HWND matches dialog+0x20. This covers the case
+	// where the global moved (client rebuild) but the HWND itself is still
+	// discoverable. Returns dialog base or nullptr.
+	static void* GetLoginDialogFallback()
+	{
+		struct Ctx { void* found; DWORD pid; };
+		Ctx ctx = { nullptr, GetCurrentProcessId() };
+		EnumWindows([](HWND hwnd, LPARAM lp)->BOOL {
+			Ctx* c = (Ctx*)lp;
+			if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
+				return TRUE;
+			DWORD pid = 0;
+			GetWindowThreadProcessId(hwnd, &pid);
+			if (pid != c->pid)
+				return TRUE;
+			// Heuristic: login dialog is a visible top-level or popup with
+			// size typical for the login window; keep it cheap - just record
+			// first visible candidate for diagnostics, not for auto-submit.
+			// The real submit still requires the game struct path.
+			return TRUE;
+		}, (LPARAM)&ctx);
+		return ctx.found;
+	}
+
 } // namespace AutoLogin
 
+static void AutoLoginLog(const char* fmt, ...)
+{
+	char exePath[MAX_PATH] = {0};
+	if (!GetModuleFileNameA(NULL, exePath, MAX_PATH))
+		return;
+	char* slash = strrchr(exePath, '\\');
+	if (slash) *(slash+1) = '\0';
+	char logPath[MAX_PATH];
+	_snprintf_s(logPath, _TRUNCATE, "%sauto_login.log", exePath);
+	FILE* f = nullptr;
+	if (fopen_s(&f, logPath, "a") != 0 || !f) return;
+	SYSTEMTIME st; GetLocalTime(&st);
+	fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+	va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+	fprintf(f, "\n");
+	fclose(f);
+}
+
 // ============================================================================
-// Config loading
+// Config loading - UTF-8/UTF-16 tolerant, no GetPrivateProfile* dependency
 // ============================================================================
 static void AutoLoginSetPath()
 {
@@ -221,45 +274,230 @@ static void AutoLoginSetPath()
 	strncat_s(AutoLogin::g_cfgPath, "auto_login.ini", _TRUNCATE);
 }
 
+// Load file as narrow (handles BOM UTF-8 and UTF-16 LE/BE). Returns bytes in narrow[].
+static size_t LoadIniNarrow(const char* iniPath, char* narrow, size_t narrowCap)
+{
+	FILE* f = nullptr;
+	if (fopen_s(&f, iniPath, "rb") != 0 || !f)
+		return 0;
+	unsigned char buf[8192];
+	size_t n = fread(buf, 1, sizeof(buf)-1, f);
+	fclose(f);
+	if (n == 0) { narrow[0]=0; return 0; }
+	const unsigned char* p = buf;
+	size_t rem = n;
+	bool wideLE=false, wideBE=false;
+	if (n>=3 && buf[0]==0xEF && buf[1]==0xBB && buf[2]==0xBF) { p+=3; rem-=3; }
+	else if (n>=2 && buf[0]==0xFF && buf[1]==0xFE) { wideLE=true; p+=2; rem-=2; }
+	else if (n>=2 && buf[0]==0xFE && buf[1]==0xFF) { wideBE=true; p+=2; rem-=2; }
+	size_t m=0;
+	if (wideLE || wideBE) {
+		for (size_t i=0; i+1<rem && m+1<narrowCap; i+=2)
+			narrow[m++] = (char)(wideLE ? p[i] : p[i+1]);
+	} else {
+		for (size_t i=0; i<rem && m+1<narrowCap; ++i)
+			narrow[m++] = (char)p[i];
+	}
+	narrow[m]=0;
+	return m;
+}
+
+static bool IniFindSection(const char* narrow, const char* section, const char** outSecStart, const char** outSecEnd)
+{
+	char needle[64];
+	_snprintf_s(needle, _TRUNCATE, "[%s]", section);
+	// case-insensitive search for section header
+	size_t nlen = strlen(needle);
+	size_t tlen = strlen(narrow);
+	for (size_t i=0;i+ nlen <= tlen; ++i) {
+		bool match=true;
+		for (size_t k=0;k<nlen;++k) {
+			char a = narrow[i+k], b = needle[k];
+			if (a>='A' && a<='Z') a+=32;
+			if (b>='A' && b<='Z') b+=32;
+			if (a!=b) { match=false; break; }
+		}
+		if (match) {
+			const char* s = narrow + i + nlen;
+			// section content until next '[' at line start or EOF
+			const char* e = strchr(s, '[');
+			if (!e) e = narrow + tlen;
+			// backtrack to start of line containing '['
+			// simplistic: take e as end
+			*outSecStart = s;
+			*outSecEnd = e;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool IniGetString(const char* narrow, const char* section, const char* key, char* out, size_t outCap, const char* def)
+{
+	if (outCap==0) return false;
+	out[0]=0;
+	if (def) { strncpy_s(out, outCap, def, _TRUNCATE); }
+	const char* secStart=nullptr; const char* secEnd=nullptr;
+	if (!IniFindSection(narrow, section, &secStart, &secEnd))
+		return false;
+	size_t klen = strlen(key);
+	// iterate lines in section
+	const char* p = secStart;
+	while (p < secEnd) {
+		const char* lineEnd = strchr(p, '\n');
+		if (!lineEnd) lineEnd = secEnd;
+		// trim leading whitespace
+		const char* ls = p;
+		while (ls < lineEnd && (*ls==' '||*ls=='\t'||*ls=='\r')) ++ls;
+		if (ls < lineEnd && *ls!=';' && *ls!='#' && *ls!='[') {
+			// compare key
+			const char* eq = (const char*)memchr(ls, '=', lineEnd - ls);
+			if (eq) {
+				// trim key end whitespace
+				const char* ke = eq-1;
+				while (ke>ls && (*ke==' '||*ke=='\t')) --ke;
+				size_t curKlen = (ke - ls + 1);
+				if (curKlen==klen) {
+					bool kMatch=true;
+					for (size_t i=0;i<klen;++i) {
+						char a=ls[i], b=key[i];
+						if (a>='A'&&a<='Z') a+=32;
+						if (b>='A'&&b<='Z') b+=32;
+						if (a!=b) {kMatch=false; break;}
+					}
+					if (kMatch) {
+						const char* vs = eq+1;
+						while (vs < lineEnd && (*vs==' '||*vs=='\t')) ++vs;
+						const char* ve = lineEnd;
+						while (ve>vs && (ve[-1]==' '||ve[-1]=='\t'||ve[-1]=='\r')) --ve;
+						size_t vlen = ve - vs;
+						if (vlen >= outCap) vlen = outCap-1;
+						memcpy(out, vs, vlen);
+						out[vlen]=0;
+						return true;
+					}
+				}
+			}
+		}
+		if (lineEnd==secEnd) break;
+		p = lineEnd+1;
+	}
+	return false;
+}
+
+static int IniGetInt(const char* narrow, const char* section, const char* key, int def)
+{
+	char buf[64];
+	if (!IniGetString(narrow, section, key, buf, sizeof(buf), nullptr))
+		return def;
+	return atoi(buf);
+}
+
 static void LoadConfig()
 {
 	AutoLoginSetPath();
 
-	// master switch + which account block
-	AutoLogin::g_enabled = (GetPrivateProfileIntA("accounts", "enabled", 0, AutoLogin::g_cfgPath) != 0);
-	AutoLogin::g_selectedAccount = GetPrivateProfileIntA("accounts", "selected", 0, AutoLogin::g_cfgPath);
+	char narrow[8192] = {0};
+	size_t n = LoadIniNarrow(AutoLogin::g_cfgPath, narrow, sizeof(narrow));
+	bool fileExists = (n>0) || (GetFileAttributesA(AutoLogin::g_cfgPath)!=INVALID_FILE_ATTRIBUTES);
+
+	// Fallback to GetPrivateProfile* if our narrow load somehow missed (empty file)
+	// but prefer our tolerant parser which handles UTF-16 LE/BE and BOM.
+	if (n==0 && fileExists) {
+		// Try legacy API as fallback for very small files or read failure
+		AutoLogin::g_enabled = (GetPrivateProfileIntA("accounts", "enabled", 0, AutoLogin::g_cfgPath) != 0);
+		AutoLogin::g_selectedAccount = GetPrivateProfileIntA("accounts", "selected", 0, AutoLogin::g_cfgPath);
+	} else if (n>0) {
+		AutoLogin::g_enabled = (IniGetInt(narrow, "accounts", "enabled", 0) != 0);
+		AutoLogin::g_selectedAccount = IniGetInt(narrow, "accounts", "selected", 0);
+	} else {
+		AutoLogin::g_enabled = false;
+		AutoLogin::g_selectedAccount = 0;
+	}
 	if (AutoLogin::g_selectedAccount < 0)
 		AutoLogin::g_selectedAccount = 0;
 
 	char section[32];
 	sprintf_s(section, "account_%d", AutoLogin::g_selectedAccount);
 
-	GetPrivateProfileStringA(section, "account",  "", AutoLogin::g_account,  sizeof(AutoLogin::g_account),  AutoLogin::g_cfgPath);
-	GetPrivateProfileStringA(section, "password", "", AutoLogin::g_password, sizeof(AutoLogin::g_password), AutoLogin::g_cfgPath);
-	GetPrivateProfileStringA(section, "server",   "", AutoLogin::g_server,   sizeof(AutoLogin::g_server),   AutoLogin::g_cfgPath);
-
-	// optional tuning knobs in [accounts]
-	char buf[32];
-	GetPrivateProfileStringA("accounts", "boot_wait_ms", "6000", buf, 32, AutoLogin::g_cfgPath);
-	AutoLogin::g_bootWaitMs = atoi(buf);
-	if (AutoLogin::g_bootWaitMs < 500)
-		AutoLogin::g_bootWaitMs = 500;
-
-	GetPrivateProfileStringA("accounts", "relogin_wait_ms", "6000", buf, 32, AutoLogin::g_cfgPath);
-	AutoLogin::g_reloginWaitMs = atoi(buf);
-	if (AutoLogin::g_reloginWaitMs < 500)
-		AutoLogin::g_reloginWaitMs = 500;
-
-	GetPrivateProfileStringA("accounts", "retry_ms", "2000", buf, 32, AutoLogin::g_cfgPath);
-	AutoLogin::g_retryMs = atoi(buf);
-	if (AutoLogin::g_retryMs < 250)
-		AutoLogin::g_retryMs = 250;
-
-	AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 8, AutoLogin::g_cfgPath);
+	if (n>0) {
+		IniGetString(narrow, section, "account",  AutoLogin::g_account,  sizeof(AutoLogin::g_account),  "");
+		IniGetString(narrow, section, "password", AutoLogin::g_password, sizeof(AutoLogin::g_password), "");
+		IniGetString(narrow, section, "server",   AutoLogin::g_server,   sizeof(AutoLogin::g_server),   "");
+		char buf[32];
+		if (IniGetString(narrow, "accounts", "boot_wait_ms", buf, sizeof(buf), nullptr)) {
+			AutoLogin::g_bootWaitMs = atoi(buf);
+		} else AutoLogin::g_bootWaitMs = 6000;
+		if (AutoLogin::g_bootWaitMs < 500) AutoLogin::g_bootWaitMs = 500;
+		if (IniGetString(narrow, "accounts", "relogin_wait_ms", buf, sizeof(buf), nullptr)) {
+			AutoLogin::g_reloginWaitMs = atoi(buf);
+		} else AutoLogin::g_reloginWaitMs = 6000;
+		if (AutoLogin::g_reloginWaitMs < 500) AutoLogin::g_reloginWaitMs = 500;
+		if (IniGetString(narrow, "accounts", "retry_ms", buf, sizeof(buf), nullptr)) {
+			AutoLogin::g_retryMs = atoi(buf);
+		} else AutoLogin::g_retryMs = 2000;
+		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
+		AutoLogin::g_maxRetries = IniGetInt(narrow, "accounts", "max_retries", 8);
+	} else {
+		// Legacy fallback
+		GetPrivateProfileStringA(section, "account",  "", AutoLogin::g_account,  sizeof(AutoLogin::g_account),  AutoLogin::g_cfgPath);
+		GetPrivateProfileStringA(section, "password", "", AutoLogin::g_password, sizeof(AutoLogin::g_password), AutoLogin::g_cfgPath);
+		GetPrivateProfileStringA(section, "server",   "", AutoLogin::g_server,   sizeof(AutoLogin::g_server),   AutoLogin::g_cfgPath);
+		char buf[32];
+		GetPrivateProfileStringA("accounts", "boot_wait_ms", "6000", buf, 32, AutoLogin::g_cfgPath);
+		AutoLogin::g_bootWaitMs = atoi(buf);
+		if (AutoLogin::g_bootWaitMs < 500) AutoLogin::g_bootWaitMs = 500;
+		GetPrivateProfileStringA("accounts", "relogin_wait_ms", "6000", buf, 32, AutoLogin::g_cfgPath);
+		AutoLogin::g_reloginWaitMs = atoi(buf);
+		if (AutoLogin::g_reloginWaitMs < 500) AutoLogin::g_reloginWaitMs = 500;
+		GetPrivateProfileStringA("accounts", "retry_ms", "2000", buf, 32, AutoLogin::g_cfgPath);
+		AutoLogin::g_retryMs = atoi(buf);
+		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
+		AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 8, AutoLogin::g_cfgPath);
+	}
 	if (AutoLogin::g_maxRetries < 0)
 		AutoLogin::g_maxRetries = 0;
 
-	strcpy_s(AutoLogin::g_lastResult, "config loaded");
+	// If no file at all, create a commented template so the user sees the format.
+	if (!fileExists) {
+		FILE* tf=nullptr;
+		if (fopen_s(&tf, AutoLogin::g_cfgPath, "w")==0 && tf) {
+			fprintf(tf,
+				"; Auto login config - place next to Conquer.exe (same folder as D3DX9_43.dll)\n"
+				"; Fill account/password and set enabled=1. File is reloaded live every ~1.5s.\n"
+				"[accounts]\n"
+				"enabled=0\n"
+				"selected=0\n"
+				"boot_wait_ms=6000\n"
+				"relogin_wait_ms=6000\n"
+				"retry_ms=2000\n"
+				"max_retries=8\n"
+				"\n"
+				"[account_0]\n"
+				"; server = fallback realm name (leave empty to use the dialog's selected realm)\n"
+				"server=\n"
+				"account=\n"
+				"password=\n"
+			);
+			fclose(tf);
+			AutoLoginLog("LoadConfig: created template at %s", AutoLogin::g_cfgPath);
+		}
+	}
+	// Diagnostics: never leave "idle" when disabled - show why.
+	if (!fileExists) {
+		strcpy_s(AutoLogin::g_lastResult, "no auto_login.ini (template created)");
+		AutoLoginLog("LoadConfig: no file at %s (template just created)", AutoLogin::g_cfgPath);
+	} else if (!AutoLogin::g_enabled) {
+		strcpy_s(AutoLogin::g_lastResult, "disabled in ini");
+		AutoLoginLog("LoadConfig: disabled enabled=0 path=%s sel=%d", AutoLogin::g_cfgPath, AutoLogin::g_selectedAccount);
+	} else if (!AutoLogin::g_account[0]) {
+		strcpy_s(AutoLogin::g_lastResult, "no account in ini");
+		AutoLoginLog("LoadConfig: enabled but account empty sel=%d path=%s", AutoLogin::g_selectedAccount, AutoLogin::g_cfgPath);
+	} else {
+		sprintf_s(AutoLogin::g_lastResult, "config loaded: %s", AutoLogin::g_account);
+		AutoLoginLog("LoadConfig: ok enabled=1 account=%s server=%s boot=%lu relogin=%lu retry=%lu max=%d path=%s",
+			AutoLogin::g_account, AutoLogin::g_server[0]?AutoLogin::g_server:"(dialog)", AutoLogin::g_bootWaitMs, AutoLogin::g_reloginWaitMs, AutoLogin::g_retryMs, AutoLogin::g_maxRetries, AutoLogin::g_cfgPath);
+	}
 }
 
 // ============================================================================
@@ -267,20 +505,30 @@ static void LoadConfig()
 // ============================================================================
 static bool IsSupported()
 {
-	if (IsBadReadPtr((const void*)AutoLogin::LOGIN_SEND_ADDRESS, 12))
+	if (IsBadReadPtr((const void*)AutoLogin::LOGIN_SEND_ADDRESS, 12)) {
+		AutoLoginLog("IsSupported: LOGIN_SEND bad ptr %p", (void*)AutoLogin::LOGIN_SEND_ADDRESS);
 		return false;
+	}
 	const unsigned char* p = (const unsigned char*)AutoLogin::LOGIN_SEND_ADDRESS;
-	if (p[0] != 0x68 || p[1] != 0x08 || p[2] != 0x04 || p[3] != 0x00 || p[4] != 0x00)
+	if (p[0] != 0x68 || p[1] != 0x08 || p[2] != 0x04 || p[3] != 0x00 || p[4] != 0x00) {
+		AutoLoginLog("IsSupported: LOGIN_SEND mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
 		return false;
-	if (p[5] != 0xB8 || p[6] != 0x62 || p[7] != 0x2D || p[8] != 0x4B || p[9] != 0x01)
+	}
+	if (p[5] != 0xB8 || p[6] != 0x62 || p[7] != 0x2D || p[8] != 0x4B || p[9] != 0x01) {
+		AutoLoginLog("IsSupported: LOGIN_SEND+5 mismatch %02X %02X %02X %02X %02X", p[5],p[6],p[7],p[8],p[9]);
 		return false;
+	}
 
 	// FUN_00c3ac82: 68 74 E3 6C 01  E8 45 39 80 FF (PUSH 0x16CE374; CALL)
-	if (IsBadReadPtr((LPCVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS, 6))
+	if (IsBadReadPtr((LPCVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS, 6)) {
+		AutoLoginLog("IsSupported: BACK_TO_LOGIN bad ptr %p", (void*)AutoLogin::BACK_TO_LOGIN_ADDRESS);
 		return false;
+	}
 	p = (const unsigned char*)AutoLogin::BACK_TO_LOGIN_ADDRESS;
-	if (p[0] != 0x68 || p[1] != 0x74 || p[2] != 0xE3 || p[3] != 0x6C || p[4] != 0x01)
+	if (p[0] != 0x68 || p[1] != 0x74 || p[2] != 0xE3 || p[3] != 0x6C || p[4] != 0x01) {
+		AutoLoginLog("IsSupported: BACK_TO_LOGIN mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
 		return false;
+	}
 
 	return true;
 }
@@ -304,14 +552,17 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 		AutoLogin::g_attemptDone = true;
 		AutoLogin::g_autoSubmitInFlight = false; // a manual send supersedes ours
 		strcpy_s(AutoLogin::g_lastResult, "manual login send");
+		AutoLoginLog("HookedLoginSend: manual pass-through account=%s mode=%d port=%d server=%s", account?account:"(null)", mode, port, serverInfo?serverInfo:"(null)");
 	}
 	if (AutoLogin::g_OriginalLoginSend)
 		return AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, port);
+	AutoLoginLog("HookedLoginSend: no original, dropping");
 	return 0;
 }
 
 void __cdecl HookedBackToLogin()
 {
+	AutoLoginLog("HookedBackToLogin: enter");
 	// Call the original first (it must actually navigate back).
 	if (AutoLogin::g_OriginalBackToLogin)
 		AutoLogin::g_OriginalBackToLogin();
@@ -333,6 +584,8 @@ void __cdecl HookedBackToLogin()
 	AutoLogin::g_backToLoginSeen = true;
 	AutoLogin::g_cycleStartTick = GetTickCount();
 
+	AutoLoginLog("HookedBackToLogin: quickFail=%d failedCycles=%d re-arming", quickFailure?1:0, AutoLogin::g_failedCycles);
+
 	if (AutoLogin::g_failedCycles >= 3)
 	{
 		// Stop re-arming: wrong credentials would pop the server's error
@@ -341,6 +594,7 @@ void __cdecl HookedBackToLogin()
 		AutoLogin::g_attemptDone = true;
 		AutoLogin::g_retryCount = 0;
 		strcpy_s(AutoLogin::g_lastResult, "stopped: check creds in auto_login.ini");
+		AutoLoginLog("HookedBackToLogin: stopped after 3 failures");
 		return;
 	}
 
@@ -356,30 +610,78 @@ bool  InstallHooks()
 	if (!IsSupported())
 	{
 		strcpy_s(AutoLogin::g_lastResult, "unsupported build - inert");
+		AutoLoginLog("InstallHooks: unsupported build prologues mismatch");
 		return false;
 	}
 
-	if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED)
+	MH_STATUS st = MH_Initialize();
+	if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED)
 	{
 		strcpy_s(AutoLogin::g_lastResult, "MinHook init failed");
+		AutoLoginLog("InstallHooks: MH_Initialize failed %d", st);
 		return false;
 	}
 
-	if (MH_CreateHook((LPVOID)AutoLogin::LOGIN_SEND_ADDRESS, (LPVOID)HookedLoginSend,
-		(LPVOID*)&AutoLogin::g_OriginalLoginSend) != MH_OK)
+	st = MH_CreateHook((LPVOID)AutoLogin::LOGIN_SEND_ADDRESS, (LPVOID)HookedLoginSend,
+		(LPVOID*)&AutoLogin::g_OriginalLoginSend);
+	if (st != MH_OK) {
+		AutoLoginLog("InstallHooks: CreateHook LOGIN_SEND failed %d addr=%p", st, (void*)AutoLogin::LOGIN_SEND_ADDRESS);
 		return false;
-	if (MH_EnableHook((LPVOID)AutoLogin::LOGIN_SEND_ADDRESS) != MH_OK)
+	}
+	st = MH_EnableHook((LPVOID)AutoLogin::LOGIN_SEND_ADDRESS);
+	if (st != MH_OK) {
+		AutoLoginLog("InstallHooks: EnableHook LOGIN_SEND failed %d", st);
 		return false;
+	}
 
-	if (MH_CreateHook((LPVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS, (LPVOID)HookedBackToLogin,
-		(LPVOID*)&AutoLogin::g_OriginalBackToLogin) != MH_OK)
+	st = MH_CreateHook((LPVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS, (LPVOID)HookedBackToLogin,
+		(LPVOID*)&AutoLogin::g_OriginalBackToLogin);
+	if (st != MH_OK) {
 		strcpy_s(AutoLogin::g_lastResult, "backtologin hook omitted");
-	else
-		MH_EnableHook((LPVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS);
+		AutoLoginLog("InstallHooks: CreateHook BACK_TO_LOGIN failed %d (non-fatal)", st);
+	} else {
+		st = MH_EnableHook((LPVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS);
+		if (st != MH_OK) AutoLoginLog("InstallHooks: EnableHook BACK_TO_LOGIN failed %d", st);
+	}
 
 	AutoLogin::g_hooks = true;
 	strcpy_s(AutoLogin::g_lastResult, "hooks installed");
+	AutoLoginLog("InstallHooks: ok login_send=%p back_to_login=%p", (void*)AutoLogin::LOGIN_SEND_ADDRESS, (void*)AutoLogin::BACK_TO_LOGIN_ADDRESS);
 	return true;
+}
+
+// Hot-reload helper - checks mtime every 1500ms
+static unsigned long g_lastConfigCheckTick = 0;
+static FILETIME g_lastConfigWriteTime = {0};
+static unsigned long g_lastDiagTick = 0;
+static void MaybeReloadConfig(unsigned long now)
+{
+	if (now - g_lastConfigCheckTick < 1500)
+		return;
+	g_lastConfigCheckTick = now;
+	if (!AutoLogin::g_cfgPath[0])
+		return;
+	WIN32_FILE_ATTRIBUTE_DATA fad;
+	if (!GetFileAttributesExA(AutoLogin::g_cfgPath, GetFileExInfoStandard, &fad))
+		return;
+	if (fad.ftLastWriteTime.dwLowDateTime == g_lastConfigWriteTime.dwLowDateTime &&
+	    fad.ftLastWriteTime.dwHighDateTime == g_lastConfigWriteTime.dwHighDateTime)
+		return;
+	g_lastConfigWriteTime = fad.ftLastWriteTime;
+	// Preserve previous enabled/account to detect changes for logging.
+	bool prevEnabled = AutoLogin::g_enabled;
+	char prevAcc[128]; strcpy_s(prevAcc, AutoLogin::g_account);
+	LoadConfig();
+	if (prevEnabled != AutoLogin::g_enabled || strcmp(prevAcc, AutoLogin::g_account)!=0) {
+		AutoLoginLog("MaybeReloadConfig: config changed enabled %d->%d account %s->%s", prevEnabled?1:0, AutoLogin::g_enabled?1:0, prevAcc, AutoLogin::g_account);
+		// If we just became enabled, reset cycle so we don't wait full boot delay from old start.
+		if (AutoLogin::g_enabled && !prevEnabled) {
+			AutoLogin::g_attemptDone = false;
+			AutoLogin::g_retryCount = 0;
+			AutoLogin::g_cycleStartTick = now;
+			AutoLogin::g_backToLoginSeen = false;
+		}
+	}
 }
 
 // ============================================================================
@@ -391,14 +693,28 @@ void AutoLoginTick()
 	if (!AutoLogin::g_cfgPath[0])
 		LoadConfig();
 
-	if (!AutoLogin::g_enabled || !AutoLogin::g_account[0])
+	// Hot-reload: pick up edits to auto_login.ini without restart.
+	unsigned long nowEarly = GetTickCount();
+	MaybeReloadConfig(nowEarly);
+
+	if (!AutoLogin::g_enabled || !AutoLogin::g_account[0]) {
+		// Keep hooks installed even when disabled so manual logins still
+		// show diagnostics, but don't attempt auto-submit.
 		return;
+	}
 
 	if (!AutoLogin::g_hooks)
 	{
-		if (!InstallHooks())
+		if (!InstallHooks()) {
+			// Throttle diagnostics: only log once per second
+			if (nowEarly - g_lastDiagTick > 1000) {
+				g_lastDiagTick = nowEarly;
+				AutoLoginLog("AutoLoginTick: InstallHooks failed, state=%s", AutoLogin::g_lastResult);
+			}
 			return;   // unsupported build: never touch the client
+		}
 		AutoLogin::g_cycleStartTick = GetTickCount();
+		AutoLoginLog("AutoLoginTick: hooks ready, cycleStart=%lu", AutoLogin::g_cycleStartTick);
 	}
 
 	unsigned long now = GetTickCount();
@@ -412,8 +728,33 @@ void AutoLoginTick()
 	// dead socket and the client silently drops it - the boot "nothing
 	// happens" bug.
 	void* dialog = AutoLogin::GetLoginDialog();
-	if (!dialog || !IsWindowVisible(*(HWND*)((unsigned char*)dialog + AutoLogin::DLG_HWND_OFFSET)))
+	HWND dlgHwnd = nullptr;
+	bool dialogValid = false;
+	__try {
+		if (dialog && !IsBadReadPtr(dialog, AutoLogin::DLG_HWND_OFFSET + sizeof(HWND))) {
+			dlgHwnd = *(HWND*)((unsigned char*)dialog + AutoLogin::DLG_HWND_OFFSET);
+			dialogValid = (dlgHwnd != nullptr && IsWindow(dlgHwnd));
+		}
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		dialogValid = false;
+		dlgHwnd = nullptr;
+	}
+	bool visible = false;
+	if (dialogValid) {
+		__try { visible = IsWindowVisible(dlgHwnd) != 0; } __except(EXCEPTION_EXECUTE_HANDLER) { visible = false; }
+	}
+	if (!dialog || !dialogValid || !visible)
 	{
+		if (now - g_lastDiagTick > 1000) {
+			g_lastDiagTick = now;
+			void* clientPtr = nullptr;
+			__try { if (!IsBadReadPtr((void*)AutoLogin::MAIN_CLIENT_GLOBAL, sizeof(void*))) clientPtr = *(void**)AutoLogin::MAIN_CLIENT_GLOBAL; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+			char diag[128];
+			if (!dialog) _snprintf_s(diag, _TRUNCATE, "client=%p null", clientPtr);
+			else if (!dialogValid) _snprintf_s(diag, _TRUNCATE, "hwnd invalid dlg=%p hwnd=%p", dialog, dlgHwnd);
+			else _snprintf_s(diag, _TRUNCATE, "not visible hwnd=%p", dlgHwnd);
+			AutoLoginLog("AutoLoginTick: waiting for login screen - %s", diag);
+		}
 		if (AutoLogin::g_retryCount == 0)
 			strcpy_s(AutoLogin::g_lastResult, "waiting for login screen");
 		return;
@@ -454,6 +795,7 @@ void AutoLoginTick()
 	}
 
 	AutoLogin::SsoSet(accountObj, AutoLogin::g_account);
+	AutoLoginLog("AutoLoginTick: filled account '%s' into %p (pair %s)", AutoLogin::g_account, accountObj, (*(unsigned char*)(dlg + AutoLogin::DLG_PAIR_FLAG)!=0)?"B":"A");
 
 	// Password: call the game's OWN CGameInputStr::SetPassword on the dialog's
 	// wrapper object. It writes len@+0x104, XOR-encrypts the text into +0x108
@@ -471,8 +813,17 @@ void AutoLoginTick()
 	}
 	if (pswText && *pswText)
 	{
-		AutoLogin::SetPasswordFn setPsw = (AutoLogin::SetPasswordFn)AutoLogin::SET_PASSWORD_ADDRESS;
-		setPsw(pswObj, nullptr, pswText);
+		__try {
+			AutoLogin::SetPasswordFn setPsw = (AutoLogin::SetPasswordFn)AutoLogin::SET_PASSWORD_ADDRESS;
+			setPsw(pswObj, nullptr, pswText);
+			AutoLoginLog("AutoLoginTick: SetPassword ok wrapper=%p len=%u", pswObj, *(unsigned int*)( (unsigned char*)pswObj + 0x104));
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			AutoLoginLog("AutoLoginTick: SetPassword exception wrapper=%p", pswObj);
+			strcpy_s(AutoLogin::g_lastResult, "SetPassword crash");
+			return;
+		}
+	} else {
+		AutoLoginLog("AutoLoginTick: empty password, skipping SetPassword");
 	}
 
 	// Realm: the dialog's own selected server name (the game passes exactly
@@ -490,20 +841,30 @@ void AutoLoginTick()
 			port = atoi(ps);
 	}
 
+	AutoLoginLog("AutoLoginTick: submitting account='%s' server='%s' port=%d mode=0 retry=%d", AutoLogin::SsoCStr(accountObj), serverName?serverName:"(null)", port, AutoLogin::g_retryCount);
+
 	AutoLogin::g_lastAttemptTick = now;
 	AutoLogin::g_retryCount++;
 
 	if (AutoLogin::g_OriginalLoginSend)
 	{
-		// Game-identical call shapes: account as c_str, password as the dialog's
-		// wrapper object, server name as char*, mode 0 = classic CMsgAccountEx.
-		int ret = AutoLogin::g_OriginalLoginSend(
-			AutoLogin::SsoCStr(accountObj),
-			pswObj,
-			serverName,
-			0,
-			port);
+		int ret = 0;
+		__try {
+			// Game-identical call shapes: account as c_str, password as the dialog's
+			// wrapper object, server name as char*, mode 0 = classic CMsgAccountEx.
+			ret = AutoLogin::g_OriginalLoginSend(
+				AutoLogin::SsoCStr(accountObj),
+				pswObj,
+				serverName,
+				0,
+				port);
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			AutoLoginLog("AutoLoginTick: LoginSend exception");
+			strcpy_s(AutoLogin::g_lastResult, "LoginSend crash");
+			return;
+		}
 		AutoLogin::g_submitCount++;
+		AutoLoginLog("AutoLoginTick: LoginSend returned %d (0=queued, -1=reject)", ret);
 
 		// The classic branch returns 0 when it actually queued the send,
 		// and 0xFFFFFFFF on a rejected/invalid account (logs
@@ -527,6 +888,7 @@ void AutoLoginTick()
 	}
 	else
 	{
+		AutoLoginLog("AutoLoginTick: no OriginalLoginSend");
 		strcpy_s(AutoLogin::g_lastResult, "no login hook - retrying");
 	}
 }

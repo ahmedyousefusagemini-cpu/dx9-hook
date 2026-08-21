@@ -71,12 +71,21 @@ void RenderImGuiInterface()
 	
 	ImGui::Spacing();
 	
-	if (GetAutoLoginEnabled())
+	// Always show auto-login status, even when disabled, so the user can
+	// diagnose "no login sequence" without checking a log file.
 	{
-		ImGui::Text("Auto login: %s | hooks: %s | submits: %lu", 
-			GetAutoLoginStateString(),
-			GetAutoLoginHooksInstalled() ? "ok" : "missing",
-			GetAutoLoginSubmitCount());
+		const char* st = GetAutoLoginStateString();
+		bool en = GetAutoLoginEnabled();
+		bool hk = GetAutoLoginHooksInstalled();
+		ImVec4 col = en ? ImVec4(0.4f,1.0f,0.4f,1) : ImVec4(1.0f,0.6f,0.4f,1);
+		ImGui::TextColored(col, "Auto login: %s | hooks: %s | submits: %lu%s",
+			st ? st : "(null)",
+			hk ? "ok" : "missing",
+			GetAutoLoginSubmitCount(),
+			en ? "" : " (disabled)");
+		if (!en) {
+			ImGui::TextDisabled("Enable: auto_login.ini [accounts] enabled=1 -> [account_0] account/password");
+		}
 		ImGui::Separator();
 	}
 	

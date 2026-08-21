@@ -1,9 +1,24 @@
 #include <windows.h>
+#include <cstdio>
+#include <cstdarg>
 #include "hooks/common.h"
 #include "MinHook.h"
 
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "libMinHook.x86.lib")
+
+extern void ApplyAutoLoginClientState();
+
+static void HookLog(const char* fmt, ...)
+{
+	char exePath[MAX_PATH]={0};
+	if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) return;
+	char* s=strrchr(exePath,'\\'); if(s) *(s+1)=0;
+	char logPath[MAX_PATH]; _snprintf_s(logPath,_TRUNCATE,"%shook_init.log",exePath);
+	FILE* f=nullptr; if(fopen_s(&f,logPath,"a")!=0||!f) return;
+	va_list ap; va_start(ap,fmt); vfprintf(f,fmt,ap); va_end(ap);
+	fprintf(f,"\n"); fclose(f);
+}
 
 extern GameWindowInfo g_gameWindow;
 extern EndSceneFunc g_originalEndSceneFunction;
@@ -60,13 +75,51 @@ void HookInitializationThread()
 	}
 	
 	uintptr_t vmtBaseAddress = FindMemoryPattern(direct3D9ModuleBaseAddress, moduleSize, vmtPattern);
+	uintptr_t* virtualMethodTable = nullptr;
 
-	if (!vmtBaseAddress) 
+	if (!vmtBaseAddress)
 	{
-		return;
+		HookLog("VMT pattern not found in d3d9.dll (base %p size 0x%zx) - trying dummy device fallback", (void*)direct3D9ModuleBaseAddress, moduleSize);
+		// Fallback: create a dummy D3D9 device to extract the VMT directly.
+		// This works even when the byte pattern changes across Windows builds.
+		typedef IDirect3D9* (WINAPI* D3DCreate9Fn)(UINT);
+		HMODULE hD3D = GetModuleHandleA("d3d9.dll");
+		if (hD3D) {
+			D3DCreate9Fn pCreate = (D3DCreate9Fn)GetProcAddress(hD3D, "Direct3DCreate9");
+			if (pCreate) {
+				IDirect3D9* d3d = pCreate(D3D_SDK_VERSION);
+				if (d3d) {
+					// Need a window for CreateDevice - use a hidden static.
+					WNDCLASSA wc={0}; wc.lpfnWndProc=DefWindowProcA; wc.hInstance=GetModuleHandleA(NULL); wc.lpszClassName="__dx9hook_dummy__";
+					RegisterClassA(&wc);
+					HWND dummyWnd = CreateWindowA("__dx9hook_dummy__", "", WS_OVERLAPPEDWINDOW, 0,0, 64,64, NULL,NULL, wc.hInstance, NULL);
+					if (dummyWnd) {
+						D3DPRESENT_PARAMETERS pp={0};
+						pp.Windowed=TRUE; pp.SwapEffect=D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow=dummyWnd; pp.BackBufferFormat=D3DFMT_UNKNOWN;
+						IDirect3DDevice9* dev=nullptr;
+						HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, dummyWnd, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &dev);
+						if (SUCCEEDED(hr) && dev) {
+							virtualMethodTable = *(uintptr_t***)dev;
+							HookLog("Fallback dummy device VMT %p", virtualMethodTable);
+							dev->Release();
+						} else {
+							HookLog("Fallback CreateDevice failed hr=0x%08x", hr);
+						}
+						DestroyWindow(dummyWnd);
+					}
+					UnregisterClassA("__dx9hook_dummy__", wc.hInstance);
+					d3d->Release();
+				}
+			}
+		}
+		if (!virtualMethodTable) {
+			HookLog("Fallback also failed - no hooks installed");
+			return;
+		}
+	} else {
+		virtualMethodTable = *reinterpret_cast<uintptr_t**>(vmtBaseAddress + 2);
+		HookLog("VMT pattern found at %p VMT %p", (void*)vmtBaseAddress, virtualMethodTable);
 	}
-	
-	uintptr_t* virtualMethodTable = *reinterpret_cast<uintptr_t**>(vmtBaseAddress + 2);
 	EndSceneFunc originalEndSceneFunc = reinterpret_cast<EndSceneFunc>(virtualMethodTable[42]);
 	ResetFunc originalResetFunc = reinterpret_cast<ResetFunc>(virtualMethodTable[16]);
 
@@ -75,14 +128,19 @@ void HookInitializationThread()
 	g_originalResetAddress = (LPVOID)originalResetFunc;
 
 
-	MH_Initialize();
-	MH_CreateHook(g_originalEndSceneAddress, (LPVOID)HookedEndScene, (LPVOID*)&g_originalEndSceneFunction);
-	MH_CreateHook(g_originalResetAddress, (LPVOID)HookedReset, (LPVOID*)&g_originalResetFunction);
+	MH_STATUS sh = MH_Initialize();
+	if (sh!=MH_OK && sh!=MH_ERROR_ALREADY_INITIALIZED) HookLog("MH_Initialize failed %d", sh);
+	sh = MH_CreateHook(g_originalEndSceneAddress, (LPVOID)HookedEndScene, (LPVOID*)&g_originalEndSceneFunction);
+	HookLog("CreateHook EndScene %p -> %d", g_originalEndSceneAddress, sh);
+	sh = MH_CreateHook(g_originalResetAddress, (LPVOID)HookedReset, (LPVOID*)&g_originalResetFunction);
+	HookLog("CreateHook Reset %p -> %d", g_originalResetAddress, sh);
 	
 	// Input hooks are installed from HookedEndScene once the D3D device is
 	// known (InstallInputHooksFromDevice), so no window title search needed.
-	MH_EnableHook(g_originalEndSceneAddress);
-	MH_EnableHook(g_originalResetAddress);
+	sh = MH_EnableHook(g_originalEndSceneAddress);
+	HookLog("EnableHook EndScene %d", sh);
+	sh = MH_EnableHook(g_originalResetAddress);
+	HookLog("EnableHook Reset %d", sh);
 	
 	while (!g_gameWindow.direct3DDevice) 
 	{
@@ -96,7 +154,11 @@ void HookInitializationThread()
 
 	while (true) 
 	{
-		Sleep(16);  
+		Sleep(16);
+		// Fallback tick: ensures auto-login still progresses even if EndScene
+		// hook hasn't fired yet (device not created) or the overlay is closed.
+		// ApplyAutoLoginClientState is cheap and safe to call from any thread.
+		__try { ApplyAutoLoginClientState(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
 		if (GetAsyncKeyState(VK_INSERT) & 1) 
 		{
