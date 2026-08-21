@@ -45,10 +45,20 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 
 static BOOL CALLBACK SubclassEnumChildren(HWND hwnd, LPARAM lParam)
 {
-	if (!hwnd || !IsWindow(hwnd) || g_subclassedWindows.find(hwnd) != g_subclassedWindows.end())
+	if (!hwnd || !IsWindow(hwnd))
+		return TRUE;
+	// Never touch the two windows with dedicated hooks: they already run
+	// HookedWindowProcedure - re-subclassing would store this very function
+	// as the "original" and recurse into a stack overflow on the first
+	// message (instant crash).
+	if (hwnd == g_gameWindow.gameWindowHandle || hwnd == g_gameWindow.parentWindowHandle)
+		return TRUE;
+	if (g_subclassedWindows.find(hwnd) != g_subclassedWindows.end())
+		return TRUE;
+	if ((WNDPROC)GetWindowLongPtrA(hwnd, GWLP_WNDPROC) == HookedWindowProcedure)
 		return TRUE;
 	WNDPROC original = (WNDPROC)SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)HookedWindowProcedure);
-	if (original)
+	if (original && original != HookedWindowProcedure)
 		g_subclassedWindows[hwnd] = original;
 	return TRUE;
 }
@@ -78,8 +88,12 @@ static BOOL CALLBACK SubclassEnumProc(HWND hwnd, LPARAM lParam)
 // requests capture.
 void SubclassAllProcessWindows()
 {
-	if (!g_gameWindow.gameWindowHandle)
+	// Reentrancy guard: SetWindowLongPtrA can dispatch messages synchronously;
+	// a nested pump reaching EndScene must not re-run the enumeration.
+	static bool inProgress = false;
+	if (inProgress || !g_gameWindow.gameWindowHandle)
 		return;
+	inProgress = true;
 
 	// Drop entries for destroyed windows: the OS reuses HWND values, so a
 	// stale entry would both suppress re-subclassing of the new window and
@@ -93,6 +107,7 @@ void SubclassAllProcessWindows()
 	}
 
 	EnumWindows(SubclassEnumProc, 0);
+	inProgress = false;
 }
 
 // Hooks the exact window the D3D9 device renders into (plus its root
