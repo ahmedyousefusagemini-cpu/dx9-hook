@@ -421,6 +421,9 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 	{
 		ImGuiIO& io = ImGui::GetIO();
 
+		bool isExtraWindow = (windowHandle != g_gameWindow.gameWindowHandle &&
+		                      windowHandle != g_gameWindow.parentWindowHandle);
+
 		// Mouse messages from extra windows (the MFC login dialog) carry
 		// coordinates in THEIR client space; ImGui positions are relative to
 		// the render window, so remap before ImGui sees the message.
@@ -452,7 +455,20 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 
 		ImGui_ImplWin32_WndProcHandler(windowHandle, message, imMsgWParam, imMsgLParam);
 
-		if (io.WantCaptureMouse || io.WantCaptureKeyboard) 
+		// CRITICAL: extra windows are the MFC login dialog and its Button/Edit
+		// controls. If we swallow their clicks when ImGui wants capture, the
+		// Login button becomes dead (the bug reported). The dialog HWNDs sit
+		// on top of the D3D render target that ImGui draws into, so a click
+		// on the dialog should always go to the game, not be blocked.
+		// Only the render/root windows may be blocked when ImGui is hovered.
+		if (isExtraWindow)
+		{
+			// Still let ImGui see the mouse pos (handled above) but never
+			// block the game's own dialog input. This keeps the MFC Login
+			// button and its Edit controls responsive even while the overlay
+			// is open (overlay is behind the dialog anyway).
+		}
+		else if (io.WantCaptureMouse || io.WantCaptureKeyboard) 
 		{
 			switch (message) {
 			case WM_LBUTTONDOWN:      
