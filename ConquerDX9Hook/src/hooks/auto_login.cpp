@@ -151,6 +151,19 @@ namespace AutoLogin
 	const uintptr_t DLG_PASSWORD_B      = 0x13980;
 	const uintptr_t SSO_LEN_OFFSET      = 0x14;       // SSO: len > 0xF -> heap ptr at +0
 
+	// Server-selection fields the login button handler reads (dlglogin.cpp):
+	//   dialog+0x135f8 = active group index, dialog+0x135fc = active server.
+	//   -1 = none selected yet (boot).  FUN_00883ec4 selects the first group
+	//   from the loaded server list and stores the selection in the client.
+	const uintptr_t DLG_ACTIVE_GROUP    = 0x135f8;
+	const uintptr_t DLG_ACTIVE_SERVER   = 0x135fc;
+
+	// FUN_00883ec4 - CDlgLogin server-selection (dlglogin.cpp): picks the
+	// first group from m_vecGroup, sets dialog+0x135f8/+0x135fc and the client
+	// global.  Called by the dialog init (FUN_0088f258) and by the server
+	// buttons.  __fastcall(ECX = dialog).
+	const uintptr_t SERVER_SELECT_HANDLER = 0x00883EC4;
+
 	// ATL::CSimpleStringT<char,1>::operator_char_const_ - delay-loaded import
 	// whose IAT slot the game's own login-button handler calls at 0x008a903f.
 	// Slot is resolved to the real function address by the delay-load thunk on
@@ -924,6 +937,30 @@ void AutoLoginTick()
 
 	AutoLogin::g_lastAttemptTick = now;
 	AutoLogin::g_retryCount++;
+
+	// Ensure a server is selected in the dialog.  The game's OWN login button
+	// handler (FUN_008a8fba) reads the group/server indices at dialog+0x135f8/
+	// +0x135fc and the server name CString at +0x13628, then resolves the
+	// account-server IP/port via GetServerInfo (FUN_008827c2).  If no server
+	// is selected (e.g. at boot before any server button click), GetServerInfo
+	// resolves nothing, the account socket never connects, and the packet goes
+	// into a dead socket — the "nothing happens" symptom.
+	//
+	// The game's own server-selection function (FUN_00883ec4) picks the first
+	// group from the loaded server list (m_vecGroup), sets the dialog fields,
+	// and stores the selection into the client global.  We call it here when
+	// the dialog has no server selected yet (group == -1).
+	__try {
+		if (*(int*)(dlg + AutoLogin::DLG_ACTIVE_GROUP) == -1) {
+			typedef void (__fastcall* SelectServerFn)(void* dialog);
+			((SelectServerFn)AutoLogin::SERVER_SELECT_HANDLER)(dlg);
+			AutoLoginLog("AutoLoginTick: selected server group=%d server=%d",
+				*(int*)(dlg + AutoLogin::DLG_ACTIVE_GROUP), *(int*)(dlg + AutoLogin::DLG_ACTIVE_SERVER));
+		}
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		AutoLoginLog("AutoLoginTick: server selection exception");
+		// Non-fatal — the button handler may still work with defaults.
+	}
 
 	// Call the game's OWN Login button handler (FUN_008a8fba) — the same
 	// function the dispatcher calls at 0x00a5b8fe when the user clicks the
