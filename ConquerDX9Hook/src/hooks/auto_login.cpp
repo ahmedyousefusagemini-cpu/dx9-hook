@@ -28,10 +28,11 @@
 //
 // Reverse-engineered chain (verified in Ghidra, client 7937, base 0x400000):
 //
-//   1. The account-login dialog lives at *(void**)0x01A53980 + 0x39B948
-//      (client object at DAT_01a53980; the dispatcher loads that base and the
-//      dialog offset in FUN_00a525b4 @0x00a525ec, the Login-button call site
-//      @0x00a5b8dd-0x00a5b8fe). The dialog's HWND is at dialog+0x20.
+//   1. The account-login dialog lives at *(void**)0x01A535A0 + 0x39B948
+//      (the CBkWnd main window object, ~37MB, runtime-set in InitInstance;
+//      the dispatcher FUN_00a525b4 saves that this at 0x00a525ec and the
+//      Login-button call site at 0x00a5b8dd-0x00a5b8fe reads dialog+0x39B948).
+//      The dialog's HWND is at dialog+0x20.
 //
 //   2. The game itself only invokes the Login handler while the dialog is
 //      visible: at 0x00a5b896/0x00a5b8eb it calls FUN_00bfee7b(dialog,1) =
@@ -126,7 +127,7 @@ namespace AutoLogin
 	const uintptr_t BACK_TO_LOGIN_ADDRESS = 0x00C3AC82;
 
 	// Client object + login dialog (see header comment).
-	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A53980; // DAT_01a53980 (runtime-set)
+	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A535A0; // CBkWnd main window (runtime-set, ~37MB)
 	const uintptr_t LOGIN_DIALOG_OFFSET = 0x39B948;   // dialog = client + 0x39B948
 	const uintptr_t DLG_HWND_OFFSET     = 0x20;       // dialog+0x20 = HWND
 	const uintptr_t DLG_PAIR_FLAG       = 0x13620;    // byte != 0 -> pair B (poker-only)
@@ -251,9 +252,15 @@ namespace AutoLogin
 		}
 		if (!client)
 			return nullptr;
-		if (IsBadReadPtr(client, LOGIN_DIALOG_OFFSET + 0x14000))
+		void* dialog = (unsigned char*)client + LOGIN_DIALOG_OFFSET;
+		// Only probe the dialog's HWND field - the game's own visibility gate
+		// (FUN_00bfee7b) reads [dialog+0x20] directly without any range probe.
+		// A large IsBadReadPtr(client, LOGIN_DIALOG_OFFSET + 0x14000) would
+		// fail on the client's large virtual-memory map (uncommitted pages),
+		// even though the dialog itself is valid.  Match the game's approach.
+		if (IsBadReadPtr(dialog, DLG_HWND_OFFSET + sizeof(HWND)))
 			return nullptr;
-		return (unsigned char*)client + LOGIN_DIALOG_OFFSET;
+		return dialog;
 	}
 
 	// Fallback: enumerate visible HWNDs owned by this process and try to
@@ -666,24 +673,32 @@ bool  InstallHooks()
 
 	st = MH_CreateHook((LPVOID)AutoLogin::LOGIN_SEND_ADDRESS, (LPVOID)HookedLoginSend,
 		(LPVOID*)&AutoLogin::g_OriginalLoginSend);
-	if (st != MH_OK) {
+	bool alreadyHooked = (st == MH_ERROR_ALREADY_CREATED);
+	if (alreadyHooked) {
+		// The DLL is loaded twice (proxy + another module), so a sibling copy
+		// already installed this hook. That is fine - the sibling's trampoline
+		// forwards to the game just the same. We cannot get the original pointer
+		// (no MH_GetHook in this MinHook version), so leave g_OriginalLoginSend
+		// null - the submit code already guards against that.
+		AutoLoginLog("InstallHooks: LOGIN_SEND already hooked by another copy");
+	} else if (st != MH_OK) {
 		AutoLoginLog("InstallHooks: CreateHook LOGIN_SEND failed %d addr=%p", st, (void*)AutoLogin::LOGIN_SEND_ADDRESS);
 		return false;
 	}
 	st = MH_EnableHook((LPVOID)AutoLogin::LOGIN_SEND_ADDRESS);
-	if (st != MH_OK) {
+	if (st != MH_OK && !(alreadyHooked && st == MH_ERROR_ENABLED)) {
 		AutoLoginLog("InstallHooks: EnableHook LOGIN_SEND failed %d", st);
 		return false;
 	}
 
 	st = MH_CreateHook((LPVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS, (LPVOID)HookedBackToLogin,
 		(LPVOID*)&AutoLogin::g_OriginalBackToLogin);
-	if (st != MH_OK) {
+	if (st != MH_OK && st != MH_ERROR_ALREADY_CREATED) {
 		strcpy_s(AutoLogin::g_lastResult, "backtologin hook omitted");
 		AutoLoginLog("InstallHooks: CreateHook BACK_TO_LOGIN failed %d (non-fatal)", st);
 	} else {
 		st = MH_EnableHook((LPVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS);
-		if (st != MH_OK) AutoLoginLog("InstallHooks: EnableHook BACK_TO_LOGIN failed %d", st);
+		if (st != MH_OK && st != MH_ERROR_ENABLED) AutoLoginLog("InstallHooks: EnableHook BACK_TO_LOGIN failed %d", st);
 	}
 
 	AutoLogin::g_hooks = true;
