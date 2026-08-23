@@ -128,6 +128,15 @@ namespace AutoLogin
 	// and 0x00a267da).  PUSH 0x16CE374; CALL FUN_0043e5d1
 	const uintptr_t BACK_TO_LOGIN_ADDRESS = 0x00C3AC82;
 
+	// FUN_008a8fba - the Login button handler (dlglogin.cpp). Called by the
+	// dispatcher at 0x00a5b8fe with ECX = dialog = mainwindow + 0x39B948.
+	// This is the game's OWN "click Login" path — it resolves the server via
+	// GetServerInfo (FUN_008827c2), connects the account-server socket, and
+	// then calls FUN_0101bfe7. Calling it directly (instead of the raw send)
+	// is the only way to start a real login sequence that the server responds
+	// to.
+	const uintptr_t LOGIN_BUTTON_HANDLER = 0x008A8FBA;
+
 	// Client object + login dialog (see header comment).
 	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A594F0; // CMyShellDlg main window (runtime-set, ~37MB)
 	const uintptr_t LOGIN_DIALOG_OFFSET = 0x39B948;   // dialog = client + 0x39B948
@@ -916,50 +925,28 @@ void AutoLoginTick()
 	AutoLogin::g_lastAttemptTick = now;
 	AutoLogin::g_retryCount++;
 
-	if (AutoLogin::g_OriginalLoginSend)
-	{
-		int ret = 0;
-		__try {
-			// Game-identical call shapes: account as c_str, password as the dialog's
-			// wrapper object, server name as char*, mode 0 = classic CMsgAccountEx.
-			ret = AutoLogin::g_OriginalLoginSend(
-				AutoLogin::SsoCStr(accountObj),
-				pswObj,
-				serverName,
-				0,
-				port);
-		} __except(EXCEPTION_EXECUTE_HANDLER) {
-			AutoLoginLog("AutoLoginTick: LoginSend exception");
-			strcpy_s(AutoLogin::g_lastResult, "LoginSend crash");
-			return;
-		}
+	// Call the game's OWN Login button handler (FUN_008a8fba) — the same
+	// function the dispatcher calls at 0x00a5b8fe when the user clicks the
+	// Login button.  This does GetServerInfo (resolves the selected realm's
+	// IP/port, connects the account-server socket), then calls FUN_0101bfe7
+	// to send the packet.  Calling FUN_0101bfe7 directly (the old approach)
+	// skipped the socket setup, so the packet queued into a dead socket and
+	// the server never responded.
+	__try {
+		typedef void (__fastcall* LoginButtonFn)(void* dialog);
+		LoginButtonFn loginButton = (LoginButtonFn)AutoLogin::LOGIN_BUTTON_HANDLER;
+		loginButton(dlg);
 		AutoLogin::g_submitCount++;
-		AutoLoginLog("AutoLoginTick: LoginSend returned %d (0=queued, -1=reject)", ret);
-
-		// The classic branch returns 0 when it actually queued the send,
-		// and 0xFFFFFFFF on a rejected/invalid account (logs
-		// "invalid Account or Psw") - stop retrying in that case so a
-		// wrong password doesn't spam the server.
-		if (ret == 0)
-		{
-			AutoLogin::g_attemptDone = true;
-			AutoLogin::g_autoSubmitInFlight = true;
-			strcpy_s(AutoLogin::g_lastResult, "auto-login queued (file creds)");
-		}
-		else if (AutoLogin::g_retryCount >= AutoLogin::g_maxRetries)
-		{
-			AutoLogin::g_attemptDone = true;
-			sprintf_s(AutoLogin::g_lastResult, "login failed - max %d retries hit", AutoLogin::g_maxRetries);
-		}
-		else
-		{
-			sprintf_s(AutoLogin::g_lastResult, "login rejected - retry %d/%d", AutoLogin::g_retryCount, AutoLogin::g_maxRetries);
-		}
-	}
-	else
-	{
-		AutoLoginLog("AutoLoginTick: no OriginalLoginSend");
-		strcpy_s(AutoLogin::g_lastResult, "no login hook - retrying");
+		AutoLogin::g_attemptDone = true;
+		AutoLogin::g_autoSubmitInFlight = true;
+		strcpy_s(AutoLogin::g_lastResult, "auto-login queued (button handler)");
+		AutoLoginLog("AutoLoginTick: login button handler completed");
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		AutoLoginLog("AutoLoginTick: login button handler exception");
+		strcpy_s(AutoLogin::g_lastResult, "button handler crash");
+		// Don't set g_attemptDone — a retry may succeed after the game
+		// finishes whatever state caused the crash.
+		return;
 	}
 }
 
