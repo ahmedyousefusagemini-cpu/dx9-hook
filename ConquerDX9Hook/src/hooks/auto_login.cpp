@@ -173,6 +173,11 @@ namespace AutoLogin
 	// first use, so calling through the IAT pointer replicates the game exactly.
 	const uintptr_t CSTRING_OPERATOR_IAT = 0x014F4E38;
 
+	// CStringT::operator=(const char*) - ATL CString assignment, used by the
+	// dialog init (FUN_0088f258 @ 0x0088f38b) to set the server name CString
+	// at dialog+0x13628.  __thiscall(ECX = this, stack = text).
+	const uintptr_t CSTRING_ASSIGN_IAT = 0x014F5020;
+
 	// FUN_00ea1692 - CGameInputStr::SetPassword (encryptdata.cpp):
 	//   __thiscall(ECX = wrapper, stack = plaintext), RET 4. Writes len@+0x104,
 	//   XOR-encrypts the text into +0x108 (key = the wrapper's own +0..0xFF
@@ -263,6 +268,26 @@ namespace AutoLogin
 			return s ? s : "";
 		} __except(EXCEPTION_EXECUTE_HANDLER) {
 			return "";
+		}
+	}
+
+	// Sets an ATL CString field using the game's own CStringT::operator=
+	// (IAT slot CSTRING_ASSIGN_IAT - the same assignment the dialog init uses
+	// at 0x0088f38b).  Needed for dialog+0x13628 (the server name): GetServerInfo
+	// resolves the account server from that CString, and a raw SsoSet would
+	// corrupt the CStringData.
+	static void CStringAssign(void* field, const char* text)
+	{
+		__try {
+			typedef void* (__fastcall* CStringAssignFn)(void* obj, void* edxDummy, const char* text);
+			const void* iat = (const void*)CSTRING_ASSIGN_IAT;
+			if (IsBadReadPtr(iat, sizeof(void*)))
+				return;
+			CStringAssignFn fn = *(CStringAssignFn*)iat;
+			if (!fn)
+				return;
+			fn(field, nullptr, text);
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
 		}
 	}
 
@@ -963,6 +988,15 @@ void AutoLoginTick()
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
 		AutoLoginLog("AutoLoginTick: server selection exception");
 		// Non-fatal — the button handler may still work with defaults.
+	}
+
+	// Set the server-name CString in the dialog (dialog+0x13628) so the
+	// game's GetServerInfo can resolve the account server.  The dialog init
+	// writes it via CStringT::operator= at 0x0088f38b; a raw SsoSet would
+	// corrupt the CStringData.  Use the ini server value (DuneWanderer).
+	if (AutoLogin::g_server[0]) {
+		AutoLogin::CStringAssign(dlg + AutoLogin::DLG_SERVER_NAME, AutoLogin::g_server);
+		AutoLoginLog("AutoLoginTick: set dialog server name to '%s'", AutoLogin::g_server);
 	}
 
 	// Submit the login on the GAME'S OWN MESSAGE THREAD.  The game's Login
