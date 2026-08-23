@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "imgui.h"
 
 // Buff 250 (Celestial Dance) status tracking, provided by buffs.cpp. These run
@@ -65,6 +66,22 @@ extern void ClearAutoHuntTarget();
 // excluded), and a stale mgr+4 left behind after a kill is cleared via the
 // brain's own finder.
 //
+// Cancel Attack Animation v2 (2026-08-23, Ghidra-verified): v1 (boost + 50 ms
+// loot ticks) made the SERVER see ~20 attacks/sec and kicked the client.
+// Full static map of the attack chain:
+//   hunt brain FUN_00f54df8 (1 s tick gate DAT_01a5dde4)
+//     -> attack order FUN_0112112c
+//     -> pre-send validator FUN_010f90c2: target alive/in-range AND the
+//        vtable+0xcc "action in progress" virtual clear
+//     -> CMsgAction create FUN_00f36ffd, send FUN_00f67675 -> FUN_010cf416
+//   action length: interval virtual at vtable+0x80 (CRole vtable @
+//   0x01730794; FUN_010b0a9a -> master computation FUN_00de93e2, whose
+//   final uncapped step is exactly the role+0x44/+0x48 divisor).
+// v2 splits the two clocks: the +0x44 boost still collapses the LOCAL
+// interval (so the busy gate never blocks an order) while a PACER owns the
+// network cadence - the brain tick is forced once per g_attackIntervalMs
+// (+ small jitter), so attack packets leave at exactly the chosen rate and
+// nothing (loot slider included) can multiply them anymore.
 // Two write paths feed the interval math every frame (same assert pattern as
 // the VIP spoof):  role+0x48=1 & role+0x44=(percent-100)*100  (the uncapped
 // final divisor)  and  role+0xc0=percent-100  (the nSpeedPercent path in
@@ -99,6 +116,12 @@ namespace Speed
 	const int AUTO_MIN_SPEED_PERCENT = 100;   // auto move-speed slider min
 	const int AUTO_MAX_SPEED_PERCENT = 3000;  // auto move-speed slider max
 
+	// Attack pacer (network cadence) - see ApplyClientSideState. This sets the
+	// REAL rate at which attack CMsgActions leave the client.
+	const int ATTACK_MIN_INTERVAL_MS     = 150;
+	const int ATTACK_MAX_INTERVAL_MS     = 2000;
+	const int ATTACK_DEFAULT_INTERVAL_MS = 650;   // ~2x stock cadence, safe start
+
 	// Attack-only boost (animation cancel). The attack interval is
 	// ceil(base * 100 / (100 + boost/100)); boost = 3000 collapses a ~1300 ms
 	// attack to ~44 ms (~23 attacks/sec - same cadence the server already
@@ -126,6 +149,12 @@ namespace Speed
 	bool g_attackSpeedEnabled = false;
 	int  g_attackSpeedPercent = ATTACK_DEFAULT_SPEED_PERCENT;
 	unsigned long g_lastAttackStateCheck = 0;  // rate limit for the mgr+4 cleanup
+
+	// Attack pacer state (owns the network attack cadence).
+	int           g_attackIntervalMs    = ATTACK_DEFAULT_INTERVAL_MS;
+	unsigned long g_lastAttackTickReset = 0;  // GetTickCount() of last paced tick reset
+	unsigned long g_lastAttackDeltaMs   = 0;  // observed delta between paced resets
+	unsigned int  g_attackOrdersSent    = 0;  // paced resets issued this session
 
 	// Always-on buff-250 tracker (updated every frame even with the menu closed).
 	bool         g_buff250Active = false;      // bit 250 set right now
@@ -404,11 +433,19 @@ namespace Speed
 	// Runs every frame (even with the menu closed), like auto-hunt's pass.
 	void ApplyClientSideState()
 	{
-		if (g_fastLootTick)
+		// Combat signal for the attack pacer (same predicate as the boost
+		// decision below): hunt active + the brain holds an in-range target.
+		bool combatPace = g_attackSpeedEnabled && IsAutoHuntHunting() && IsAutoHuntInCombat();
+
+		if (g_fastLootTick && !combatPace)
 		{
 			// Throttled: resetting the gate every frame made the brain spam loot
 			// orders at frame rate and the server disconnected us. Only reset it
 			// once per user-chosen interval instead.
+			//
+			// While the attack pacer owns the tick (combatPace) this MUST NOT
+			// run: stacking the loot slider on top of the pacer is exactly what
+			// drove attack packets at the loot rate and got v1 disconnected.
 			unsigned long now = GetTickCount();
 			if (now - g_lastFastLootReset >= (unsigned long)g_fastLootIntervalMs)
 			{
@@ -422,9 +459,50 @@ namespace Speed
 				}
 			}
 		}
-		else
+		else if (!combatPace)
 		{
 			g_lastFastLootReset = 0;  // re-arm: next enable ticks immediately
+		}
+
+		// ------------------------------------------------------------------
+		// Attack pacer (2026-08-23 redesign). WHY v1 GOT KICKED: every forced
+		// brain tick re-sends an attack order and the client turns each order
+		// into a CMsgAction packet (create FUN_00f36ffd -> send FUN_00f67675 ->
+		// vtable[5] FUN_010cf416) as soon as its busy gate clears. The boost
+		// collapsed the LOCAL action interval (~1300 ms -> ~217 ms at 500%),
+		// so the busy gate cleared instantly and the 50 ms loot slider set the
+		// true packet rate: ~20 attacks/sec -> server kick.
+		//
+		// The fix: the boost still collapses the LOCAL interval so the busy
+		// gate never blocks an order, but the NETWORK cadence is owned here:
+		// the brain tick is forced exactly once per g_attackIntervalMs (+ a
+		// little jitter), so attack packets go out at that rate and nothing
+		// else can multiply them. Tune the slider down until the server
+		// kicks, then back off.
+		// ------------------------------------------------------------------
+		if (combatPace)
+		{
+			unsigned long now = GetTickCount();
+			unsigned long interval = (unsigned long)g_attackIntervalMs;
+			if (interval < (unsigned long)ATTACK_MIN_INTERVAL_MS)
+				interval = ATTACK_MIN_INTERVAL_MS;
+			// Small jitter (~-3% .. +3%) so consecutive send deltas are not
+			// perfectly constant (metronome timing is a bot fingerprint).
+			interval -= interval / 32;
+			interval += rand() % ((unsigned int)(interval / 16) + 1);
+			if (now - g_lastAttackTickReset >= interval &&
+				!IsBadWritePtr((void*)HUNT_BRAIN_TICK_GLOBAL, sizeof(unsigned long)))
+			{
+				*(unsigned long*)HUNT_BRAIN_TICK_GLOBAL = 0;
+				g_lastAttackDeltaMs = (g_lastAttackTickReset != 0) ? now - g_lastAttackTickReset : 0;
+				g_lastAttackTickReset = now;
+				g_attackOrdersSent++;
+			}
+		}
+		else
+		{
+			// Re-arm: the first combat tick after idle fires immediately.
+			g_lastAttackTickReset = 0;
 		}
 
 		// Always-on buff-250 (Celestial Dance) tracker - updated every frame.
@@ -616,10 +694,22 @@ void RenderSpeedInterface()
 
 	if (Speed::g_attackSpeedEnabled)
 	{
-		ImGui::SliderInt("Attack speed %", &Speed::g_attackSpeedPercent,
+		ImGui::SliderInt("Attack anim collapse %", &Speed::g_attackSpeedPercent,
 			Speed::ATTACK_MIN_SPEED_PERCENT, Speed::ATTACK_MAX_SPEED_PERCENT);
-		ImGui::TextDisabled("While auto-hunt fights, the attack interval drops to ~217 ms (500%).");
-		ImGui::TextDisabled("Walking keeps the normal slider speed. Lower it if the server disconnects you.");
+		ImGui::TextDisabled("Local-only: clears the client busy gate so an order is never blocked.");
+
+		ImGui::SliderInt("Attack interval (ms)", &Speed::g_attackIntervalMs,
+			Speed::ATTACK_MIN_INTERVAL_MS, Speed::ATTACK_MAX_INTERVAL_MS);
+		int iv = Speed::g_attackIntervalMs;
+		if (iv < Speed::ATTACK_MIN_INTERVAL_MS) iv = Speed::ATTACK_MIN_INTERVAL_MS;
+		ImGui::Text("Network cadence: ~%.1f attacks/sec", 1000.0f / (float)iv);
+		if (iv < 400)
+			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "DANGER: very likely to be kicked. Raise it.");
+		else if (iv < 650)
+			ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Aggressive: lower gradually, watch for disconnects.");
+		else
+			ImGui::TextDisabled("Conservative zone. The server's own attack-speed check sets the floor.");
+		ImGui::TextDisabled("The ms slider sets the REAL packet rate (pacer). Walking/looting keep the loot slider.");
 		ImGui::Text("In combat: %s", IsAutoHuntInCombat() ? "YES" : "no");
 	}
 
@@ -644,6 +734,15 @@ void RenderSpeedInterface()
 		ImGui::Text("Attack cancel: combat=%s monsterNear=%s",
 			IsAutoHuntInCombat() ? "yes" : "no",
 			IsAutoHuntMonsterNear() ? "yes" : "no");
+		ImGui::Text("Pacer: interval=%d ms  last delta=%lu ms  orders sent=%u",
+			Speed::g_attackIntervalMs, Speed::g_lastAttackDeltaMs, Speed::g_attackOrdersSent);
+		if (Speed::g_myRoleAddress != 0 &&
+			!IsBadReadPtr((const void*)(Speed::g_myRoleAddress + 0x438), 8))
+		{
+			ImGui::Text("Role cmd=0x%X (0x2F = attack anim) state=%d",
+				(unsigned int)*(int*)(Speed::g_myRoleAddress + 0x438),
+				(int)*(int*)(Speed::g_myRoleAddress + 0x43C));
+		}
 		if (Speed::g_myRoleAddress != 0 &&
 			!IsBadReadPtr((const void*)Speed::g_myRoleAddress, 4) &&
 			!IsBadReadPtr((const void*)(Speed::g_myRoleAddress + Speed::ROLE_SPEED_DELTA_OFFSET), 4))
