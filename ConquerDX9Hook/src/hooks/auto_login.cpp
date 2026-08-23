@@ -50,6 +50,10 @@
 //                    (pair B), selected by the flag byte at dialog+0x13620.
 //                    SSO layout: inline data at +0..+0xF, length at +0x14;
 //                    length > 0xF means heap (pointer at +0).
+//                    NOTE: the flag only selects the pair in the POKER path
+//                    (mode 2).  The classic path (mode 0, what we submit) ALWAYS
+//                    uses pair A regardless of the flag - so we always fill and
+//                    submit pair A.
 //      - password  : wrapper object at dialog+0x13BD0 (A) / +0x13980 (B).
 //                    The send reads its length at +0x104 (0x0101c03e, fails
 //                    >= 0x81), a count at +0x100 and the ENCRYPTED text at
@@ -64,9 +68,14 @@
 //                    interprets the pointer as this object and reads
 //                    [ptr+0x104] (garbage >= 0x81 -> "invalid Account or Psw"
 //                    -> 0xFFFFFFFF). That was the original auto-login bug.
-//      - serverName: the dialog's own selected realm string at dialog+0x13628
-//                    (c_str of the SSO string; the game uses it verbatim as
-//                    arg3 in the non-poker path at 0x008a9039).
+//      - serverName: the dialog's own selected realm string at dialog+0x13628.
+//                    NOTE: this field is an ATL CSimpleStringT<char,1> (a
+//                    CString), NOT an SSO std::string - the game reads it via
+//                    its own operator_char_const_ (IAT slot 0x014F4E38, called
+//                    at 0x008a903f) and uses it verbatim as arg3 in the
+//                    non-poker path. Treating it with SsoCStr was the old bug
+//                    (CStringData* pointer garbage). We now call the game's
+//                    own imported method exactly like the button handler does.
 //      - port      : atoi(dialog+0x13BB8 SSO string), but only when the int
 //                    flag at dialog+0x13BC8 != 0, else 0 (0x008a91b2).
 //      - mode 0    = classic account/password (CMsgAccountEx).
@@ -95,6 +104,12 @@
 // (set by the wrapper ctor); if the server still rejects the auto-login while
 // a manual login with the same creds works, verify dynamically (compare
 // wrapper+0x100 after a manual typing vs. after the auto-fill) and mirror it.
+//
+// Ghidra-verified 2026-08: dialog+0x13628 is an ATL CSimpleStringT (CString),
+// not an SSO std::string - read it through the game's own operator_char_const_
+// (IAT slot 0x014F4E38) exactly like the login-button handler at 0x008a903f.
+// And the classic path (mode 0) always uses account/password pair A (+0x13B88/
+// +0x13BD0); the 0x13620 flag only selects the pair in the poker path (mode 2).
 // ============================================================================
 
 namespace AutoLogin
@@ -114,8 +129,8 @@ namespace AutoLogin
 	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A53980; // DAT_01a53980 (runtime-set)
 	const uintptr_t LOGIN_DIALOG_OFFSET = 0x39B948;   // dialog = client + 0x39B948
 	const uintptr_t DLG_HWND_OFFSET     = 0x20;       // dialog+0x20 = HWND
-	const uintptr_t DLG_PAIR_FLAG       = 0x13620;    // byte != 0 -> pair B
-	const uintptr_t DLG_SERVER_NAME     = 0x13628;    // SSO string (selected realm)
+	const uintptr_t DLG_PAIR_FLAG       = 0x13620;    // byte != 0 -> pair B (poker-only)
+	const uintptr_t DLG_SERVER_NAME     = 0x13628;    // ATL CSimpleStringT (CString, not SSO)
 	const uintptr_t DLG_PORT_STR        = 0x13BB8;    // SSO string (port text)
 	const uintptr_t DLG_PORT_FLAG       = 0x13BC8;    // int != 0 -> use port text
 	const uintptr_t DLG_ACCOUNT_A       = 0x13B88;    // SSO strings, 0x48 apart
@@ -123,6 +138,12 @@ namespace AutoLogin
 	const uintptr_t DLG_ACCOUNT_B       = 0x13938;
 	const uintptr_t DLG_PASSWORD_B      = 0x13980;
 	const uintptr_t SSO_LEN_OFFSET      = 0x14;       // SSO: len > 0xF -> heap ptr at +0
+
+	// ATL::CSimpleStringT<char,1>::operator_char_const_ - delay-loaded import
+	// whose IAT slot the game's own login-button handler calls at 0x008a903f.
+	// Slot is resolved to the real function address by the delay-load thunk on
+	// first use, so calling through the IAT pointer replicates the game exactly.
+	const uintptr_t CSTRING_OPERATOR_IAT = 0x014F4E38;
 
 	// FUN_00ea1692 - CGameInputStr::SetPassword (encryptdata.cpp):
 	//   __thiscall(ECX = wrapper, stack = plaintext), RET 4. Writes len@+0x104,
@@ -194,6 +215,27 @@ namespace AutoLogin
 		memcpy(p, text, n);
 		memset(p + n, 0, 0x10 - n);
 		*(unsigned long*)(p + SSO_LEN_OFFSET) = (unsigned long)n;
+	}
+
+	// Reads an ATL CSimpleStringT<char,1> (CString) field by calling the game's
+	// own imported operator_char_const_ (IAT slot CSTRING_OPERATOR_IAT) - the
+	// same call the login-button handler makes at 0x008a903f. Returns the c_str
+	// or "" (never null). Unlike SsoCStr this handles the CStringData* layout.
+	static const char* CStringCStr(void* field)
+	{
+		__try {
+			typedef const char* (__fastcall* OpCharConstFn)(void* obj, void* edxDummy);
+			const void* iat = (const void*)CSTRING_OPERATOR_IAT;
+			if (IsBadReadPtr(iat, sizeof(void*)))
+				return "";
+			OpCharConstFn fn = *(OpCharConstFn*)iat;
+			if (!fn)
+				return "";
+			const char* s = fn(field, nullptr);
+			return s ? s : "";
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			return "";
+		}
 	}
 
 	// The account-login dialog (null when the client object is not up yet).
@@ -777,25 +819,18 @@ void AutoLoginTick()
 		return;
 	}
 
-	// Fill the dialog's OWN credential fields - the exact inputs a manual
-	// typing + Login click would produce. Pair A/B is chosen by the same flag
-	// byte the button handler reads (0x008a91e7).
+	// Pair A/B selection: the game's button handler checks the flag byte at
+	// 0x13620 ONLY in the poker path (mode 2).  In the classic path (mode 0,
+	// which we always use here) the game always reads pair A (+0x13B88/0x13BD0)
+	// regardless of the flag.  Match that: always use pair A.
 	unsigned char* dlg = (unsigned char*)dialog;
-	unsigned char* accountObj;
-	unsigned char* pswObj;
-	if (*(unsigned char*)(dlg + AutoLogin::DLG_PAIR_FLAG) != 0)
-	{
-		accountObj = dlg + AutoLogin::DLG_ACCOUNT_B;
-		pswObj     = dlg + AutoLogin::DLG_PASSWORD_B;
-	}
-	else
-	{
-		accountObj = dlg + AutoLogin::DLG_ACCOUNT_A;
-		pswObj     = dlg + AutoLogin::DLG_PASSWORD_A;
-	}
+	unsigned char* accountObj = dlg + AutoLogin::DLG_ACCOUNT_A;
+	unsigned char* pswObj     = dlg + AutoLogin::DLG_PASSWORD_A;
 
+	// Fill the dialog's OWN credential fields - the exact inputs a manual
+	// typing + Login click would produce.
 	AutoLogin::SsoSet(accountObj, AutoLogin::g_account);
-	AutoLoginLog("AutoLoginTick: filled account '%s' into %p (pair %s)", AutoLogin::g_account, accountObj, (*(unsigned char*)(dlg + AutoLogin::DLG_PAIR_FLAG)!=0)?"B":"A");
+	AutoLoginLog("AutoLoginTick: filled account '%s' into %p (pair A)", AutoLogin::g_account, accountObj);
 
 	// Password: call the game's OWN CGameInputStr::SetPassword on the dialog's
 	// wrapper object. It writes len@+0x104, XOR-encrypts the text into +0x108
@@ -826,9 +861,10 @@ void AutoLoginTick()
 		AutoLoginLog("AutoLoginTick: empty password, skipping SetPassword");
 	}
 
-	// Realm: the dialog's own selected server name (the game passes exactly
-	// this string as arg3 in the non-poker path), ini server as fallback.
-	const char* serverName = AutoLogin::SsoCStr(dlg + AutoLogin::DLG_SERVER_NAME);
+	// Realm: the dialog's own selected server name - read with the game's own
+	// CString method (the field at +0x13628 is an ATL CSimpleStringT, NOT an
+	// SSO std::string). ini server as fallback.
+	const char* serverName = AutoLogin::CStringCStr(dlg + AutoLogin::DLG_SERVER_NAME);
 	if (!serverName || !serverName[0])
 		serverName = AutoLogin::g_server;
 
