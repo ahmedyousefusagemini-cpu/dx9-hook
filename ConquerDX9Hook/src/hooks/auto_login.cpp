@@ -28,10 +28,12 @@
 //
 // Reverse-engineered chain (verified in Ghidra, client 7937, base 0x400000):
 //
-//   1. The account-login dialog lives at *(void**)0x01A535A0 + 0x39B948
-//      (the CBkWnd main window object, ~37MB, runtime-set in InitInstance;
-//      the dispatcher FUN_00a525b4 saves that this at 0x00a525ec and the
-//      Login-button call site at 0x00a5b8dd-0x00a5b8fe reads dialog+0x39B948).
+//   1. The account-login dialog lives at *(void**)0x01A594F0 + 0x39B948
+//      (the CMyShellDlg main window object, ~37MB, runtime-set; the game's own
+//      message dispatcher FUN_0089ca75 reads it as `DAT_01a594f0 + 0x39b948`
+//      and gates it with FUN_00bfee7b - see 0x0089cf2f. The dispatcher
+//      FUN_00a525b4 saves the same this at 0x00a525ec and the Login-button
+//      call site at 0x00a5b8dd-0x00a5b8fe reads dialog+0x39B948).
 //      The dialog's HWND is at dialog+0x20.
 //
 //   2. The game itself only invokes the Login handler while the dialog is
@@ -127,7 +129,7 @@ namespace AutoLogin
 	const uintptr_t BACK_TO_LOGIN_ADDRESS = 0x00C3AC82;
 
 	// Client object + login dialog (see header comment).
-	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A535A0; // CBkWnd main window (runtime-set, ~37MB)
+	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A594F0; // CMyShellDlg main window (runtime-set, ~37MB)
 	const uintptr_t LOGIN_DIALOG_OFFSET = 0x39B948;   // dialog = client + 0x39B948
 	const uintptr_t DLG_HWND_OFFSET     = 0x20;       // dialog+0x20 = HWND
 	const uintptr_t DLG_PAIR_FLAG       = 0x13620;    // byte != 0 -> pair B (poker-only)
