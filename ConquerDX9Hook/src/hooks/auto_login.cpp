@@ -1003,33 +1003,34 @@ void AutoLoginTick()
 	// button handler (FUN_008a8fba) runs GetServerInfo (connects the
 	// account-server socket) then sends — but it is MFC-heavy and crashes if
 	// called from the render thread.  So we PostMessage a custom message to
-	// the render window; HookedWindowProcedure (which runs on the game's
-	// message thread) receives it and invokes FUN_008a8fba for us.
+	// the login DIALOG's HWND; HookedWindowProcedure (installed on all
+	// process windows, running on the game's message thread) receives it and
+	// invokes FUN_008a8fba for us.
 	//
 	// We keep the LOGIN_SEND passthrough hook installed for diagnostics, but
 	// the actual submit is driven here via the message, not by calling
 	// FUN_0101bfe7 directly (that queues into a dead socket because
 	// GetServerInfo was never allowed to run).
-	if (g_gameWindow.gameWindowHandle)
+	if (dlgHwnd)
 	{
-		if (PostMessageA(g_gameWindow.gameWindowHandle, WM_AUTOLOGIN_SUBMIT, 0, (LPARAM)dlg))
+		if (PostMessageA(dlgHwnd, WM_AUTOLOGIN_SUBMIT, 0, (LPARAM)dlg))
 		{
 			AutoLogin::g_submitCount++;
 			AutoLogin::g_attemptDone = true;
 			AutoLogin::g_autoSubmitInFlight = true;
 			strcpy_s(AutoLogin::g_lastResult, "auto-login queued (button handler on game thread)");
-			AutoLoginLog("AutoLoginTick: posted login submit to game window");
+			AutoLoginLog("AutoLoginTick: posted login submit to dialog hwnd=%p", dlgHwnd);
 		}
 		else
 		{
-			AutoLoginLog("AutoLoginTick: PostMessage failed");
+			AutoLoginLog("AutoLoginTick: PostMessage failed hwnd=%p", dlgHwnd);
 			strcpy_s(AutoLogin::g_lastResult, "PostMessage failed");
 		}
 	}
 	else
 	{
-		AutoLoginLog("AutoLoginTick: no game window for submit");
-		strcpy_s(AutoLogin::g_lastResult, "no game window - retrying");
+		AutoLoginLog("AutoLoginTick: no dialog hwnd for submit");
+		strcpy_s(AutoLogin::g_lastResult, "no dialog hwnd - retrying");
 	}
 }
 
