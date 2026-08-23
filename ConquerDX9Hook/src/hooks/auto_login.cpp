@@ -1,11 +1,14 @@
 #include <windows.h>
-#include <stdint.h>
-#include <string>
-#include <vector>
+#include <stdint.h> 
+#include <string>   
+#include <vector>   
 #include "MinHook.h"
-#include <cstdio>
-#include <cstring>
-#include <cstdarg>
+#include <cstdio>   
+#include <cstring>  
+#include <cstdarg>  
+#include "common.h"
+
+extern GameWindowInfo g_gameWindow;
 
 // ============================================================================
 // Auto Login + Auto Relogin - Conquer.exe client 7937 (image base 0x400000)
@@ -962,58 +965,37 @@ void AutoLoginTick()
 		// Non-fatal — the button handler may still work with defaults.
 	}
 
-	// Send the credentials with the game's OWN credential send
-	// (FUN_0101bfe7, the same function the login handler invokes after
-	// GetServerInfo).  We do NOT call the full login button handler
-	// (FUN_008a8fba) here — it runs heavy MFC UI state (EnableWindow,
-	// ShowWindow, server-list iteration) that is not safe to execute from
-	// the render thread and crashed the client.  FUN_0101bfe7 is the
-	// network send itself; with a server selected (above) the account
-	// socket is established and the packet reaches the server.
-	if (AutoLogin::g_OriginalLoginSend)
+	// Submit the login on the GAME'S OWN MESSAGE THREAD.  The game's Login
+	// button handler (FUN_008a8fba) runs GetServerInfo (connects the
+	// account-server socket) then sends — but it is MFC-heavy and crashes if
+	// called from the render thread.  So we PostMessage a custom message to
+	// the render window; HookedWindowProcedure (which runs on the game's
+	// message thread) receives it and invokes FUN_008a8fba for us.
+	//
+	// We keep the LOGIN_SEND passthrough hook installed for diagnostics, but
+	// the actual submit is driven here via the message, not by calling
+	// FUN_0101bfe7 directly (that queues into a dead socket because
+	// GetServerInfo was never allowed to run).
+	if (g_gameWindow.gameWindowHandle)
 	{
-		int ret = 0;
-		__try {
-			// Game-identical call shapes: account as c_str, password as the dialog's
-			// wrapper object, server name as char*, mode 0 = classic CMsgAccountEx.
-			ret = AutoLogin::g_OriginalLoginSend(
-				AutoLogin::SsoCStr(accountObj),
-				pswObj,
-				serverName,
-				0,
-				port);
-		} __except(EXCEPTION_EXECUTE_HANDLER) {
-			AutoLoginLog("AutoLoginTick: LoginSend exception");
-			strcpy_s(AutoLogin::g_lastResult, "LoginSend crash");
-			return;
-		}
-		AutoLogin::g_submitCount++;
-		AutoLoginLog("AutoLoginTick: LoginSend returned %d (0=queued, -1=reject)", ret);
-
-		// The classic branch returns 0 when it actually queued the send,
-		// and 0xFFFFFFFF on a rejected/invalid account (logs
-		// "invalid Account or Psw") - stop retrying in that case so a
-		// wrong password doesn't spam the server.
-		if (ret == 0)
+		if (PostMessageA(g_gameWindow.gameWindowHandle, WM_AUTOLOGIN_SUBMIT, 0, (LPARAM)dlg))
 		{
+			AutoLogin::g_submitCount++;
 			AutoLogin::g_attemptDone = true;
 			AutoLogin::g_autoSubmitInFlight = true;
-			strcpy_s(AutoLogin::g_lastResult, "auto-login queued (file creds)");
-		}
-		else if (AutoLogin::g_retryCount >= AutoLogin::g_maxRetries)
-		{
-			AutoLogin::g_attemptDone = true;
-			sprintf_s(AutoLogin::g_lastResult, "login failed - max %d retries hit", AutoLogin::g_maxRetries);
+			strcpy_s(AutoLogin::g_lastResult, "auto-login queued (button handler on game thread)");
+			AutoLoginLog("AutoLoginTick: posted login submit to game window");
 		}
 		else
 		{
-			sprintf_s(AutoLogin::g_lastResult, "login rejected - retry %d/%d", AutoLogin::g_retryCount, AutoLogin::g_maxRetries);
+			AutoLoginLog("AutoLoginTick: PostMessage failed");
+			strcpy_s(AutoLogin::g_lastResult, "PostMessage failed");
 		}
 	}
 	else
 	{
-		AutoLoginLog("AutoLoginTick: no OriginalLoginSend");
-		strcpy_s(AutoLogin::g_lastResult, "no login hook - retrying");
+		AutoLoginLog("AutoLoginTick: no game window for submit");
+		strcpy_s(AutoLogin::g_lastResult, "no game window - retrying");
 	}
 }
 

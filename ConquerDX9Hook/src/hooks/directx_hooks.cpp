@@ -39,6 +39,24 @@ static WNDPROC g_originalChildWindowProcedure = NULL;
 static std::map<HWND, WNDPROC> g_subclassedWindows;
 static DWORD g_lastSubclassEnumTick = 0;
 
+// Auto-login submit message handler.  Called on the game's message thread
+// when the auto-login module posts WM_AUTOLOGIN_SUBMIT.  Runs the game's
+// own Login button handler (FUN_008a8fba) which does GetServerInfo (resolves
+// the account-server IP/port and connects the socket) then sends the packet.
+// This MUST run on the message thread — calling FUN_008a8fba directly from
+// the render thread crashed the client.
+void HandleAutoLoginSubmit(void* dialog)
+{
+	__try {
+		typedef void (__fastcall* LoginFn)(void* dialog);
+		LoginFn loginFn = (LoginFn)0x008A8FBA;
+		loginFn(dialog);
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		// Swallow — the auto-login module has its own retry logic and the
+		// back-to-login hook will re-arm the attempt.
+	}
+}
+
 // [overlay] subclass_all_windows in overlay.ini (next to the game exe).
 // 1 (default): every process window is subclassed so the overlay also receives
 //              input while the MFC login dialog owns it. The login screen is a
@@ -402,6 +420,15 @@ HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* pres
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam) 
 {
+	// Auto-login submit: posted from the render thread, handled here on the
+	// game's message thread so the game's MFC-heavy login handler runs in its
+	// native context (calling it from the render thread crashed the client).
+	if (message == WM_AUTOLOGIN_SUBMIT)
+	{
+		HandleAutoLoginSubmit((void*)lParam);
+		return 0;
+	}
+
 	// Diagnostics: count input messages reaching the hook.
 	switch (message) 
 	{
