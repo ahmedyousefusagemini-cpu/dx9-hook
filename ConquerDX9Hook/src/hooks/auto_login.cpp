@@ -990,15 +990,6 @@ void AutoLoginTick()
 		// Non-fatal — the button handler may still work with defaults.
 	}
 
-	// Set the server-name CString in the dialog (dialog+0x13628) so the
-	// game's GetServerInfo can resolve the account server.  The dialog init
-	// writes it via CStringT::operator= at 0x0088f38b; a raw SsoSet would
-	// corrupt the CStringData.  Use the ini server value (DuneWanderer).
-	if (AutoLogin::g_server[0]) {
-		AutoLogin::CStringAssign(dlg + AutoLogin::DLG_SERVER_NAME, AutoLogin::g_server);
-		AutoLoginLog("AutoLoginTick: set dialog server name to '%s'", AutoLogin::g_server);
-	}
-
 	// Submit the login on the GAME'S OWN MESSAGE THREAD.  The game's Login
 	// button handler (FUN_008a8fba) runs GetServerInfo (connects the
 	// account-server socket) then sends — but it is MFC-heavy and crashes if
