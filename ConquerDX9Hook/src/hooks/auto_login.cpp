@@ -421,6 +421,12 @@ static bool IniGetString(const char* narrow, const char* section, const char* ke
 						while (vs < lineEnd && (*vs==' '||*vs=='\t')) ++vs;
 						const char* ve = lineEnd;
 						while (ve>vs && (ve[-1]==' '||ve[-1]=='\t'||ve[-1]=='\r')) --ve;
+						// Strip trailing inline comment (; or #)
+						const char* comment = (const char*)memchr(vs, ';', ve - vs);
+						if (!comment) comment = (const char*)memchr(vs, '#', ve - vs);
+						if (comment && comment > vs) ve = comment;
+						// Trim whitespace again after comment removal
+						while (ve>vs && (ve[-1]==' '||ve[-1]=='\t')) --ve;
 						size_t vlen = ve - vs;
 						if (vlen >= outCap) vlen = outCap-1;
 						memcpy(out, vs, vlen);
@@ -781,6 +787,14 @@ void AutoLoginTick()
 	if (AutoLogin::g_attemptDone)
 		return;   // a login was already sent this cycle; wait for the world.
 
+	// Only the copy that owns the LOGIN_SEND hook drives the login. The DLL is
+	// loaded twice (proxy + another module); the second copy finds the hook
+	// already created and has no original trampoline (g_OriginalLoginSend is
+	// null), so it must not touch the dialog's fields - writing the wrapper
+	// while the owner submits would corrupt the in-flight login and crash.
+	if (!AutoLogin::g_OriginalLoginSend)
+		return;
+
 	// Gate: the game only submits while the account-login dialog is actually
 	// visible (its dispatcher checks IsWindowVisible(dialog+0x20) right before
 	// invoking the Login handler). Sending earlier queues the packet into a
@@ -878,12 +892,15 @@ void AutoLoginTick()
 		AutoLoginLog("AutoLoginTick: empty password, skipping SetPassword");
 	}
 
-	// Realm: the dialog's own selected server name - read with the game's own
-	// CString method (the field at +0x13628 is an ATL CSimpleStringT, NOT an
-	// SSO std::string). ini server as fallback.
-	const char* serverName = AutoLogin::CStringCStr(dlg + AutoLogin::DLG_SERVER_NAME);
+	// Realm: prefer the ini server value (stable, user-configured display name).
+	// The game's own button handler resolves the selected realm through
+	// GetServerInfo + a hash round-trip (FUN_0121ceab) before sending; passing
+	// the dialog's raw CString (e.g. ".\Server") instead of the resolved
+	// display name confused the server-response parser and crashed the client.
+	// The dialog CString is only used as a fallback when the ini is empty.
+	const char* serverName = AutoLogin::g_server;
 	if (!serverName || !serverName[0])
-		serverName = AutoLogin::g_server;
+		serverName = AutoLogin::CStringCStr(dlg + AutoLogin::DLG_SERVER_NAME);
 
 	// Port argument: replicate the button handler (flag gate + atoi).
 	int port = 0;
