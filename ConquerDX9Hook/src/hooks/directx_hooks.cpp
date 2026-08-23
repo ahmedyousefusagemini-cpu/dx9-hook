@@ -52,6 +52,16 @@ void HandleAutoLoginSubmit(void* dialog)
 	extern void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
 	HWND dlgHwnd = dialog ? *(HWND*)((unsigned char*)dialog + 0x20) : NULL;
 	AutoLoginLogFromHook("WM_AUTOLOGIN_SUBMIT received", dialog, dlgHwnd);
+	// Log the dialog fields FUN_008a8fba's GetServerInfo will read:
+	// group/server indices + server name CString.
+	if (dialog)
+	{
+		char tmp[64];
+		AutoLoginLogFromHook("group/server", (void*)(uintptr_t)*(int*)((unsigned char*)dialog + 0x135f8),
+			(HWND)(uintptr_t)*(int*)((unsigned char*)dialog + 0x135fc));
+		_snprintf_s(tmp, _TRUNCATE, "srvname=%p", (void*)*(void**)((unsigned char*)dialog + 0x13628));
+		AutoLoginLogFromHook(tmp, dialog, dlgHwnd);
+	}
 	__try {
 		typedef void (__fastcall* LoginFn)(void* dialog);
 		LoginFn loginFn = (LoginFn)0x008A8FBA;
