@@ -1044,6 +1044,14 @@ void AutoLoginReloadConfig()
 // ============================================================================
 // Public entry points
 // ============================================================================
+// Logging helper for the cross-thread login handler (called from
+// directx_hooks.cpp's HookedWindowProcedure when the login submit message
+// arrives).  Writes to the same auto_login.log file as the main module.
+void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd)
+{
+	AutoLoginLog("Hook: %s dialog=%p hwnd=%p", msg, dialog, hwnd);
+}
+
 // Runs every frame from the ImGui loop (menu open or closed), same slot as the
 // other Apply*ClientState() helpers.
 void ApplyAutoLoginClientState()

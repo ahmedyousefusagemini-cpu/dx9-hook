@@ -47,13 +47,18 @@ static DWORD g_lastSubclassEnumTick = 0;
 // the render thread crashed the client.
 void HandleAutoLoginSubmit(void* dialog)
 {
+	// Cross-thread log: confirms the message reached this handler on the
+	// game's message thread.
+	extern void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
+	HWND dlgHwnd = dialog ? *(HWND*)((unsigned char*)dialog + 0x20) : NULL;
+	AutoLoginLogFromHook("WM_AUTOLOGIN_SUBMIT received", dialog, dlgHwnd);
 	__try {
 		typedef void (__fastcall* LoginFn)(void* dialog);
 		LoginFn loginFn = (LoginFn)0x008A8FBA;
 		loginFn(dialog);
+		AutoLoginLogFromHook("FUN_008a8fba returned", dialog, dlgHwnd);
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		// Swallow — the auto-login module has its own retry logic and the
-		// back-to-login hook will re-arm the attempt.
+		AutoLoginLogFromHook("FUN_008a8fba EXCEPTION", dialog, dlgHwnd);
 	}
 }
 
