@@ -1015,9 +1015,12 @@ void AutoLoginTick()
 		if (PostMessageA(dlgHwnd, WM_AUTOLOGIN_SUBMIT, 0, (LPARAM)dlg))
 		{
 			AutoLogin::g_submitCount++;
-			AutoLogin::g_attemptDone = true;
-			AutoLogin::g_autoSubmitInFlight = true;
-			strcpy_s(AutoLogin::g_lastResult, "auto-login queued (button handler on game thread)");
+			// Do NOT set g_attemptDone here.  The send (FUN_0101bfe7) fires
+			// synchronously inside the handler on the game thread; our
+			// HookedLoginSend passthrough sets g_attemptDone when it actually
+			// sees the send.  Leaving it false here means: if GetServerInfo
+			// fails and the send never fires, AutoLoginTick retries next frame.
+			strcpy_s(AutoLogin::g_lastResult, "auto-login submit posted");
 			AutoLoginLog("AutoLoginTick: posted login submit to dialog hwnd=%p", dlgHwnd);
 		}
 		else
