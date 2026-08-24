@@ -245,6 +245,41 @@ namespace AutoLogin
 	WSARecvFn g_OrigWSARecv = nullptr;
 	unsigned long g_wireProbeUntil = 0;
 
+	// connect()/WSAConnect() - ALWAYS logged (ungated; connects are rare and
+	// show exactly which endpoint each stage of the login chain dials,
+	// including the boot-time server-list fetch that precedes any submit).
+	typedef int (__stdcall *ConnectFn)(void*, const void*, int);
+	typedef int (__stdcall *WSAConnectFn)(void*, const void*, int, void*, void*, void*, void*);
+	ConnectFn    g_OrigConnect    = nullptr;
+	WSAConnectFn g_OrigWSAConnect = nullptr;
+
+	static void LogConnectTarget(void* sock, const void* addr, int addrlen)
+	{
+		if (!addr || addrlen < 4)
+			return;
+		unsigned short family = *(const unsigned short*)addr;
+		if (family != 2) { // AF_INET
+			AutoLoginLog("wire C sock=%p family=%u (non-inet)", sock, (unsigned)family);
+			return;
+		}
+		const unsigned char* a = (const unsigned char*)addr;
+		unsigned port = ((unsigned)a[2] << 8) | a[3];
+		AutoLoginLog("wire C sock=%p -> %u.%u.%u.%u:%u", sock, a[4], a[5], a[6], a[7], port);
+	}
+
+	int __stdcall HookedWireConnect(void* sock, const void* addr, int addrlen)
+	{
+		LogConnectTarget(sock, addr, addrlen);
+		return g_OrigConnect ? g_OrigConnect(sock, addr, addrlen) : -1;
+	}
+
+	int __stdcall HookedWireWSAConnect(void* sock, const void* addr, int addrlen,
+		void* callerData, void* calleeData, void* sqos, void* gqos)
+	{
+		LogConnectTarget(sock, addr, addrlen);
+		return g_OrigWSAConnect ? g_OrigWSAConnect(sock, addr, addrlen, callerData, calleeData, sqos, gqos) : -1;
+	}
+
 	static void WireHexLog(char dir, void* sock, const char* buf, int len)
 	{
 		int n = (len < 24) ? len : 24;
@@ -686,13 +721,19 @@ static bool IsSupported()
 		return false;
 	}
 	const unsigned char* p = (const unsigned char*)AutoLogin::LOGIN_SEND_ADDRESS;
-	if (p[0] != 0x68 || p[1] != 0x08 || p[2] != 0x04 || p[3] != 0x00 || p[4] != 0x00) {
-		AutoLoginLog("IsSupported: LOGIN_SEND mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
-		return false;
-	}
-	if (p[5] != 0xB8 || p[6] != 0x62 || p[7] != 0x2D || p[8] != 0x4B || p[9] != 0x01) {
-		AutoLoginLog("IsSupported: LOGIN_SEND+5 mismatch %02X %02X %02X %02X %02X", p[5],p[6],p[7],p[8],p[9]);
-		return false;
+	// Sibling DLL copies race each other at load: once one copy has hooked,
+	// the prologue reads E9 (trampoline JMP). Treat that as supported - the
+	// MH_CreateHook below then returns ALREADY_CREATED which is handled.
+	bool siblingHooked = (p[0] == 0xE9);
+	if (!siblingHooked) {
+		if (p[0] != 0x68 || p[1] != 0x08 || p[2] != 0x04 || p[3] != 0x00 || p[4] != 0x00) {
+			AutoLoginLog("IsSupported: LOGIN_SEND mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
+			return false;
+		}
+		if (p[5] != 0xB8 || p[6] != 0x62 || p[7] != 0x2D || p[8] != 0x4B || p[9] != 0x01) {
+			AutoLoginLog("IsSupported: LOGIN_SEND+5 mismatch %02X %02X %02X %02X %02X", p[5],p[6],p[7],p[8],p[9]);
+			return false;
+		}
 	}
 
 	// FUN_00c3ac82: 68 74 E3 6C 01  E8 45 39 80 FF (PUSH 0x16CE374; CALL)
@@ -701,7 +742,7 @@ static bool IsSupported()
 		return false;
 	}
 	p = (const unsigned char*)AutoLogin::BACK_TO_LOGIN_ADDRESS;
-	if (p[0] != 0x68 || p[1] != 0x74 || p[2] != 0xE3 || p[3] != 0x6C || p[4] != 0x01) {
+	if (p[0] != 0xE9 && (p[0] != 0x68 || p[1] != 0x74 || p[2] != 0xE3 || p[3] != 0x6C || p[4] != 0x01)) {
 		AutoLoginLog("IsSupported: BACK_TO_LOGIN mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
 		return false;
 	}
@@ -886,8 +927,18 @@ bool  InstallHooks()
 			(LPVOID*)&AutoLogin::g_OrigWSARecv) == MH_OK &&
 			MH_EnableHook(pWSARecv) == MH_OK)
 			probeOk |= 8;
+		void* pConn    = (void*)GetProcAddress(ws2, "connect");
+		void* pWSAConn = (void*)GetProcAddress(ws2, "WSAConnect");
+		if (pConn && MH_CreateHook(pConn, (LPVOID)&AutoLogin::HookedWireConnect,
+			(LPVOID*)&AutoLogin::g_OrigConnect) == MH_OK &&
+			MH_EnableHook(pConn) == MH_OK)
+			probeOk |= 16;
+		if (pWSAConn && MH_CreateHook(pWSAConn, (LPVOID)&AutoLogin::HookedWireWSAConnect,
+			(LPVOID*)&AutoLogin::g_OrigWSAConnect) == MH_OK &&
+			MH_EnableHook(pWSAConn) == MH_OK)
+			probeOk |= 32;
 	}
-	AutoLoginLog("InstallHooks: wire probe ws2=%p ok=0x%X (1=send 2=recv 4=WSASend 8=WSARecv)", (void*)ws2, probeOk);
+	AutoLoginLog("InstallHooks: wire probe ws2=%p ok=0x%X (1=send 2=recv 4=WSASend 8=WSARecv 16=connect 32=WSAConnect)", (void*)ws2, probeOk);
 
 	AutoLogin::g_hooks = true;
 	strcpy_s(AutoLogin::g_lastResult, "hooks installed");
