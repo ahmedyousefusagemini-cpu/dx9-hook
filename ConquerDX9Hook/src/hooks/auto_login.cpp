@@ -665,6 +665,23 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	}
 	AutoLoginLog("HookedLoginSend: %s pass-through account=%s mode=%d port=%d server=%s",
 		ours ? "auto" : "manual", account?account:"(null)", mode, port, serverInfo?serverInfo:"(null)");
+	// Dump the exact wrapper state the send is about to read: count@+0x100,
+	// length@+0x104, first encrypted bytes@+0x108. Fires for BOTH auto and
+	// manual sends - diffing an auto line against a manual-typed line isolates
+	// any field the auto-fill leaves different (known suspect: +0x100 count,
+	// which SetPassword does not touch but the packet hash may include).
+	if (password && !IsBadReadPtr(password, 0x110))
+	{
+		unsigned char* w = (unsigned char*)password;
+		__try {
+			AutoLoginLog("HookedLoginSend: pswdump cnt=%u len=%u enc=%02X%02X%02X%02X%02X%02X%02X%02X",
+				*(unsigned int*)(w + 0x100), *(unsigned int*)(w + 0x104),
+				w[0x108], w[0x109], w[0x10A], w[0x10B],
+				w[0x10C], w[0x10D], w[0x10E], w[0x10F]);
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			AutoLoginLog("HookedLoginSend: pswdump exception");
+		}
+	}
 	if (AutoLogin::g_OriginalLoginSend)
 	{
 		int r = AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, port);
