@@ -63,6 +63,27 @@ void HandleAutoLoginSubmit(void* dialog)
 		AutoLoginLogFromHook(tmp, dialog, dlgHwnd);
 	}
 	__try {
+		// First, call GetServerInfo exactly like FUN_008a8fba does, to see
+		// whether the account-server resolution succeeds or fails (this is the
+		// gate that decides whether the send fires).
+		{
+			typedef char (__thiscall* GetServerInfoFn)(void* thisPtr, int mode, char* outIP, int outIPCap, int* outPort);
+			GetServerInfoFn gsi = (GetServerInfoFn)0x008827C2;
+			char ipBuf[128];
+			int port = 0;
+			char tmp[160];
+			char gsiMsg[160];
+			memset(ipBuf, 0, sizeof(ipBuf));
+			__try {
+				char r = gsi(dialog, 1, ipBuf, 0x80, &port);
+				_snprintf_s(tmp, _TRUNCATE, "GetServerInfo(1) ret=%d ip='%s' port=%d", (int)r, ipBuf, port);
+				AutoLoginLogFromHook(tmp, dialog, dlgHwnd);
+				(void)gsiMsg;
+			} __except(EXCEPTION_EXECUTE_HANDLER) {
+				AutoLoginLogFromHook("GetServerInfo(1) EXCEPTION", dialog, dlgHwnd);
+			}
+		}
+
 		typedef void (__fastcall* LoginFn)(void* dialog);
 		LoginFn loginFn = (LoginFn)0x008A8FBA;
 		loginFn(dialog);
