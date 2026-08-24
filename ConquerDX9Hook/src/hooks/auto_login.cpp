@@ -118,6 +118,8 @@ extern GameWindowInfo g_gameWindow;
 // +0x13BD0); the 0x13620 flag only selects the pair in the poker path (mode 2).
 // ============================================================================
 
+static void AutoLoginLog(const char* fmt, ...);
+
 namespace AutoLogin
 {
 	// ------------------------------------------------------------------
