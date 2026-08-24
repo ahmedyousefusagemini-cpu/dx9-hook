@@ -209,8 +209,12 @@ namespace AutoLogin
 
 	unsigned long g_bootWaitMs   = 6000;   // first submit delay after attach
 	unsigned long g_reloginWaitMs = 6000;  // submit delay after a disconnect
-	unsigned long g_retryMs      = 4000;   // resubmit cadence while the dialog is still up
-	int           g_maxRetries   = 15;     // per-cycle budget (~60s at default retry_ms)
+	// Quiet gap between submits. The client dials the account server via an
+	// internal ~20s retry timer; frequent resubmits RESET that timer and starve
+	// the dial (verified: 4s retries => never connects, one quiet submit =>
+	// connects at ~T+26s and logs in).
+	unsigned long g_retryMs      = 28000;
+	int           g_maxRetries   = 6;      // per-cycle budget (~3min at default retry_ms)
 
 	// ------------------------------------------------------------------
 	// runtime state
@@ -647,9 +651,9 @@ static void LoadConfig()
 		if (AutoLogin::g_reloginWaitMs < 500) AutoLogin::g_reloginWaitMs = 500;
 		if (IniGetString(narrow, "accounts", "retry_ms", buf, sizeof(buf), nullptr)) {
 			AutoLogin::g_retryMs = atoi(buf);
-		} else AutoLogin::g_retryMs = 4000;
+		} else AutoLogin::g_retryMs = 28000;
 		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
-		AutoLogin::g_maxRetries = IniGetInt(narrow, "accounts", "max_retries", 15);
+		AutoLogin::g_maxRetries = IniGetInt(narrow, "accounts", "max_retries", 6);
 	} else {
 		// Legacy fallback
 		GetPrivateProfileStringA(section, "account",  "", AutoLogin::g_account,  sizeof(AutoLogin::g_account),  AutoLogin::g_cfgPath);
@@ -662,10 +666,10 @@ static void LoadConfig()
 		GetPrivateProfileStringA("accounts", "relogin_wait_ms", "6000", buf, 32, AutoLogin::g_cfgPath);
 		AutoLogin::g_reloginWaitMs = atoi(buf);
 		if (AutoLogin::g_reloginWaitMs < 500) AutoLogin::g_reloginWaitMs = 500;
-		GetPrivateProfileStringA("accounts", "retry_ms", "4000", buf, 32, AutoLogin::g_cfgPath);
+		GetPrivateProfileStringA("accounts", "retry_ms", "28000", buf, 32, AutoLogin::g_cfgPath);
 		AutoLogin::g_retryMs = atoi(buf);
 		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
-		AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 15, AutoLogin::g_cfgPath);
+		AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 6, AutoLogin::g_cfgPath);
 	}
 	if (AutoLogin::g_maxRetries < 0)
 		AutoLogin::g_maxRetries = 0;
@@ -682,8 +686,8 @@ static void LoadConfig()
 				"selected=0\n"
 				"boot_wait_ms=6000\n"
 				"relogin_wait_ms=6000\n"
-				"retry_ms=4000\n"
-				"max_retries=15\n"
+				"retry_ms=28000\n"
+				"max_retries=6\n"
 				"\n"
 				"[account_0]\n"
 				"; server = fallback realm name (leave empty to use the dialog's selected realm)\n"
@@ -1118,6 +1122,12 @@ void AutoLoginTick()
 	// 0x13620 ONLY in the poker path (mode 2).  In the classic path (mode 0,
 	// which we always use here) the game always reads pair A (+0x13B88/0x13BD0)
 	// regardless of the flag.  Match that: always use pair A.
+	//
+	// Claim this attempt NOW, before touching any dialog field: a concurrent
+	// tick thread that passes all gates in the same millisecond would
+	// otherwise double-fill and double-post (seen at retry=3/12 in the logs).
+	AutoLogin::g_postGraceUntil = GetTickCount() + 2000;
+
 	unsigned char* dlg = (unsigned char*)dialog;
 	unsigned char* accountObj = dlg + AutoLogin::DLG_ACCOUNT_A;
 	unsigned char* pswObj     = dlg + AutoLogin::DLG_PASSWORD_A;
@@ -1252,7 +1262,7 @@ void AutoLoginTick()
 			// classify a quick return-to-login as an auto-login failure and
 			// stop after repeated credential rejections.
 			AutoLogin::g_autoSubmitInFlight = true;
-			AutoLogin::g_postGraceUntil = GetTickCount() + 2000;
+			// (grace window already claimed before the fill - see above)
 			// Do NOT set g_attemptDone here.  The send (FUN_0101bfe7) fires
 			// synchronously inside the handler on the game thread; our
 			// HookedLoginSend passthrough sets g_attemptDone when it actually
