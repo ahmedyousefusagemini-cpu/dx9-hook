@@ -224,6 +224,7 @@ namespace AutoLogin
 	bool  g_autoSubmitInFlight = false; // last queued send was ours (not manual)
 	int   g_failedCycles = 0;           // consecutive quick fail -> back-to-login
 	unsigned long g_submitCount = 0;
+	unsigned long g_postGraceUntil = 0; // no re-submit while the game thread processes a posted submit
 	char  g_lastResult[64] = "idle";
 
 	// ------------------------------------------------------------------
@@ -721,19 +722,13 @@ static bool IsSupported()
 		return false;
 	}
 	const unsigned char* p = (const unsigned char*)AutoLogin::LOGIN_SEND_ADDRESS;
-	// Sibling DLL copies race each other at load: once one copy has hooked,
-	// the prologue reads E9 (trampoline JMP). Treat that as supported - the
-	// MH_CreateHook below then returns ALREADY_CREATED which is handled.
-	bool siblingHooked = (p[0] == 0xE9);
-	if (!siblingHooked) {
-		if (p[0] != 0x68 || p[1] != 0x08 || p[2] != 0x04 || p[3] != 0x00 || p[4] != 0x00) {
-			AutoLoginLog("IsSupported: LOGIN_SEND mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
-			return false;
-		}
-		if (p[5] != 0xB8 || p[6] != 0x62 || p[7] != 0x2D || p[8] != 0x4B || p[9] != 0x01) {
-			AutoLoginLog("IsSupported: LOGIN_SEND+5 mismatch %02X %02X %02X %02X %02X", p[5],p[6],p[7],p[8],p[9]);
-			return false;
-		}
+	// STRICT on purpose: the DLL loads twice (proxy + injected sibling). Only
+	// the copy that arrives first must install/submit; letting a second copy
+	// past this check makes it hook the already-hooked address with its own
+	// MinHook instance and DOUBLE-SUBMIT the login (two identical packets).
+	if (p[0] != 0x68 || p[1] != 0x08 || p[2] != 0x04 || p[3] != 0x00 || p[4] != 0x00) {
+		AutoLoginLog("IsSupported: LOGIN_SEND mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
+		return false;
 	}
 
 	// FUN_00c3ac82: 68 74 E3 6C 01  E8 45 39 80 FF (PUSH 0x16CE374; CALL)
@@ -742,7 +737,7 @@ static bool IsSupported()
 		return false;
 	}
 	p = (const unsigned char*)AutoLogin::BACK_TO_LOGIN_ADDRESS;
-	if (p[0] != 0xE9 && (p[0] != 0x68 || p[1] != 0x74 || p[2] != 0xE3 || p[3] != 0x6C || p[4] != 0x01)) {
+	if (p[0] != 0x68 || p[1] != 0x74 || p[2] != 0xE3 || p[3] != 0x6C || p[4] != 0x01) {
 		AutoLoginLog("IsSupported: BACK_TO_LOGIN mismatch %02X %02X %02X %02X %02X", p[0],p[1],p[2],p[3],p[4]);
 		return false;
 	}
@@ -1081,6 +1076,13 @@ void AutoLoginTick()
 		return;
 	}
 
+	// Anti-double-submit: PostMessage is async - the game thread needs time to
+	// run FUN_008a8fba (which fires HookedLoginSend -> g_attemptDone). Do not
+	// re-fill / re-post inside that window even though attemptDone is still
+	// false; if the send truly never fires we retry after the grace expires.
+	if (now < AutoLogin::g_postGraceUntil)
+		return;
+
 	// Pair A/B selection: the game's button handler checks the flag byte at
 	// 0x13620 ONLY in the poker path (mode 2).  In the classic path (mode 0,
 	// which we always use here) the game always reads pair A (+0x13B88/0x13BD0)
@@ -1219,6 +1221,7 @@ void AutoLoginTick()
 			// classify a quick return-to-login as an auto-login failure and
 			// stop after repeated credential rejections.
 			AutoLogin::g_autoSubmitInFlight = true;
+			AutoLogin::g_postGraceUntil = GetTickCount() + 2000;
 			// Do NOT set g_attemptDone here.  The send (FUN_0101bfe7) fires
 			// synchronously inside the handler on the game thread; our
 			// HookedLoginSend passthrough sets g_attemptDone when it actually
