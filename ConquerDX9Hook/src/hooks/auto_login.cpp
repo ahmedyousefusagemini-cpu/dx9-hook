@@ -225,6 +225,73 @@ namespace AutoLogin
 	char  g_lastResult[64] = "idle";
 
 	// ------------------------------------------------------------------
+	// Wire probe (temporary diagnostics): log real socket traffic for ~20s
+	// after a login send fires. Answers definitively whether the queued
+	// login packet leaves the process and whether anything comes back -
+	// without this, "queued" (ret=0) proves delivery only to the local
+	// stack buffer, not to the server.
+	// ------------------------------------------------------------------
+	typedef int (__stdcall *SendFn)(void*, const char*, int, int);
+	typedef int (__stdcall *RecvFn)(void*, char*, int, int);
+	struct WsaBuf { unsigned long len; char* buf; };
+	typedef int (__stdcall *WSASendFn)(void*, WsaBuf*, unsigned long, unsigned long*, unsigned long, void*, void*);
+	typedef int (__stdcall *WSARecvFn)(void*, WsaBuf*, unsigned long, unsigned long*, unsigned long*, void*, void*);
+
+	SendFn    g_OrigSend    = nullptr;
+	RecvFn    g_OrigRecv    = nullptr;
+	WSASendFn g_OrigWSASend = nullptr;
+	WSARecvFn g_OrigWSARecv = nullptr;
+	unsigned long g_wireProbeUntil = 0;
+
+	static void WireHexLog(char dir, void* sock, const char* buf, int len)
+	{
+		int n = (len < 24) ? len : 24;
+		char hex[64];
+		static const char* digits = "0123456789ABCDEF";
+		for (int i = 0; i < n; ++i) {
+			hex[i*2]   = digits[(buf[i] >> 4) & 0xF];
+			hex[i*2+1] = digits[buf[i] & 0xF];
+		}
+		hex[n*2] = 0;
+		AutoLoginLog("wire %c sock=%p len=%d head=%s", dir, sock, len, hex);
+	}
+
+	int __stdcall HookedWireSend(void* sock, const char* buf, int len, int flags)
+	{
+		if (g_OrigSend && GetTickCount() < g_wireProbeUntil && buf && len > 0)
+			WireHexLog('>', sock, buf, len);
+		return g_OrigSend ? g_OrigSend(sock, buf, len, flags) : -1;
+	}
+
+	int __stdcall HookedWireRecv(void* sock, char* buf, int len, int flags)
+	{
+		int r = g_OrigRecv ? g_OrigRecv(sock, buf, len, flags) : -1;
+		// Log successful reads only - async sockets hammer WSAEWOULDBLOCK.
+		if (g_OrigRecv && GetTickCount() < g_wireProbeUntil && r > 0 && buf)
+			WireHexLog('<', sock, buf, r);
+		return r;
+	}
+
+	int __stdcall HookedWireWSASend(void* sock, WsaBuf* bufs, unsigned long count,
+		unsigned long* sent, unsigned long flags, void* overlapped, void* completion)
+	{
+		int r = g_OrigWSASend ? g_OrigWSASend(sock, bufs, count, sent, flags, overlapped, completion) : -1;
+		if (g_OrigWSASend && GetTickCount() < g_wireProbeUntil && bufs && count > 0)
+			WireHexLog('>', sock, bufs[0].buf, (int)bufs[0].len);
+		return r;
+	}
+
+	int __stdcall HookedWireWSARecv(void* sock, WsaBuf* bufs, unsigned long count,
+		unsigned long* recvd, unsigned long* flagsOut, void* overlapped, void* completion)
+	{
+		int r = g_OrigWSARecv ? g_OrigWSARecv(sock, bufs, count, recvd, flagsOut, overlapped, completion) : -1;
+		if (g_OrigWSARecv && GetTickCount() < g_wireProbeUntil && bufs && count > 0 &&
+		    recvd && *recvd > 0 && bufs[0].buf)
+			WireHexLog('<', sock, bufs[0].buf, (int)*recvd);
+		return r;
+	}
+
+	// ------------------------------------------------------------------
 	// SSO helpers for the dialog's string fields
 	// ------------------------------------------------------------------
 	// Layout used by the game's own readers (e.g. 0x008a929f):
@@ -684,6 +751,10 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	}
 	if (AutoLogin::g_OriginalLoginSend)
 	{
+		// Arm the wire probe: capture outbound/inbound socket traffic for the
+		// next 20s so we can verify the packet actually leaves and whether
+		// the server answers at all.
+		AutoLogin::g_wireProbeUntil = GetTickCount() + 20000;
 		int r = AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, port);
 		// 0 = queued onto the socket, 0xFFFFFFFF = rejected locally before any
 		// wire traffic (field-length/count checks). This split decides whether
@@ -786,6 +857,35 @@ bool  InstallHooks()
 		st = MH_EnableHook((LPVOID)AutoLogin::BACK_TO_LOGIN_ADDRESS);
 		if (st != MH_OK && st != MH_ERROR_ENABLED) AutoLoginLog("InstallHooks: EnableHook BACK_TO_LOGIN failed %d", st);
 	}
+
+	// Wire probe hooks on ws2_32 (all non-fatal - diagnostics only).
+	HMODULE ws2 = GetModuleHandleA("ws2_32.dll");
+	if (!ws2)
+		ws2 = LoadLibraryA("ws2_32.dll");
+	int probeOk = 0;
+	if (ws2) {
+		void* pSend    = (void*)GetProcAddress(ws2, "send");
+		void* pRecv    = (void*)GetProcAddress(ws2, "recv");
+		void* pWSASend = (void*)GetProcAddress(ws2, "WSASend");
+		void* pWSARecv = (void*)GetProcAddress(ws2, "WSARecv");
+		if (pSend && MH_CreateHook(pSend, (LPVOID)&AutoLogin::HookedWireSend,
+			(LPVOID*)&AutoLogin::g_OrigSend) == MH_OK &&
+			MH_EnableHook(pSend) == MH_OK)
+			probeOk |= 1;
+		if (pRecv && MH_CreateHook(pRecv, (LPVOID)&AutoLogin::HookedWireRecv,
+			(LPVOID*)&AutoLogin::g_OrigRecv) == MH_OK &&
+			MH_EnableHook(pRecv) == MH_OK)
+			probeOk |= 2;
+		if (pWSASend && MH_CreateHook(pWSASend, (LPVOID)&AutoLogin::HookedWireWSASend,
+			(LPVOID*)&AutoLogin::g_OrigWSASend) == MH_OK &&
+			MH_EnableHook(pWSASend) == MH_OK)
+			probeOk |= 4;
+		if (pWSARecv && MH_CreateHook(pWSARecv, (LPVOID)&AutoLogin::HookedWireWSARecv,
+			(LPVOID*)&AutoLogin::g_OrigWSARecv) == MH_OK &&
+			MH_EnableHook(pWSARecv) == MH_OK)
+			probeOk |= 8;
+	}
+	AutoLoginLog("InstallHooks: wire probe ws2=%p ok=0x%X (1=send 2=recv 4=WSASend 8=WSARecv)", (void*)ws2, probeOk);
 
 	AutoLogin::g_hooks = true;
 	strcpy_s(AutoLogin::g_lastResult, "hooks installed");
