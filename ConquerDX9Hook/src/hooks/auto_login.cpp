@@ -654,15 +654,26 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	//
 	// We only record that an attempt is in flight so the auto-submit does not
 	// double-fire while the user is logging in manually.
+	// g_autoSubmitInFlight tells ours (posted submit) from a user click. Do NOT
+	// clear it here - HookedBackToLogin needs it to classify the cycle and
+	// clears it itself.
+	bool ours = AutoLogin::g_autoSubmitInFlight;
 	if (!AutoLogin::g_attemptDone)
 	{
 		AutoLogin::g_attemptDone = true;
-		AutoLogin::g_autoSubmitInFlight = false; // a manual send supersedes ours
-		strcpy_s(AutoLogin::g_lastResult, "manual login send");
-		AutoLoginLog("HookedLoginSend: manual pass-through account=%s mode=%d port=%d server=%s", account?account:"(null)", mode, port, serverInfo?serverInfo:"(null)");
+		strcpy_s(AutoLogin::g_lastResult, ours ? "auto login send" : "manual login send");
 	}
+	AutoLoginLog("HookedLoginSend: %s pass-through account=%s mode=%d port=%d server=%s",
+		ours ? "auto" : "manual", account?account:"(null)", mode, port, serverInfo?serverInfo:"(null)");
 	if (AutoLogin::g_OriginalLoginSend)
-		return AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, port);
+	{
+		int r = AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, port);
+		// 0 = queued onto the socket, 0xFFFFFFFF = rejected locally before any
+		// wire traffic (field-length/count checks). This split decides whether
+		// "nothing happens" is a client-side reject or a network/server issue.
+		AutoLoginLog("HookedLoginSend: original returned %d (%s)", r, r == 0 ? "queued" : "REJECTED");
+		return r;
+	}
 	AutoLoginLog("HookedLoginSend: no original, dropping");
 	return 0;
 }
@@ -1010,11 +1021,34 @@ void AutoLoginTick()
 	// the actual submit is driven here via the message, not by calling
 	// FUN_0101bfe7 directly (that queues into a dead socket because
 	// GetServerInfo was never allowed to run).
+	// Pre-submit dump of every byte FUN_0101bfe7 reads from the pair-A fields,
+	// so an auto run can be diffed against a manual login run:
+	//   password wrapper: count@+0x100, len@+0x104, encrypted text@+0x108
+	//   account SSO: inline text + length@+0x14
+	//   dialog realm CString content (what the handler resolves the realm from)
+	__try {
+		unsigned int cnt = *(unsigned int*)(pswObj + 0x100);
+		unsigned int len = *(unsigned int*)(pswObj + 0x104);
+		const unsigned char* enc = pswObj + 0x108;
+		const char* dlgSrv = AutoLogin::CStringCStr(dlg + AutoLogin::DLG_SERVER_NAME);
+		AutoLoginLog("AutoLoginTick: pre-submit psw cnt=%u len=%u enc=%02X%02X%02X%02X%02X%02X%02X%02X acct='%s' acctlen=%u dlgsrv='%s'",
+			cnt, len, enc[0], enc[1], enc[2], enc[3], enc[4], enc[5], enc[6], enc[7],
+			AutoLogin::SsoCStr(accountObj),
+			*(unsigned long*)((unsigned char*)accountObj + AutoLogin::SSO_LEN_OFFSET),
+			dlgSrv ? dlgSrv : "");
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		AutoLoginLog("AutoLoginTick: pre-submit dump exception");
+	}
+
 	if (dlgHwnd)
 	{
 		if (PostMessageA(dlgHwnd, WM_AUTOLOGIN_SUBMIT, 0, (LPARAM)dlg))
 		{
 			AutoLogin::g_submitCount++;
+			// Mark the in-flight attempt as OURS so HookedBackToLogin can
+			// classify a quick return-to-login as an auto-login failure and
+			// stop after repeated credential rejections.
+			AutoLogin::g_autoSubmitInFlight = true;
 			// Do NOT set g_attemptDone here.  The send (FUN_0101bfe7) fires
 			// synchronously inside the handler on the game thread; our
 			// HookedLoginSend passthrough sets g_attemptDone when it actually

@@ -63,26 +63,13 @@ void HandleAutoLoginSubmit(void* dialog)
 		AutoLoginLogFromHook(tmp, dialog, dlgHwnd);
 	}
 	__try {
-		// First, call GetServerInfo exactly like FUN_008a8fba does, to see
-		// whether the account-server resolution succeeds or fails (this is the
-		// gate that decides whether the send fires).
-		{
-			typedef char (__thiscall* GetServerInfoFn)(void* thisPtr, int mode, char* outIP, int outIPCap, int* outPort);
-			GetServerInfoFn gsi = (GetServerInfoFn)0x008827C2;
-			char ipBuf[128];
-			int port = 0;
-			char tmp[160];
-			char gsiMsg[160];
-			memset(ipBuf, 0, sizeof(ipBuf));
-			__try {
-				char r = gsi(dialog, 1, ipBuf, 0x80, &port);
-				_snprintf_s(tmp, _TRUNCATE, "GetServerInfo(1) ret=%d ip='%s' port=%d", (int)r, ipBuf, port);
-				AutoLoginLogFromHook(tmp, dialog, dlgHwnd);
-				(void)gsiMsg;
-			} __except(EXCEPTION_EXECUTE_HANDLER) {
-				AutoLoginLogFromHook("GetServerInfo(1) EXCEPTION", dialog, dlgHwnd);
-			}
-		}
+		// NOTE: an earlier build called GetServerInfo(dialog,1,...) here, before
+		// the login handler, for diagnostics. Removed: GetServerInfo participates
+		// in the account-socket setup, and running it an extra time right before
+		// FUN_008a8fba can tear down / restart the very socket the login packet
+		// is then queued onto - the send fires into a reconnecting socket and is
+		// silently dropped ("nothing happens"). Its question was answered:
+		// resolution succeeds (see auto_login.log history: ret=1 ip=... port=16000).
 
 		typedef void (__fastcall* LoginFn)(void* dialog);
 		LoginFn loginFn = (LoginFn)0x008A8FBA;
