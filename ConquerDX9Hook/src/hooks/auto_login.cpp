@@ -974,20 +974,28 @@ void AutoLoginTick()
 	// resolves nothing, the account socket never connects, and the packet goes
 	// into a dead socket — the "nothing happens" symptom.
 	//
-	// The game's own server-selection function (FUN_00883ec4) picks the first
-	// group from the loaded server list (m_vecGroup), sets the dialog fields,
-	// and stores the selection into the client global.  We call it here when
-	// the dialog has no server selected yet (group == -1).
+	// The server list (m_vecGroup at dialog+0x13ddc/0x13de0) is loaded from
+	// the account server asynchronously.  Wait until it arrives, then select
+	// the first group/server from the list so the indices are valid for the
+	// current session (not stale ones loaded from ini/PlaySetUP.ini).
 	__try {
-		if (*(int*)(dlg + AutoLogin::DLG_ACTIVE_GROUP) == -1) {
-			typedef void (__fastcall* SelectServerFn)(void* dialog);
-			((SelectServerFn)AutoLogin::SERVER_SELECT_HANDLER)(dlg);
-			AutoLoginLog("AutoLoginTick: selected server group=%d server=%d",
-				*(int*)(dlg + AutoLogin::DLG_ACTIVE_GROUP), *(int*)(dlg + AutoLogin::DLG_ACTIVE_SERVER));
+		int* begin = *(int**)(dlg + 0x13ddc);
+		int* end = *(int**)(dlg + 0x13de0);
+		if (begin == end) {
+			// Server list not loaded yet — wait.  The game's own init
+			// populates this from the account server connection.
+			AutoLoginLog("AutoLoginTick: waiting for server list (m_vecGroup empty)");
+			return;
 		}
+		// Select the first group from the loaded list.
+		typedef void (__fastcall* SelectServerFn)(void* dialog);
+		((SelectServerFn)AutoLogin::SERVER_SELECT_HANDLER)(dlg);
+		AutoLoginLog("AutoLoginTick: selected server group=%d server=%d",
+			*(int*)(dlg + AutoLogin::DLG_ACTIVE_GROUP), *(int*)(dlg + AutoLogin::DLG_ACTIVE_SERVER));
+
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
 		AutoLoginLog("AutoLoginTick: server selection exception");
-		// Non-fatal — the button handler may still work with defaults.
+		return;
 	}
 
 	// Submit the login on the GAME'S OWN MESSAGE THREAD.  The game's Login
