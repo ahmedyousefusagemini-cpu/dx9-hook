@@ -334,6 +334,109 @@ namespace AutoLogin
 	}
 
 	// ------------------------------------------------------------------
+	// Popup logger - capture what the CLIENT says (error boxes etc.) during
+	// the login phase. Without this, silent failures are undiagnosable.
+	// ------------------------------------------------------------------
+	typedef int (__stdcall *MessageBoxAFn)(HWND, const char*, const char*, unsigned);
+	typedef int (__stdcall *MessageBoxWFn)(HWND, const wchar_t*, const wchar_t*, unsigned);
+	MessageBoxAFn g_OrigMsgBoxA = nullptr;
+	MessageBoxWFn g_OrigMsgBoxW = nullptr;
+
+	int __stdcall HookedMessageBoxA(HWND hwnd, const char* text, const char* caption, unsigned type)
+	{
+		AutoLoginLog("POPUP-A cap='%s' text='%s'", caption?caption:"", text?text:"");
+		return g_OrigMsgBoxA ? g_OrigMsgBoxA(hwnd, text, caption, type) : 0;
+	}
+
+	int __stdcall HookedMessageBoxW(HWND hwnd, const wchar_t* text, const wchar_t* caption, unsigned type)
+	{
+		char t[192] = {0}, c[64] = {0};
+		if (text)    WideCharToMultiByte(CP_ACP, 0, text, -1, t, sizeof(t), 0, 0);
+		if (caption) WideCharToMultiByte(CP_ACP, 0, caption, -1, c, sizeof(c), 0, 0);
+		AutoLoginLog("POPUP-W cap='%s' text='%s'", c, t);
+		return g_OrigMsgBoxW ? g_OrigMsgBoxW(hwnd, text, caption, type) : 0;
+	}
+
+	// ------------------------------------------------------------------
+	// Real-input typing: push the credentials through the dialog's ACTUAL
+	// edit controls (WM_CHAR) on the game thread, so every game-side
+	// notification handler (EN_CHANGE / EN_UPDATE / kill-focus / ...) fires
+	// exactly as during a manual login - including whichever one establishes
+	// the account-server connection. Direct memory fills never trigger it.
+	// ------------------------------------------------------------------
+	struct EditList { HWND h[8]; int n; };
+
+	static BOOL CALLBACK EditEnumProc(HWND hwnd, LPARAM lp)
+	{
+		EditList* list = (EditList*)lp;
+		char cls[32] = {0};
+		GetClassNameA(hwnd, cls, sizeof(cls));
+		if (_stricmp(cls, "edit") != 0)
+			return TRUE;
+		if (!(GetWindowLongA(hwnd, GWL_STYLE) & WS_VISIBLE))
+			return TRUE;
+		if (list->n < 8)
+			list->h[list->n++] = hwnd;
+		return TRUE;
+	}
+
+	static void TypeIntoEdit(HWND edit, const char* text)
+	{
+		::SetFocus(edit);                       // legal here: we are on the dialog's own thread
+		SendMessageA(edit, EM_SETSEL, 0, -1);   // select any existing content
+		for (const char* p = text; p && *p; ++p)
+			SendMessageA(edit, WM_CHAR, (unsigned char)*p, 0x00010001);
+	}
+
+	void AutoLoginTypeViaControls()
+	{
+		void* dialog = GetLoginDialog();
+		if (!dialog)
+			return;
+		HWND dlgHwnd = *(HWND*)((unsigned char*)dialog + DLG_HWND_OFFSET);
+		if (!dlgHwnd || !IsWindow(dlgHwnd))
+			return;
+
+		// One-shot dump of the dialog's child controls (class/rect) so the
+		// account-vs-password mapping can be verified/corrected from the log.
+		static bool s_dumpedChildren = false;
+		if (!s_dumpedChildren) {
+			s_dumpedChildren = true;
+			struct ChildCtx { int i; } ctx = { 0 };
+			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
+				char cls[48] = {0};
+				RECT r = {0};
+				GetClassNameA(h, cls, sizeof(cls));
+				GetWindowRect(h, &r);
+				AutoLoginLog("CHILD[%d] hwnd=%p cls='%s' rect=(%ld,%ld)-(%ld,%ld)",
+					((ChildCtx*)lp)->i++, h, cls, r.left, r.top, r.right, r.bottom);
+				return TRUE;
+			}, (LPARAM)&ctx);
+		}
+
+		EditList list = {};
+		EnumChildWindows(dlgHwnd, EditEnumProc, (LPARAM)&list);
+		if (list.n >= 2)
+		{
+			TypeIntoEdit(list.h[0], AutoLogin::g_account);
+			Sleep(20);
+			TypeIntoEdit(list.h[1], AutoLogin::g_password);
+
+			// Verify the game-side state actually received the text; if the
+			// edit->field mapping is inverted this exposes it in the log.
+			unsigned char* dlg = (unsigned char*)dialog;
+			const char* acct = SsoCStr(dlg + DLG_ACCOUNT_A);
+			unsigned int plen = *(unsigned int*)(dlg + DLG_PASSWORD_A + 0x104);
+			AutoLoginLog("TYPED via %d edits: acct-edit=%p psw-edit=%p | verify acct='%s' pswlen=%u",
+				list.n, list.h[0], list.h[1], acct?acct:"?", plen);
+		}
+		else
+		{
+			AutoLoginLog("TYPING skipped: found %d visible edit controls - keeping direct fill", list.n);
+		}
+	}
+
+	// ------------------------------------------------------------------
 	// SSO helpers for the dialog's string fields
 	// ------------------------------------------------------------------
 	// Layout used by the game's own readers (e.g. 0x008a929f):
@@ -944,6 +1047,21 @@ bool  InstallHooks()
 			probeOk |= 32;
 	}
 	AutoLoginLog("InstallHooks: wire probe ws2=%p ok=0x%X (1=send 2=recv 4=WSASend 8=WSARecv 16=connect 32=WSAConnect)", (void*)ws2, probeOk);
+
+	// Popup probes: log every message box the client shows during login.
+	HMODULE user32 = GetModuleHandleA("user32.dll");
+	int popupOk = 0;
+	if (user32) {
+		void* pMBA = (void*)GetProcAddress(user32, "MessageBoxA");
+		void* pMBW = (void*)GetProcAddress(user32, "MessageBoxW");
+		if (pMBA && MH_CreateHook(pMBA, (LPVOID)&AutoLogin::HookedMessageBoxA,
+			(LPVOID*)&AutoLogin::g_OrigMsgBoxA) == MH_OK && MH_EnableHook(pMBA) == MH_OK)
+			popupOk |= 1;
+		if (pMBW && MH_CreateHook(pMBW, (LPVOID)&AutoLogin::HookedMessageBoxW,
+			(LPVOID*)&AutoLogin::g_OrigMsgBoxW) == MH_OK && MH_EnableHook(pMBW) == MH_OK)
+			popupOk |= 2;
+	}
+	AutoLoginLog("InstallHooks: popup probe ok=0x%X (1=A 2=W)", popupOk);
 
 	AutoLogin::g_hooks = true;
 	strcpy_s(AutoLogin::g_lastResult, "hooks installed");

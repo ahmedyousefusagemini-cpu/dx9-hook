@@ -63,6 +63,13 @@ void HandleAutoLoginSubmit(void* dialog)
 		AutoLoginLogFromHook(tmp, dialog, dlgHwnd);
 	}
 	__try {
+		// Type the credentials through the dialog's REAL edit controls first
+		// (WM_CHAR on this, the game's message thread). The game-side handlers
+		// those messages trigger are what a manual login exercises and our
+		// direct memory fills never did - including the account-server dial.
+		extern void AutoLoginTypeViaControls();
+		AutoLoginTypeViaControls();
+
 		// NOTE: an earlier build called GetServerInfo(dialog,1,...) here, before
 		// the login handler, for diagnostics. Removed: GetServerInfo participates
 		// in the account-socket setup, and running it an extra time right before
