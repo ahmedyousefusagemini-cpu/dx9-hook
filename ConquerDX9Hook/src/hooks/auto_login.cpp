@@ -231,6 +231,7 @@ namespace AutoLogin
 	bool  g_backToLoginSeen = false;  // we returned to the account screen
 	bool  g_debugTypePasswordInAccount = false; // debug: type password into the VISIBLE account box
 	bool  g_manualCapture = false;    // manual-capture mode: automation frozen, probes record
+	bool  g_autoLearnPassword = false; // on successful login, save the typed password bytes to ini
 	unsigned long g_cycleStartTick = 0;
 	unsigned long g_lastAttemptTick = 0;
 	int   g_retryCount = 0;
@@ -362,6 +363,33 @@ namespace AutoLogin
 			AutoLoginLog("WIRE: auth ACCEPT (10B) received - closing cycle");
 			AutoLogin::g_attemptDone = true;
 			strcpy_s(AutoLogin::g_lastResult, "login accepted (server ACK)");
+
+			// Learn the credentials that just SUCCEEDED: decrypt the pair-A
+			// password wrapper and persist its exact bytes as password_hex in
+			// the ini, so auto-login replays them byte-for-byte next time -
+			// regardless of keyboard layout or character encoding.
+			if (AutoLogin::g_autoLearnPassword) {
+				void* dialog = AutoLogin::GetLoginDialog();
+				if (dialog && !IsBadReadPtr(dialog, 0x13C00)) {
+					unsigned char* dlg = (unsigned char*)dialog;
+					void* pswObj = dlg + AutoLogin::DLG_PASSWORD_A;
+					unsigned char plain[0x100];
+					AutoLogin::DecryptStoredPassword(pswObj, plain, sizeof(plain));
+					unsigned int plen = *(unsigned int*)(dlg + AutoLogin::DLG_PASSWORD_A + 0x104);
+					if (plen > 0x100) plen = 0x100;
+					if (plen > 0) {
+						char hexBuf[3 * 0x100 + 1] = {0};
+						int o = 0;
+						for (unsigned int i = 0; i < plen; ++i)
+							o += _snprintf_s(hexBuf + o, sizeof(hexBuf) - o, _TRUNCATE, "%02X ", plain[i]);
+						char sect[32];
+						sprintf_s(sect, "account_%d", AutoLogin::g_selectedAccount);
+						WritePrivateProfileStringA(sect, "password_hex", hexBuf, AutoLogin::g_cfgPath);
+						AutoLoginLog("LEARNED: saved %u password bytes as password_hex into [%s] (fnv=%08lX)",
+							plen, sect, AutoLogin::FnvHashBytes(plain, (int)plen));
+					}
+				}
+			}
 		}
 		return r;
 	}
@@ -994,6 +1022,26 @@ static void LoadConfig()
 		IniGetString(narrow, section, "account",  AutoLogin::g_account,  sizeof(AutoLogin::g_account),  "");
 		IniGetString(narrow, section, "password", AutoLogin::g_password, sizeof(AutoLogin::g_password), "");
 		IniGetString(narrow, section, "server",   AutoLogin::g_server,   sizeof(AutoLogin::g_server),   "");
+		// password_hex overrides password: raw ANSI bytes (space-separated hex)
+		// captured from a successful manual login - byte-exact regardless of
+		// keyboard layout or character encoding.
+		{
+			char hexBuf[1024] = {0};
+			if (IniGetString(narrow, section, "password_hex", hexBuf, sizeof(hexBuf), nullptr) && hexBuf[0]) {
+				size_t out = 0;
+				const char* p = hexBuf;
+				while (*p && out + 1 < sizeof(AutoLogin::g_password)) {
+					while (*p == ' ' || *p == '\t') ++p;
+					if (!*p) break;
+					char two[3] = { p[0], p[1], 0 };
+					if (!isxdigit((unsigned char)two[0]) || !isxdigit((unsigned char)two[1])) break;
+					AutoLogin::g_password[out++] = (char)strtoul(two, nullptr, 16);
+					p += 2;
+				}
+				AutoLogin::g_password[out] = 0;
+				AutoLoginLog("LoadConfig: using password_hex (%d bytes) - overrides password=", (int)out);
+			}
+		}
 		// Diagnostic: hex codes of the loaded credentials so a mismatch between
 		// the ini file and what the user intends can be seen byte-exactly
 		// (ASCII letters = plain codes; anything else shows the ANSI mapping).
@@ -1023,6 +1071,8 @@ static void LoadConfig()
 		AutoLogin::g_maxRetries = IniGetInt(narrow, "accounts", "max_retries", 12);
 		AutoLogin::g_debugTypePasswordInAccount =
 			IniGetInt(narrow, "accounts", "debug_password_into_account", 0) != 0;
+		AutoLogin::g_autoLearnPassword =
+			IniGetInt(narrow, "accounts", "auto_learn_password", 0) != 0;
 	} else {
 		// Legacy fallback
 		GetPrivateProfileStringA(section, "account",  "", AutoLogin::g_account,  sizeof(AutoLogin::g_account),  AutoLogin::g_cfgPath);
@@ -1041,6 +1091,8 @@ static void LoadConfig()
 		AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 12, AutoLogin::g_cfgPath);
 		AutoLogin::g_debugTypePasswordInAccount =
 			GetPrivateProfileIntA("accounts", "debug_password_into_account", 0, AutoLogin::g_cfgPath) != 0;
+		AutoLogin::g_autoLearnPassword =
+			GetPrivateProfileIntA("accounts", "auto_learn_password", 0, AutoLogin::g_cfgPath) != 0;
 	}
 	if (AutoLogin::g_maxRetries < 0)
 		AutoLogin::g_maxRetries = 0;
