@@ -346,6 +346,7 @@ namespace AutoLogin
 	typedef int (__stdcall *MessageBoxWFn)(HWND, const wchar_t*, const wchar_t*, unsigned);
 	MessageBoxAFn g_OrigMsgBoxA = nullptr;
 	MessageBoxWFn g_OrigMsgBoxW = nullptr;
+	SetPasswordFn g_OrigSetPassword = nullptr;
 
 	int __stdcall HookedMessageBoxA(HWND hwnd, const char* text, const char* caption, unsigned type)
 	{
@@ -360,6 +361,25 @@ namespace AutoLogin
 		if (caption) WideCharToMultiByte(CP_ACP, 0, caption, -1, c, sizeof(c), 0, 0);
 		AutoLoginLog("POPUP-W cap='%s' text='%s'", c, t);
 		return g_OrigMsgBoxW ? g_OrigMsgBoxW(hwnd, text, caption, type) : 0;
+	}
+
+	// SetPassword probe: hash (never print) whatever plaintext reaches
+	// CGameInputStr::SetPassword. The auto fill and a manual typing session
+	// MUST produce the same fnv hash + length - if they differ, the ini
+	// password is not what the user types by hand. Fires for BOTH paths since
+	// the game's own keyboard handler (FUN_0089c003) ends in the same call.
+	void __fastcall HookedSetPassword(void* self, void* /*edx*/, const char* text)
+	{
+		unsigned long h = 2166136261u;
+		int n = text ? (int)strlen(text) : -1;
+		for (int i = 0; i < n; ++i) {
+			h ^= (unsigned char)text[i];
+			h *= 16777619u;
+		}
+		AutoLoginLog("SETPSW obj=%p len=%d fnv=%08lX%s", self, n, h,
+			n < 0 ? " (null)" : "");
+		if (g_OrigSetPassword)
+			g_OrigSetPassword(self, edx, text);
 	}
 
 	// ------------------------------------------------------------------
@@ -409,8 +429,8 @@ namespace AutoLogin
 		// Those are the ONLY targets whose message handlers feed pair A - the
 		// zero-size 'Edit' children found by class enumeration are unrelated
 		// slot-name boxes. Prefer the member HWNDs; fall back to Edit children.
-		HWND acctEdit = *(HWND*)(dlg + 0x0cd0 + 0x20);
-		HWND pswEdit  = *(HWND*)(dlg + 0x0fe8 + 0x20);
+		HWND acctEdit = *(HWND*)(dlg + 0x0cd0);
+		HWND pswEdit  = *(HWND*)(dlg + 0x0fe8);
 		bool useMemberWnds = acctEdit && IsWindow(acctEdit) && pswEdit && IsWindow(pswEdit);
 
 		// One-shot dump of the dialog's child controls (class/rect) so the
@@ -1118,6 +1138,18 @@ bool  InstallHooks()
 			popupOk |= 2;
 	}
 	AutoLoginLog("InstallHooks: popup probe ok=0x%X (1=A 2=W)", popupOk);
+
+	// SetPassword probe - hash-compare auto-filled vs manually typed passwords.
+	{
+		MH_STATUS sps = MH_CreateHook((LPVOID)AutoLogin::SET_PASSWORD_ADDRESS,
+			(LPVOID)&AutoLogin::HookedSetPassword, (LPVOID*)&AutoLogin::g_OrigSetPassword);
+		if (sps == MH_OK) {
+			sps = MH_EnableHook((LPVOID)AutoLogin::SET_PASSWORD_ADDRESS);
+			AutoLoginLog("InstallHooks: setpsw probe %s", sps == MH_OK ? "ok" : "ENABLE FAILED");
+		} else {
+			AutoLoginLog("InstallHooks: setpsw probe CREATE FAILED %d", sps);
+		}
+	}
 
 	AutoLogin::g_hooks = true;
 	strcpy_s(AutoLogin::g_lastResult, "hooks installed");
