@@ -398,9 +398,20 @@ namespace AutoLogin
 		void* dialog = GetLoginDialog();
 		if (!dialog)
 			return;
-		HWND dlgHwnd = *(HWND*)((unsigned char*)dialog + DLG_HWND_OFFSET);
+		unsigned char* dlg = (unsigned char*)dialog;
+		HWND dlgHwnd = *(HWND*)(dlg + DLG_HWND_OFFSET);
 		if (!dlgHwnd || !IsWindow(dlgHwnd))
 			return;
+
+		// The game's own keyboard handler (FUN_0089c003, dlglogin.cpp) routes
+		// typing through two MFC CWnd members of the dialog:
+		//   account CWnd @ dlg+0x0cd0, password CWnd @ dlg+0x0fe8 (HWND @ +0x20)
+		// Those are the ONLY targets whose message handlers feed pair A - the
+		// zero-size 'Edit' children found by class enumeration are unrelated
+		// slot-name boxes. Prefer the member HWNDs; fall back to Edit children.
+		HWND acctEdit = *(HWND*)(dlg + 0x0cd0 + 0x20);
+		HWND pswEdit  = *(HWND*)(dlg + 0x0fe8 + 0x20);
+		bool useMemberWnds = acctEdit && IsWindow(acctEdit) && pswEdit && IsWindow(pswEdit);
 
 		// One-shot dump of the dialog's child controls (class/rect) so the
 		// account-vs-password mapping can be verified/corrected from the log.
@@ -417,27 +428,38 @@ namespace AutoLogin
 					((ChildCtx*)lp)->i++, h, cls, r.left, r.top, r.right, r.bottom);
 				return TRUE;
 			}, (LPARAM)&ctx);
+			AutoLoginLog("TARGETS: member acct=%p psw=%p", (void*)acctEdit, (void*)pswEdit);
 		}
 
-		EditList list = {};
-		EnumChildWindows(dlgHwnd, EditEnumProc, (LPARAM)&list);
-		if (list.n >= 2)
+		if (!useMemberWnds)
 		{
-			TypeIntoEdit(list.h[0], AutoLogin::g_account);
+			EditList list = {};
+			EnumChildWindows(dlgHwnd, EditEnumProc, (LPARAM)&list);
+			if (list.n >= 2) {
+				acctEdit = list.h[0];
+				pswEdit  = list.h[1];
+				useMemberWnds = true;
+			}
+		}
+
+		if (useMemberWnds)
+		{
+			TypeIntoEdit(acctEdit, AutoLogin::g_account);
 			Sleep(20);
-			TypeIntoEdit(list.h[1], AutoLogin::g_password);
+			TypeIntoEdit(pswEdit, AutoLogin::g_password);
 
 			// Verify the game-side state actually received the text; if the
 			// edit->field mapping is inverted this exposes it in the log.
-			unsigned char* dlg = (unsigned char*)dialog;
 			const char* acct = SsoCStr(dlg + DLG_ACCOUNT_A);
 			unsigned int plen = *(unsigned int*)(dlg + DLG_PASSWORD_A + 0x104);
-			AutoLoginLog("TYPED via %d edits: acct-edit=%p psw-edit=%p | verify acct='%s' pswlen=%u",
-				list.n, list.h[0], list.h[1], acct?acct:"?", plen);
+			const char* pswPlainCheck = "(encrypted)";
+			(void)pswPlainCheck;
+			AutoLoginLog("TYPED acct=%p psw=%p | verify acct='%s' pswlen=%u",
+				(void*)acctEdit, (void*)pswEdit, acct?acct:"?", plen);
 		}
 		else
 		{
-			AutoLoginLog("TYPING skipped: found %d visible edit controls - keeping direct fill", list.n);
+			AutoLoginLog("TYPING skipped: no usable edit targets - keeping direct fill");
 		}
 	}
 
