@@ -44,7 +44,8 @@ static DWORD g_lastSubclassEnumTick = 0;
 namespace AutoLogin {
 	void AutoLoginTypeViaControls();
 	void AutoLoginPrimeConnection();
-	extern int g_retryCount;
+	extern int  g_retryCount;
+	extern char g_account[128];
 }
 
 // Auto-login submit message handler.  Called on the game's message thread
