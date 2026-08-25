@@ -53,8 +53,42 @@ namespace AutoLogin {
 // the account-server IP/port and connects the socket) then sends the packet.
 // This MUST run on the message thread — calling FUN_008a8fba directly from
 // the render thread crashed the client.
+
+// BOTH DLL copies (proxy + injected sibling) subclass the dialog window, so
+// one posted submit travels through BOTH window procedures and would run the
+// login handler twice - two auth packets 350ms apart, which the server
+// answers with silence. A named shared-memory tick deduplicates across
+// copies: whichever layer processes the message first wins, the other skips.
+static HANDLE g_alSubmitMap = nullptr;
+static unsigned long* g_alSubmitTick = nullptr;
+static unsigned long* AlSubmitSharedTick()
+{
+	if (!g_alSubmitTick) {
+		g_alSubmitMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
+			PAGE_READWRITE, 0, 64, "Local\\CDX9Hook_AutoLoginSubmit");
+		if (g_alSubmitMap)
+			g_alSubmitTick = (unsigned long*)MapViewOfFile(g_alSubmitMap,
+				FILE_MAP_ALL_ACCESS, 0, 0, 64);
+		if (g_alSubmitTick)
+			*g_alSubmitTick = 0;
+	}
+	return g_alSubmitTick;
+}
+
 void HandleAutoLoginSubmit(void* dialog)
 {
+	// Cross-copy duplicate suppression (see above).
+	unsigned long* shTick = AlSubmitSharedTick();
+	unsigned long nowMs = GetTickCount();
+	if (shTick && nowMs - *shTick < 3000) {
+		extern void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
+		AutoLoginLogFromHook("DUPLICATE submit suppressed (second subclass layer)", dialog,
+			dialog ? *(HWND*)((unsigned char*)dialog + 0x20) : NULL);
+		return;
+	}
+	if (shTick)
+		*shTick = nowMs;
+
 	// Cross-thread log: confirms the message reached this handler on the
 	// game's message thread.
 	extern void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
