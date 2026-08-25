@@ -241,6 +241,11 @@ namespace AutoLogin
 	unsigned long g_postGraceUntil = 0; // no re-submit while the game thread processes a posted submit
 	char  g_lastResult[64] = "idle";
 
+	// Forward declarations for helpers defined further below in this file.
+	static void* GetLoginDialog();
+	static void DecryptStoredPassword(void* wrapper, unsigned char* outPlain, unsigned int cap);
+	static unsigned long FnvHashBytes(const unsigned char* p, int n);
+
 	// ------------------------------------------------------------------
 	// Wire probe (temporary diagnostics): log real socket traffic for ~20s
 	// after a login send fires. Answers definitively whether the queued
