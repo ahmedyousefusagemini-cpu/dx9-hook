@@ -221,6 +221,7 @@ namespace AutoLogin
 	bool  g_hooks = false;
 	bool  g_attemptDone = false;      // a login was sent this cycle (auto or manual)
 	bool  g_backToLoginSeen = false;  // we returned to the account screen
+	bool  g_debugTypePasswordInAccount = false; // debug: type password into the VISIBLE account box
 	unsigned long g_cycleStartTick = 0;
 	unsigned long g_lastAttemptTick = 0;
 	int   g_retryCount = 0;
@@ -368,14 +369,50 @@ namespace AutoLogin
 		return r;
 	}
 
-	// ------------------------------------------------------------------
-	// Popup logger - capture what the CLIENT says (error boxes etc.) during
-	// the login phase. Without this, silent failures are undiagnosable.
-	// ------------------------------------------------------------------
 	// Forward declarations: these helpers are defined further below.
 	static void* GetLoginDialog();
 	static const char* SsoCStr(const void* obj);
 
+	// ------------------------------------------------------------------
+	// Password-verification helpers. The SetPassword cipher (FUN_00ea1692)
+	// is a per-byte XOR: enc[i] = ((i*'g'-0x7F)*i) ^ key[i&0xFF]
+	//                       ^ ((i>>4)*'f') ^ plain[i] ^ 0xB9
+	// which is fully invertible - we can recover what the game STORES and
+	// hash-compare it against the ini without ever printing the plaintext.
+	// ------------------------------------------------------------------
+	static unsigned long FnvHashBytes(const unsigned char* p, int n)
+	{
+		unsigned long h = 2166136261u;
+		for (int i = 0; i < n; ++i) { h ^= p[i]; h *= 16777619u; }
+		return h;
+	}
+
+	static unsigned long FnvHashStr(const char* s)
+	{
+		return s ? FnvHashBytes((const unsigned char*)s, (int)strlen(s)) : 2166136261u;
+	}
+
+	static void DecryptStoredPassword(void* wrapper, unsigned char* outPlain, unsigned int cap)
+	{
+		unsigned char* w = (unsigned char*)wrapper;
+		unsigned int len = *(unsigned int*)(w + 0x104);
+		if (len > 0xFF) len = 0xFF;
+		if (len > cap)  len = cap;
+		for (unsigned int i = 0; i < len; ++i) {
+			unsigned int ci  = i & 0xFF;
+			char c           = (char)ci;
+			unsigned int a   = (unsigned int)(((int)c * 0x67 - 0x7F) * (int)c) & 0xFF;
+			char hi          = (char)(i >> 4);
+			unsigned int cc  = (unsigned int)(hi * 0x66) & 0xFF;
+			outPlain[i] = (unsigned char)(w[0x108 + i] ^ w[ci] ^ a ^ cc ^ 0xB9);
+		}
+		if (len < cap) outPlain[len] = 0;
+	}
+
+	// ------------------------------------------------------------------
+	// Popup logger - capture what the CLIENT says (error boxes etc.) during
+	// the login phase. Without this, silent failures are undiagnosable.
+	// ------------------------------------------------------------------
 	typedef int (__stdcall *MessageBoxAFn)(HWND, const char*, const char*, unsigned);
 	typedef int (__stdcall *MessageBoxWFn)(HWND, const wchar_t*, const wchar_t*, unsigned);
 	MessageBoxAFn g_OrigMsgBoxA = nullptr;
@@ -419,8 +456,22 @@ namespace AutoLogin
 		if (logIt) {
 			s_lastObj = self;
 			s_lastLogTick = now;
-			AutoLoginLog("SETPSW obj=%p len=%d fnv=%08lX%s", self, n, h,
-				n < 0 ? " (null)" : "");
+			// Ground truth: decrypt what THIS wrapper now stores and hash it.
+			// If storedFNV != fnv(text) the encryption/fill path is broken;
+			// if two different sources produce equal hashes they are identical.
+			char storedLine[96] = "";
+			__try {
+				unsigned char plain[0x100];
+				DecryptStoredPassword(self, plain, sizeof(plain));
+				unsigned int slen = *(unsigned int*)((unsigned char*)self + 0x104);
+				if (slen > 0x100) slen = 0x100;
+				_snprintf_s(storedLine, _TRUNCATE, " | storedLen=%u storedFNV=%08lX",
+					slen, FnvHashBytes(plain, (int)slen));
+			} __except(EXCEPTION_EXECUTE_HANDLER) {
+				_snprintf_s(storedLine, _TRUNCATE, " | decrypt EXCEPTION");
+			}
+			AutoLoginLog("SETPSW obj=%p len=%d fnv=%08lX%s%s", self, n, h,
+				n < 0 ? " (null)" : "", storedLine);
 		}
 		if (g_OrigSetPassword)
 			g_OrigSetPassword(self, edx, text);
@@ -508,16 +559,35 @@ namespace AutoLogin
 
 		if (useMemberWnds)
 		{
-			TypeIntoEdit(acctEdit, AutoLogin::g_account);
+			// Debug mode: type the PASSWORD into the visible ACCOUNT box so the
+			// user can visually confirm what our WM_CHAR typing produces.
+			const char* acctText = AutoLogin::g_debugTypePasswordInAccount
+				? AutoLogin::g_password : AutoLogin::g_account;
+			if (AutoLogin::g_debugTypePasswordInAccount)
+				AutoLoginLog("DEBUG MODE: typing the INI PASSWORD into the ACCOUNT box - read it on screen!");
+			TypeIntoEdit(acctEdit, acctText);
 			Sleep(20);
 			TypeIntoEdit(pswEdit, AutoLogin::g_password);
+
+			// Ground truth: read back what the CONTROLS hold (WM_GETTEXT) and
+			// hash-compare. This is independent of the wrapper state, so it
+			// proves whether WM_CHAR typing itself works.
+			char gotAcct[160] = {0}, gotPsw[160] = {0};
+			GetWindowTextA(acctEdit, gotAcct, sizeof(gotAcct));
+			GetWindowTextA(pswEdit, gotPsw, sizeof(gotPsw));
+			unsigned long gotAcctF = AutoLogin::FnvHashStr(gotAcct);
+			unsigned long gotPswF  = AutoLogin::FnvHashStr(gotPsw);
+			unsigned long wantAcctF = AutoLogin::FnvHashStr(acctText);
+			unsigned long wantPswF  = AutoLogin::FnvHashStr(AutoLogin::g_password);
+			AutoLoginLog("EDITREADBACK account: text='%s' fnv=%08lX want=%08lX => %s",
+				gotAcct, gotAcctF, wantAcctF, gotAcctF == wantAcctF ? "MATCH" : "*** MISMATCH ***");
+			AutoLoginLog("EDITREADBACK password: len=%d fnv=%08lX want=%08lX => %s",
+				(int)strlen(gotPsw), gotPswF, wantPswF, gotPswF == wantPswF ? "MATCH" : "*** MISMATCH ***");
 
 			// Verify the game-side state actually received the text; if the
 			// edit->field mapping is inverted this exposes it in the log.
 			const char* acct = SsoCStr(dlg + DLG_ACCOUNT_A);
 			unsigned int plen = *(unsigned int*)(dlg + DLG_PASSWORD_A + 0x104);
-			const char* pswPlainCheck = "(encrypted)";
-			(void)pswPlainCheck;
 			AutoLoginLog("TYPED acct=%p psw=%p | verify acct='%s' pswlen=%u",
 				(void*)acctEdit, (void*)pswEdit, acct?acct:"?", plen);
 		}
@@ -875,6 +945,8 @@ static void LoadConfig()
 		} else AutoLogin::g_retryMs = 6000;
 		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
 		AutoLogin::g_maxRetries = IniGetInt(narrow, "accounts", "max_retries", 12);
+		AutoLogin::g_debugTypePasswordInAccount =
+			IniGetInt(narrow, "accounts", "debug_password_into_account", 0) != 0;
 	} else {
 		// Legacy fallback
 		GetPrivateProfileStringA(section, "account",  "", AutoLogin::g_account,  sizeof(AutoLogin::g_account),  AutoLogin::g_cfgPath);
@@ -891,6 +963,8 @@ static void LoadConfig()
 		AutoLogin::g_retryMs = atoi(buf);
 		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
 		AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 12, AutoLogin::g_cfgPath);
+		AutoLogin::g_debugTypePasswordInAccount =
+			GetPrivateProfileIntA("accounts", "debug_password_into_account", 0, AutoLogin::g_cfgPath) != 0;
 	}
 	if (AutoLogin::g_maxRetries < 0)
 		AutoLogin::g_maxRetries = 0;
@@ -1495,11 +1569,22 @@ void AutoLoginTick()
 		unsigned int len = *(unsigned int*)(pswObj + 0x104);
 		const unsigned char* enc = pswObj + 0x108;
 		const char* dlgSrv = AutoLogin::CStringCStr(dlg + AutoLogin::DLG_SERVER_NAME);
+		// Decrypt what the wrapper STORES and compare against the ini value -
+		// this proves/disproves "the game holds the right password" directly.
+		unsigned char storedPlain[0x100];
+		AutoLogin::DecryptStoredPassword(pswObj, storedPlain, sizeof(storedPlain));
+		unsigned long storedF = AutoLogin::FnvHashBytes(storedPlain,
+			len > 0x100 ? 0x100 : (int)len);
+		unsigned long iniF = AutoLogin::FnvHashStr(AutoLogin::g_password);
 		AutoLoginLog("AutoLoginTick: pre-submit psw cnt=%u len=%u enc=%02X%02X%02X%02X%02X%02X%02X%02X acct='%s' acctlen=%u dlgsrv='%s'",
 			cnt, len, enc[0], enc[1], enc[2], enc[3], enc[4], enc[5], enc[6], enc[7],
 			AutoLogin::SsoCStr(accountObj),
 			*(unsigned long*)((unsigned char*)accountObj + AutoLogin::SSO_LEN_OFFSET),
 			dlgSrv ? dlgSrv : "");
+		AutoLoginLog("AutoLoginTick: PASSWORD CHECK: storedFNV=%08lX iniFNV=%08lX => %s%s",
+			storedF, iniF,
+			storedF == iniF ? "MATCH - game holds the ini password" : "*** MISMATCH - game does NOT hold the ini password ***",
+			len != strlen(AutoLogin::g_password) ? " (len differs too)" : "");
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
 		AutoLoginLog("AutoLoginTick: pre-submit dump exception");
 	}
