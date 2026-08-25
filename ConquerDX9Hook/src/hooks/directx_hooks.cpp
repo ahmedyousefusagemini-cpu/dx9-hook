@@ -41,7 +41,11 @@ static DWORD g_lastSubclassEnumTick = 0;
 
 // Auto-login typing helper (defined in auto_login.cpp): types the ini
 // credentials through the login dialog's real edit controls on the game thread.
-namespace AutoLogin { void AutoLoginTypeViaControls(); }
+namespace AutoLogin {
+	void AutoLoginTypeViaControls();
+	void AutoLoginPrimeConnection();
+	extern int g_retryCount;
+}
 
 // Auto-login submit message handler.  Called on the game's message thread
 // when the auto-login module posts WM_AUTOLOGIN_SUBMIT.  Runs the game's
@@ -72,6 +76,12 @@ void HandleAutoLoginSubmit(void* dialog)
 		// those messages trigger are what a manual login exercises and our
 		// direct memory fills never did - including the account-server dial.
 		AutoLogin::AutoLoginTypeViaControls();
+		// Simulate clicking the selected realm row once per cycle: that is the
+		// button whose handler establishes the ACCOUNT-SERVER connection
+		// (FUN_008a9348 -> FUN_0101aa52 -> FUN_010234e9(1,ip,port)). Without
+		// it every login send queues into a socket that never exists.
+		if (AutoLogin::g_retryCount <= 1)
+			AutoLogin::AutoLoginPrimeConnection();
 
 		// NOTE: an earlier build called GetServerInfo(dialog,1,...) here, before
 		// the login handler, for diagnostics. Removed: GetServerInfo participates

@@ -440,6 +440,28 @@ namespace AutoLogin
 		}
 	}
 
+	// Simulates clicking the selected REALM ROW (the game's own handler for
+	// that button, FUN_008a9348 @ 0x008A9348): resolves the realm, persists
+	// PlaySetUP.ini and - critically - establishes the ACCOUNT-SERVER
+	// connection via FUN_010188fb -> FUN_0101aa52 (reads [ServerInfo] from
+	// ini/Info.ini) -> FUN_010234e9(1, ip, port, 10). A login packet sent
+	// without this priming lands on a socket that never exists ("queued"
+	// forever, no wire C, no server reply, no error popup). MUST run on the
+	// game's message thread (invoked from HandleAutoLoginSubmit).
+	void AutoLoginPrimeConnection()
+	{
+		void* dialog = GetLoginDialog();
+		if (!dialog)
+			return;
+		__try {
+			typedef void (__fastcall* RowSelectFn)(void*);
+			((RowSelectFn)0x008A9348)(dialog);
+			AutoLoginLog("PRIME: realm-row handler invoked (account-server connect chain)");
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			AutoLoginLog("PRIME: row-select handler EXCEPTION");
+		}
+	}
+
 	// ------------------------------------------------------------------
 	// SSO helpers for the dialog's string fields
 	// ------------------------------------------------------------------
