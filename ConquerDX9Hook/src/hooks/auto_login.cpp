@@ -920,14 +920,16 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	// manual sends - diffing an auto line against a manual-typed line isolates
 	// any field the auto-fill leaves different (known suspect: +0x100 count,
 	// which SetPassword does not touch but the packet hash may include).
-	if (password && !IsBadReadPtr(password, 0x110))
+	if (password && !IsBadReadPtr(password, 0x210))
 	{
 		unsigned char* w = (unsigned char*)password;
 		__try {
-			AutoLoginLog("HookedLoginSend: pswdump cnt=%u len=%u enc=%02X%02X%02X%02X%02X%02X%02X%02X",
+			AutoLoginLog("HookedLoginSend: pswdump cnt=%u len=%u enc=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X term=%02X",
 				*(unsigned int*)(w + 0x100), *(unsigned int*)(w + 0x104),
 				w[0x108], w[0x109], w[0x10A], w[0x10B],
-				w[0x10C], w[0x10D], w[0x10E], w[0x10F]);
+				w[0x10C], w[0x10D], w[0x10E], w[0x10F],
+				w[0x110], w[0x111], w[0x112], w[0x113],
+				w[0x114], w[0x115], w[0x116], w[0x117], w[0x207]);
 		} __except(EXCEPTION_EXECUTE_HANDLER) {
 			AutoLoginLog("HookedLoginSend: pswdump exception");
 		}
