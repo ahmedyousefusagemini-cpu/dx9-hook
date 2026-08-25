@@ -39,6 +39,10 @@ static WNDPROC g_originalChildWindowProcedure = NULL;
 static std::map<HWND, WNDPROC> g_subclassedWindows;
 static DWORD g_lastSubclassEnumTick = 0;
 
+// Auto-login typing helper (defined in auto_login.cpp): types the ini
+// credentials through the login dialog's real edit controls on the game thread.
+namespace AutoLogin { void AutoLoginTypeViaControls(); }
+
 // Auto-login submit message handler.  Called on the game's message thread
 // when the auto-login module posts WM_AUTOLOGIN_SUBMIT.  Runs the game's
 // own Login button handler (FUN_008a8fba) which does GetServerInfo (resolves
@@ -67,7 +71,6 @@ void HandleAutoLoginSubmit(void* dialog)
 		// (WM_CHAR on this, the game's message thread). The game-side handlers
 		// those messages trigger are what a manual login exercises and our
 		// direct memory fills never did - including the account-server dial.
-		namespace AutoLogin { void AutoLoginTypeViaControls(); }
 		AutoLogin::AutoLoginTypeViaControls();
 
 		// NOTE: an earlier build called GetServerInfo(dialog,1,...) here, before
