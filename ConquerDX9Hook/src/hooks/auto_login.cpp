@@ -232,6 +232,7 @@ namespace AutoLogin
 	bool  g_debugTypePasswordInAccount = false; // debug: type password into the VISIBLE account box
 	bool  g_manualCapture = false;    // manual-capture mode: automation frozen, probes record
 	bool  g_autoLearnPassword = false; // on successful login, save the typed password bytes to ini
+	HANDLE g_instanceMutex = nullptr;  // single-instance guard: owner of all hooks
 	unsigned long g_cycleStartTick = 0;
 	unsigned long g_lastAttemptTick = 0;
 	int   g_retryCount = 0;
@@ -1292,6 +1293,31 @@ bool  InstallHooks()
 {
 	if (AutoLogin::g_hooks)
 		return true;
+
+	// SINGLE-INSTANCE GUARD. The DLL loads twice in this setup (proxy +
+	// injected copy). Two independent MinHook instances patching the SAME
+	// game addresses produce chained hooks: every game call passes through
+	// both copies' hooks -> doubled logs, doubled trampoline hops and,
+	// for the login send, TWO REAL AUTH PACKETS per click (the server then
+	// answers silence even when the credentials are correct).
+	// First copy takes the mutex and owns ALL hooking; later copies stay
+	// completely inert.
+	{
+		HANDLE m = CreateMutexA(nullptr, TRUE, "Local\\CDX9Hook_HookOwner");
+		if (m == nullptr) {
+			AutoLoginLog("InstallHooks: instance mutex create failed %u", GetLastError());
+			strcpy_s(AutoLogin::g_lastResult, "instance mutex failed");
+			return false;
+		}
+		if (GetLastError() == ERROR_ALREADY_EXISTS) {
+			CloseHandle(m);
+			AutoLoginLog("InstallHooks: another DLL copy owns the hooks - staying INERT");
+			strcpy_s(AutoLogin::g_lastResult, "duplicate DLL copy - inert");
+			return false;
+		}
+		AutoLogin::g_instanceMutex = m; // held for the lifetime of the process
+	}
+
 	if (!IsSupported())
 	{
 		strcpy_s(AutoLogin::g_lastResult, "unsupported build - inert");
