@@ -186,6 +186,14 @@ namespace AutoLogin
 	//   random key table installed by the dialog ctor), terminator@+0x207.
 	//   Asserts strlen(text) < 0x100 - caller must truncate.
 	const uintptr_t SET_PASSWORD_ADDRESS = 0x00EA1692;
+
+	// Manual-sequence recording anchors:
+	//   FUN_008a9348 - realm-ROW button handler (resolves realm, persists
+	//                  PlaySetUP.ini, establishes the ACCOUNT-SERVER connection
+	//                  via FUN_010188fb -> FUN_0101aa52 -> FUN_010234e9(1,...)).
+	//   FUN_008827c2 - CDlgLogin::GetServerInfo (mode 1 = account server).
+	const uintptr_t REALM_ROW_HANDLER = 0x008A9348;
+	const uintptr_t GET_SERVER_INFO   = 0x008827C2;
 	typedef void(__fastcall* SetPasswordFn)(void* pswObj, void* /*edx_dummy*/, const char* text);
 
 	// cdecl, 5 params; the caller cleans the stack (bare RET at 0x0101C250).
@@ -222,6 +230,7 @@ namespace AutoLogin
 	bool  g_attemptDone = false;      // a login was sent this cycle (auto or manual)
 	bool  g_backToLoginSeen = false;  // we returned to the account screen
 	bool  g_debugTypePasswordInAccount = false; // debug: type password into the VISIBLE account box
+	bool  g_manualCapture = false;    // manual-capture mode: automation frozen, probes record
 	unsigned long g_cycleStartTick = 0;
 	unsigned long g_lastAttemptTick = 0;
 	int   g_retryCount = 0;
@@ -259,6 +268,13 @@ namespace AutoLogin
 	WSAConnectFn g_OrigWSAConnect = nullptr;
 	unsigned long s_lastDialTick = 0;   // when the client last dialed anything (gates PRIME)
 	int s_fullDumpCount = 0;            // full-payload dumps this probe window
+
+	// Probe is live during the 20s post-send window OR the whole time while
+	// manual-capture mode records a human login.
+	static bool WireProbeActive()
+	{
+		return AutoLogin::g_manualCapture || GetTickCount() < g_wireProbeUntil;
+	}
 
 	static void LogConnectTarget(void* sock, const void* addr, int addrlen)
 	{
@@ -310,7 +326,7 @@ namespace AutoLogin
 
 	int __stdcall HookedWireSend(void* sock, const char* buf, int len, int flags)
 	{
-		if (g_OrigSend && GetTickCount() < g_wireProbeUntil && buf && len > 0)
+		if (g_OrigSend && WireProbeActive() && buf && len > 0)
 		{
 			WireHexLog('>', sock, buf, len);
 			// Full payload dump - limited count per probe window - so an auto
@@ -335,12 +351,12 @@ namespace AutoLogin
 	{
 		int r = g_OrigRecv ? g_OrigRecv(sock, buf, len, flags) : -1;
 		// Log successful reads only - async sockets hammer WSAEWOULDBLOCK.
-		if (g_OrigRecv && GetTickCount() < g_wireProbeUntil && r > 0 && buf)
+		if (g_OrigRecv && WireProbeActive() && r > 0 && buf)
 			WireHexLog('<', sock, buf, r);
 		// 10-byte payload during the login window = the auth-ACCEPT message
 		// (manual logins get it; rejects are 6 bytes). Close the cycle so no
 		// further auto-submits fire while the client transitions into the world.
-		if (g_OrigRecv && GetTickCount() < g_wireProbeUntil && r == 10 &&
+		if (g_OrigRecv && WireProbeActive() && r == 10 &&
 		    !AutoLogin::g_attemptDone)
 		{
 			AutoLoginLog("WIRE: auth ACCEPT (10B) received - closing cycle");
@@ -418,6 +434,31 @@ namespace AutoLogin
 	MessageBoxAFn g_OrigMsgBoxA = nullptr;
 	MessageBoxWFn g_OrigMsgBoxW = nullptr;
 	SetPasswordFn g_OrigSetPassword = nullptr;
+
+	// Manual-sequence recorders (installed always; they only LOG, never alter
+	// behaviour - so we see the exact call order a HUMAN login produces):
+	typedef void (__fastcall *RealmRowFn)(void* self, void* edx);
+	typedef char (__fastcall *GetServerInfoFn)(void* self, void* edx, int mode,
+		char* outIP, int cap, int* outPort);
+	RealmRowFn     g_OrigRealmRow     = nullptr;
+	GetServerInfoFn g_OrigGetServerInfo = nullptr;
+
+	void __fastcall HookedRealmRow(void* self, void* edx)
+	{
+		AutoLoginLog("SEQ: realm-row handler ENTER dialog=%p (resolves realm + connects account server)", self);
+		if (g_OrigRealmRow)
+			g_OrigRealmRow(self, edx);
+		AutoLoginLog("SEQ: realm-row handler RETURN");
+	}
+
+	char __fastcall HookedGetServerInfo(void* self, void* edx, int mode,
+		char* outIP, int cap, int* outPort)
+	{
+		char r = g_OrigGetServerInfo ? g_OrigGetServerInfo(self, edx, mode, outIP, cap, outPort) : 0;
+		AutoLoginLog("SEQ: GetServerInfo(mode=%d) -> %d ip='%s' port=%d",
+			mode, (int)r, outIP ? outIP : "?", outPort ? *outPort : -1);
+		return r;
+	}
 
 	int __stdcall HookedMessageBoxA(HWND hwnd, const char* text, const char* caption, unsigned type)
 	{
@@ -1270,6 +1311,26 @@ bool  InstallHooks()
 		}
 	}
 
+	// Manual-sequence recorders.
+	{
+		MH_STATUS s1 = MH_CreateHook((LPVOID)AutoLogin::REALM_ROW_HANDLER,
+			(LPVOID)&AutoLogin::HookedRealmRow, (LPVOID*)&AutoLogin::g_OrigRealmRow);
+		if (s1 == MH_OK) {
+			s1 = MH_EnableHook((LPVOID)AutoLogin::REALM_ROW_HANDLER);
+			AutoLoginLog("InstallHooks: seq realm-row %s", s1 == MH_OK ? "ok" : "ENABLE FAILED");
+		} else {
+			AutoLoginLog("InstallHooks: seq realm-row CREATE FAILED %d", s1);
+		}
+		MH_STATUS s2 = MH_CreateHook((LPVOID)AutoLogin::GET_SERVER_INFO,
+			(LPVOID)&AutoLogin::HookedGetServerInfo, (LPVOID*)&AutoLogin::g_OrigGetServerInfo);
+		if (s2 == MH_OK) {
+			s2 = MH_EnableHook((LPVOID)AutoLogin::GET_SERVER_INFO);
+			AutoLoginLog("InstallHooks: seq getserverinfo %s", s2 == MH_OK ? "ok" : "ENABLE FAILED");
+		} else {
+			AutoLoginLog("InstallHooks: seq getserverinfo CREATE FAILED %d", s2);
+		}
+	}
+
 	AutoLogin::g_hooks = true;
 	strcpy_s(AutoLogin::g_lastResult, "hooks installed");
 	AutoLoginLog("InstallHooks: ok login_send=%p back_to_login=%p", (void*)AutoLogin::LOGIN_SEND_ADDRESS, (void*)AutoLogin::BACK_TO_LOGIN_ADDRESS);
@@ -1322,6 +1383,12 @@ void AutoLoginTick()
 	// Hot-reload: pick up edits to auto_login.ini without restart.
 	unsigned long nowEarly = GetTickCount();
 	MaybeReloadConfig(nowEarly);
+
+	// Manual-capture mode: every bit of automation is frozen; the probes
+	// (wire / setpsw / seq hooks) keep recording passively so a human login
+	// can be captured and compared against the auto sequence.
+	if (AutoLogin::g_manualCapture)
+		return;
 
 	if (!AutoLogin::g_enabled || !AutoLogin::g_account[0]) {
 		// Keep hooks installed even when disabled so manual logins still
@@ -1653,3 +1720,22 @@ bool        GetAutoLoginHooksInstalled()  { return AutoLogin::g_hooks; }
 unsigned long GetAutoLoginSubmitCount()   { return AutoLogin::g_submitCount; }
 int         GetAutoLoginSelectedAccount() { return AutoLogin::g_selectedAccount; }
 unsigned long GetAutoLoginLastAttemptTick(){ return AutoLogin::g_lastAttemptTick; }
+
+// Manual-capture toggle (overlay button): freezes ALL auto-login automation
+// and keeps the probes recording so a human login can be compared against.
+void AutoLoginSetManualCapture(bool on)
+{
+	if (on == AutoLogin::g_manualCapture)
+		return;
+	AutoLogin::g_manualCapture = on;
+	AutoLogin::s_fullDumpCount = 0;
+	if (on) {
+		AutoLoginLog("=== MANUAL CAPTURE START === auto-automation FROZEN - do the login by hand now; everything is recorded");
+		strcpy_s(AutoLogin::g_lastResult, "manual capture ON");
+	} else {
+		AutoLoginLog("=== MANUAL CAPTURE STOP === auto-login resumed");
+		strcpy_s(AutoLogin::g_lastResult, "manual capture off");
+	}
+}
+
+bool AutoLoginGetManualCapture() { return AutoLogin::g_manualCapture; }

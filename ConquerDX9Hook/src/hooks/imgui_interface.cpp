@@ -19,6 +19,8 @@ extern const char* GetAutoLoginStateString();
 extern bool GetAutoLoginEnabled();
 extern bool GetAutoLoginHooksInstalled();
 extern unsigned long GetAutoLoginSubmitCount();
+extern void AutoLoginSetManualCapture(bool on);
+extern bool AutoLoginGetManualCapture();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -85,6 +87,15 @@ void RenderImGuiInterface()
 			en ? "" : " (disabled)");
 		if (!en) {
 			ImGui::TextDisabled("Enable: auto_login.ini [accounts] enabled=1 -> [account_0] account/password");
+		}
+		bool mc = AutoLoginGetManualCapture();
+		ImGui::PushStyleColor(ImGuiCol_Text, mc ? ImVec4(1.0f, 0.9f, 0.3f, 1) : ImVec4(1, 1, 1, 1));
+		if (ImGui::Checkbox("MANUAL LOGIN CAPTURE (pauses auto-login)", &mc))
+			AutoLoginSetManualCapture(mc);
+		ImGui::PopStyleColor();
+		if (mc) {
+			ImGui::TextDisabled("Auto frozen. Do the login by hand - everything");
+			ImGui::TextDisabled("(realm row, GetServerInfo, packets) is recorded.");
 		}
 		ImGui::Separator();
 	}
