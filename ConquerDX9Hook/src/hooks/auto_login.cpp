@@ -368,7 +368,7 @@ namespace AutoLogin
 	// MUST produce the same fnv hash + length - if they differ, the ini
 	// password is not what the user types by hand. Fires for BOTH paths since
 	// the game's own keyboard handler (FUN_0089c003) ends in the same call.
-	void __fastcall HookedSetPassword(void* self, void* /*edx*/, const char* text)
+	void __fastcall HookedSetPassword(void* self, void* edx, const char* text)
 	{
 		unsigned long h = 2166136261u;
 		int n = text ? (int)strlen(text) : -1;
