@@ -67,8 +67,8 @@ void HandleAutoLoginSubmit(void* dialog)
 		// (WM_CHAR on this, the game's message thread). The game-side handlers
 		// those messages trigger are what a manual login exercises and our
 		// direct memory fills never did - including the account-server dial.
-		extern void AutoLoginTypeViaControls();
-		AutoLoginTypeViaControls();
+		namespace AutoLogin { void AutoLoginTypeViaControls(); }
+		AutoLogin::AutoLoginTypeViaControls();
 
 		// NOTE: an earlier build called GetServerInfo(dialog,1,...) here, before
 		// the login handler, for diagnostics. Removed: GetServerInfo participates
