@@ -39,6 +39,15 @@ extern GameWindowInfo g_gameWindow;
 //      call site at 0x00a5b8dd-0x00a5b8fe reads dialog+0x39B948).
 //      The dialog's HWND is at dialog+0x20.
 //
+//      Ghidra-verified 2026-08: this 7937 dialog uses vtable at
+//      dialog+0xd1d0 (not the older dialog's +0xdc68), and the actual
+//      Login button handler is FUN_008cec7d (not FUN_008a8fba). The
+//      older FUN_008a8fba is a different / earlier login shell whose
+//      vfunc guard fires immediately when called on the 7937 dialog
+//      and silently dispatches to the QR/relogin path (FUN_008a964f,
+//      mode 1, pair B fields) - that's where the "invalid Account or
+//      Psw" came from on previous versions of this hook.
+//
 //   2. The game itself only invokes the Login handler while the dialog is
 //      visible: at 0x00a5b896/0x00a5b8eb it calls FUN_00bfee7b(dialog,1) =
 //      IsWindow/IsWindowVisible(dialog+0x20) before CALL 0x008a8fba. We gate
@@ -46,9 +55,14 @@ extern GameWindowInfo g_gameWindow;
 //      queues the packet into a dead socket and the client silently drops it
 //      (this was the "no login sequence at boot" bug).
 //
-//   3. The Login button handler (FUN_008a8fba, __fastcall ECX=dialog) reads the
-//      typed account/password from two "edit" wrapper objects inside the dialog
-//      and then calls the actual credential send:
+//   3. The Login button handler (FUN_008cec7d, __thiscall ECX=dialog)
+//      reads the typed account/password from two "edit" wrapper objects
+//      inside the dialog and then drives the credential send via the
+//      network layer. Calling FUN_008a8fba here was wrong: that is
+//      an older dialog's button that shares the +0xdc68 vtable; when
+//      the 7937 dialog calls through +0xd1d0 its vfunc guard sees
+//      the wrong state and exits via FUN_008a964f (QR mode 1, pair B),
+//      which sends a packet the server reads as malformed.
 //
 //          FUN_0101bfe7(account_cstr, password_obj, serverName_cstr, mode, port)
 //
@@ -133,14 +147,48 @@ namespace AutoLogin
 	// and 0x00a267da).  PUSH 0x16CE374; CALL FUN_0043e5d1
 	const uintptr_t BACK_TO_LOGIN_ADDRESS = 0x00C3AC82;
 
-	// FUN_008a8fba - the Login button handler (dlglogin.cpp). Called by the
-	// dispatcher at 0x00a5b8fe with ECX = dialog = mainwindow + 0x39B948.
-	// This is the game's OWN "click Login" path — it resolves the server via
-	// GetServerInfo (FUN_008827c2), connects the account-server socket, and
-	// then calls FUN_0101bfe7. Calling it directly (instead of the raw send)
-	// is the only way to start a real login sequence that the server responds
-	// to.
-	const uintptr_t LOGIN_BUTTON_HANDLER = 0x008A8FBA;
+	// FUN_008cec7d - the 7937 Login button handler (dlglogin.cpp). It is
+	// dispatched through the dialog's +0xd1d0 vtable (index 0x80/4 = 32),
+	// ECX = dialog. It calls FUN_00ea1692(wrapper_at_dialog+0x12EA0, text)
+	// to set the encrypted password, then FUN_008a9348() to (re)connect
+	// the account-server socket and build the ServerName/FlashName strings,
+	// then hands off to the post-dialog network flow that calls
+	// FUN_0101bfe7. Calling it directly (instead of the raw send) is the
+	// only way to start a real login sequence that the server responds to.
+	//
+	// CALLING CONVENTION: __thiscall, ECX = dialog, EDX = char* account_cstr,
+	// stack = int (param_3) which is the CGameInputStr* wrapper base
+	// (i.e. dialog+0x12EA0). It is NOT the older FUN_008a8fba - that
+	// belongs to a different dialog whose vfunc guard rejects the 7937
+	// dialog's state.
+	const uintptr_t LOGIN_BUTTON_HANDLER = 0x008CEC7D;
+
+	// Offset of the password WRAPPER (CGameInputStr) inside the 7937 login
+	// dialog. This is the wrapper's BASE - its +0x100 (count), +0x104
+	// (length), +0x108 (encrypted ciphertext) are relative to here.
+	const uintptr_t DLG_PASSWORD_WRAPPER = 0x12EA0;
+
+	// Offset of the account SSO string inside the 7937 login dialog.
+	// Length is at dialog+0x12EA0-0xC = dialog+0x12E94, NOT at +0x14 -
+	// the 7937 dialog uses a different SSO layout than the older
+	// +0x13B88 SSO. Verified in FUN_008cec7d by the read at 0x008ceecc
+	// and the heap-pointer branch at 0x008ceef5.
+	const uintptr_t DLG_ACCOUNT_SSO     = 0x12B88;
+	const uintptr_t DLG_ACCOUNT_SSO_LEN = 0x12E94;   // SSO length field for +0x12B88
+	const uintptr_t DLG_ACCOUNT_SSO_HEAP= 0x12EB8;   // alternate heap-backed SSO (used when len > 0xF)
+
+	// Offset of the resolved ServerName CString inside the 7937 login
+	// dialog (ATL CSimpleStringT, not SSO - read via the game's own
+	// operator_char_const_ like in the older dialog). The FUN_008cec7d
+	// handler builds the resolved name from this via FUN_0121b4fe and
+	// FUN_0121ceab before passing it to FUN_0101bfe7.
+	const uintptr_t DLG_SERVER_CSTRING  = 0x12ED0;
+
+	// Offset of the dialog's vtable (used by FUN_008cec7d's first-line
+	// guard: iVar1 = (*(param_1 + 0xd1d0))[0x80/4]() - must return 0
+	// in the ready-to-login state, otherwise the handler bails to the
+	// STR_LOGIN_QR_TIMEOUT branch without sending).
+	const uintptr_t DLG_VTABLE          = 0xD1D0;
 
 	// Client object + login dialog (see header comment).
 	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A594F0; // CMyShellDlg main window (runtime-set, ~37MB)
@@ -195,6 +243,13 @@ namespace AutoLogin
 	const uintptr_t REALM_ROW_HANDLER = 0x008A9348;
 	const uintptr_t GET_SERVER_INFO   = 0x008827C2;
 	typedef void(__fastcall* SetPasswordFn)(void* pswObj, void* /*edx_dummy*/, const char* text);
+
+	// __thiscall, ECX = dialog, EDX = account_cstr, stack arg = wrapper.
+	// This matches FUN_008cec7d's prologue (ECX = param_1, [EBP+8] = param_3).
+	// Calling it with the WRONG dialog base (the older +0x13B88 dialog)
+	// will make the vtable guard at +0xD1D0 read garbage and bail to the
+	// QR-timeout branch - hence the historical "wrong password" symptom.
+	typedef void (__thiscall* LoginButtonFn)(void* dialog, const char* account, void* passwordWrapper);
 
 	// cdecl, 5 params; the caller cleans the stack (bare RET at 0x0101C250).
 	// NOTE: arg2 is the dialog's password WRAPPER OBJECT, not a char*.
@@ -1639,20 +1694,49 @@ void AutoLoginTick()
 	AutoLogin::g_postGraceUntil = GetTickCount() + 2000;
 
 	unsigned char* dlg = (unsigned char*)dialog;
-	unsigned char* accountObj = dlg + AutoLogin::DLG_ACCOUNT_A;
-	unsigned char* pswObj     = dlg + AutoLogin::DLG_PASSWORD_A;
+	// 7937 dialog layout (Ghidra-verified 2026-08 from FUN_008cec7d's
+	// prologue). The older DLG_ACCOUNT_A=0x13B88 / DLG_PASSWORD_A=0x13BD0
+	// offsets are for a different (pre-7937) dialog whose wrapper is no
+	// longer read by the post-button network flow. Writing to those old
+	// fields left the live 7937 wrapper at +0x12EE8 empty, which is
+	// exactly what produced the "invalid Account or Psw, size >= 128!"
+	// server reject — FUN_0101bfe7's wrapper read at +(0x404)+0x114 saw
+	// wrapper+0x104 = 0, hit the >= 0x81 short-circuit, and returned
+	// 0xFFFFFFFF to the post-button flow.
+	unsigned char* accountObj       = dlg + AutoLogin::DLG_ACCOUNT_SSO;     // SSO account string
+	void*         pswObj            = dlg + AutoLogin::DLG_PASSWORD_WRAPPER; // 7937 CGameInputStr wrapper (SetPassword target)
+	unsigned char* pswPlaintextObj  = dlg + 0x130F0;                         // basic_string<char> the post-flow copies via FUN_004208c0
+	unsigned char* acctPlaintextObj = dlg + 0x12EA0;                         // basic_string<char> the post-flow copies via FUN_004208c0
 
 	// Fill the dialog's OWN credential fields - the exact inputs a manual
 	// typing + Login click would produce.
 	AutoLogin::SsoSet(accountObj, AutoLogin::g_account);
-	AutoLoginLog("AutoLoginTick: filled account '%s' into %p (pair A)", AutoLogin::g_account, accountObj);
+	AutoLoginLog("AutoLoginTick: filled account '%s' into %p (SSO @+0x12B88)", AutoLogin::g_account, accountObj);
 
-	// Password: call the game's OWN CGameInputStr::SetPassword on the dialog's
-	// wrapper object. It writes len@+0x104, XOR-encrypts the text into +0x108
-	// against the wrapper's per-boot key table and nulls +0x207 - byte-identical
-	// to what typing produces. Do NOT touch the wrapper's +0..0xFF area by hand
-	// (SsoSet would clobber the key table) and do NOT write +0x108 directly
-	// (the packet hash expects the encrypted form).
+	// std::string::assign for the plaintext copies (FUN_004208c0 in the
+	// 7937 button handler). The wrapper at +0x12EA0 holds the resolved
+	// account as a std::string (length-prefixed, not SSO). We replicate
+	// FUN_004208c0 by hand: write the bytes, then store length@+0x10 and
+	// cap@+0x14 (the standard libstdc++ basic_string layout - confirmed by
+	// the matching pattern in other auto_login probe dumps).
+	__try {
+		const char* acctText = AutoLogin::g_account;
+		size_t alen = strlen(acctText);
+		if (alen > 0xFF) alen = 0xFF;
+		memcpy(acctPlaintextObj, acctText, alen);
+		*(size_t*)(acctPlaintextObj + 0x10) = alen;
+		*(size_t*)(acctPlaintextObj + 0x14) = 0xFF;  // small-string capacity
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		AutoLoginLog("AutoLoginTick: account plaintext assign EXCEPTION");
+	}
+
+	// Password: call the game's OWN CGameInputStr::SetPassword on the
+	// dialog's 7937 wrapper. It writes len@+0x104, XOR-encrypts the text
+	// into +0x108 against the wrapper's per-boot key table and nulls
+	// +0x207 - byte-identical to what typing produces. Do NOT touch the
+	// wrapper's +0..0xFF area by hand (SsoSet would clobber the key
+	// table) and do NOT write +0x108 directly (the packet hash expects
+	// the encrypted form).
 	const char* pswText = AutoLogin::g_password;
 	char pswTrunc[0x100];
 	if (pswText && strlen(pswText) >= 0x100)
@@ -1665,10 +1749,25 @@ void AutoLoginTick()
 	{
 		__try {
 			AutoLogin::SetPasswordFn setPsw = (AutoLogin::SetPasswordFn)AutoLogin::SET_PASSWORD_ADDRESS;
-			setPsw(pswObj, nullptr, pswText);
-			AutoLoginLog("AutoLoginTick: SetPassword ok wrapper=%p len=%u", pswObj, *(unsigned int*)( (unsigned char*)pswObj + 0x104));
+			// The 7937 button handler calls SetPassword with ECX =
+			// dialog+0x12EE8 and stack = plaintext text. Passing the
+			// dialog+0x12EE8 wrapper as 'this' makes the encrypted
+			// ciphertext land in the live wrapper that the post-button
+			// flow actually reads.
+			setPsw((unsigned char*)dlg + 0x12EE8, nullptr, pswText);
+			void* liveWrapper = (unsigned char*)dlg + 0x12EE8;
+			AutoLoginLog("AutoLoginTick: SetPassword ok wrapper=%p len=%u", liveWrapper, *(unsigned int*)((unsigned char*)liveWrapper + 0x104));
+
+			// Also write the std::string plaintext copy that the post-button
+			// flow reads alongside the encrypted wrapper. Both must match
+			// what a manual login produces or the server-side compare fails.
+			size_t plen = strlen(pswText);
+			if (plen > 0xFF) plen = 0xFF;
+			memcpy(pswPlaintextObj, pswText, plen);
+			*(size_t*)(pswPlaintextObj + 0x10) = plen;
+			*(size_t*)(pswPlaintextObj + 0x14) = 0xFF;
 		} __except(EXCEPTION_EXECUTE_HANDLER) {
-			AutoLoginLog("AutoLoginTick: SetPassword exception wrapper=%p", pswObj);
+			AutoLoginLog("AutoLoginTick: SetPassword exception wrapper=%p", (unsigned char*)dlg + 0x12EE8);
 			strcpy_s(AutoLogin::g_lastResult, "SetPassword crash");
 			return;
 		}
@@ -1750,18 +1849,21 @@ void AutoLoginTick()
 	//   account SSO: inline text + length@+0x14
 	//   dialog realm CString content (what the handler resolves the realm from)
 	__try {
-		unsigned int cnt = *(unsigned int*)(pswObj + 0x100);
-		unsigned int len = *(unsigned int*)(pswObj + 0x104);
-		const unsigned char* enc = pswObj + 0x108;
+		// 7937 dialog: live wrapper is at dialog+0x12EE8 (CGameInputStr).
+		// Decrypt the stored ciphertext and compare FNV against the ini
+		// password - if the game doesn't hold the right bytes here, the
+		// server's compare against its own stored hash will reject.
+		unsigned char* liveWrapper = (unsigned char*)dlg + 0x12EE8;
+		unsigned int cnt = *(unsigned int*)(liveWrapper + 0x100);
+		unsigned int len = *(unsigned int*)(liveWrapper + 0x104);
+		const unsigned char* enc = liveWrapper + 0x108;
 		const char* dlgSrv = AutoLogin::CStringCStr(dlg + AutoLogin::DLG_SERVER_NAME);
-		// Decrypt what the wrapper STORES and compare against the ini value -
-		// this proves/disproves "the game holds the right password" directly.
 		unsigned char storedPlain[0x100];
-		AutoLogin::DecryptStoredPassword(pswObj, storedPlain, sizeof(storedPlain));
+		AutoLogin::DecryptStoredPassword(liveWrapper, storedPlain, sizeof(storedPlain));
 		unsigned long storedF = AutoLogin::FnvHashBytes(storedPlain,
 			len > 0x100 ? 0x100 : (int)len);
 		unsigned long iniF = AutoLogin::FnvHashStr(AutoLogin::g_password);
-		AutoLoginLog("AutoLoginTick: pre-submit psw cnt=%u len=%u enc=%02X%02X%02X%02X%02X%02X%02X%02X acct='%s' acctlen=%u dlgsrv='%s'",
+		AutoLoginLog("AutoLoginTick: pre-submit psw(cnt=%u len=%u) enc=%02X%02X%02X%02X%02X%02X%02X%02X acct='%s' acctlen=%u dlgsrv='%s'",
 			cnt, len, enc[0], enc[1], enc[2], enc[3], enc[4], enc[5], enc[6], enc[7],
 			AutoLogin::SsoCStr(accountObj),
 			*(unsigned long*)((unsigned char*)accountObj + AutoLogin::SSO_LEN_OFFSET),

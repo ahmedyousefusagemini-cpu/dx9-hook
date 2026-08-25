@@ -125,9 +125,10 @@ void HandleAutoLoginSubmit(void* dialog)
 		// FULL INPUT-LEVEL EMULATION: direct handler invocation leaves some
 		// session state uninitialised - auto-built packets were byte-stable
 		// across boots where manual packets vary. So instead of calling
-		// FUN_008a8fba, click the REAL controls like a human: realm-row
-		// button first (connects the account server), then the Login button
-		// (dispatches through the game's own BN_CLICKED path at 0x00a5b8fe).
+		// the login handler directly, click the REAL controls like a human:
+		// realm-row button first (connects the account server), then the
+		// Login button (dispatches through the game's own BN_CLICKED path
+		// at 0x00a5b8fe -> vtable[32] = FUN_008cec7d in the 7937 dialog).
 		{
 			struct Btn { HWND h; RECT r; };
 			Btn rows[4] = {}; int nRows = 0;
@@ -171,12 +172,25 @@ void HandleAutoLoginSubmit(void* dialog)
 				return; // native path did everything; no direct call needed
 		}
 
-		typedef void (__fastcall* LoginFn)(void* dialog);
-		LoginFn loginFn = (LoginFn)0x008A8FBA;
-		loginFn(dialog);
-		AutoLoginLogFromHook("FUN_008a8fba returned", dialog, dlgHwnd);
+		// 7937 fallback: if EnumChildWindows couldn't find the Login
+		// button (e.g. theme/UI is in a state where the control is hidden
+		// or reparented), invoke the 7937 button handler directly. Note
+		// the __thiscall ABI: ECX = dialog, EDX = account_cstr, stack
+		// = password_plaintext. FUN_008cec7d internally calls
+		// FUN_00ea1692(dialog+0x12EE8, password_plaintext) to set the
+		// encrypted wrapper, then FUN_008a9348() to connect the account
+		// server. The OLDER FUN_008a8fba was a different dialog's
+		// button - its vfunc guard rejected the 7937 dialog state and
+		// exited via the QR/relogin path, which is what produced the
+		// "invalid Account or Psw" server reject.
+		typedef void (__thiscall* LoginBtnFn)(void* dialog, const char* account, void* passwordWrapper);
+		LoginBtnFn loginFn = (LoginBtnFn)0x008CEC7D;
+		const char* accountCstr = AutoLogin::g_account;
+		void* wrapper = (unsigned char*)dialog + 0x12EE8;  // 7937 CGameInputStr wrapper
+		loginFn(dialog, accountCstr, wrapper);
+		AutoLoginLogFromHook("FUN_008cec7d returned", dialog, dlgHwnd);
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		AutoLoginLogFromHook("FUN_008a8fba EXCEPTION", dialog, dlgHwnd);
+		AutoLoginLogFromHook("FUN_008cec7d EXCEPTION", dialog, dlgHwnd);
 	}
 }
 
