@@ -834,8 +834,30 @@ static size_t LoadIniNarrow(const char* iniPath, char* narrow, size_t narrowCap)
 	else if (n>=2 && buf[0]==0xFE && buf[1]==0xFF) { wideBE=true; p+=2; rem-=2; }
 	size_t m=0;
 	if (wideLE || wideBE) {
-		for (size_t i=0; i+1<rem && m+1<narrowCap; i+=2)
-			narrow[m++] = (char)(wideLE ? p[i] : p[i+1]);
+		// Convert wide -> ANSI PROPERLY through the system codepage (CP_ACP,
+		// e.g. Arabic Windows-1256). The previous low-byte truncation silently
+		// destroyed every non-ASCII credential character (UTF-16LE U+0627 ->
+		// 0x27 '!'), making loaded passwords differ from typed ones.
+		int wchars = (int)(rem / 2);
+		if (wchars > 0 && (size_t)wchars * 2 <= rem) {
+			wchar_t* wbuf = new(std::nothrow) wchar_t[wchars];
+			if (wbuf) {
+				if (wideLE) {
+					memcpy(wbuf, p, (size_t)wchars * 2);
+				} else { // UTF-16 BE: swap byte pairs
+					for (int i = 0; i < wchars; ++i) {
+						((unsigned char*)&wbuf[i])[0] = p[i*2+1];
+						((unsigned char*)&wbuf[i])[1] = p[i*2];
+					}
+				}
+				int cap = (int)(narrowCap - m - 1);
+				int wrote = WideCharToMultiByte(CP_ACP, 0, wbuf, wchars,
+					narrow + m, cap > 0 ? cap : 0, NULL, NULL);
+				if (wrote > 0)
+					m += (size_t)wrote;
+				delete[] wbuf;
+			}
+		}
 	} else {
 		for (size_t i=0; i<rem && m+1<narrowCap; ++i)
 			narrow[m++] = (char)p[i];
@@ -972,6 +994,19 @@ static void LoadConfig()
 		IniGetString(narrow, section, "account",  AutoLogin::g_account,  sizeof(AutoLogin::g_account),  "");
 		IniGetString(narrow, section, "password", AutoLogin::g_password, sizeof(AutoLogin::g_password), "");
 		IniGetString(narrow, section, "server",   AutoLogin::g_server,   sizeof(AutoLogin::g_server),   "");
+		// Diagnostic: hex codes of the loaded credentials so a mismatch between
+		// the ini file and what the user intends can be seen byte-exactly
+		// (ASCII letters = plain codes; anything else shows the ANSI mapping).
+		{
+			char hx[3*64+1] = {0}; int o = 0;
+			for (const unsigned char* q = (const unsigned char*)AutoLogin::g_account; *q && o < (int)sizeof(hx)-4; ++q)
+				o += _snprintf_s(hx+o, sizeof(hx)-o, _TRUNCATE, "%02X ", *q);
+			AutoLoginLog("INIACCT len=%d bytes=%s", (int)strlen(AutoLogin::g_account), hx);
+			o = 0; hx[0] = 0;
+			for (const unsigned char* q = (const unsigned char*)AutoLogin::g_password; *q && o < (int)sizeof(hx)-4; ++q)
+				o += _snprintf_s(hx+o, sizeof(hx)-o, _TRUNCATE, "%02X ", *q);
+			AutoLoginLog("INIPSW len=%d bytes=%s", (int)strlen(AutoLogin::g_password), hx);
+		}
 		char buf[32];
 		if (IniGetString(narrow, "accounts", "boot_wait_ms", buf, sizeof(buf), nullptr)) {
 			AutoLogin::g_bootWaitMs = atoi(buf);
