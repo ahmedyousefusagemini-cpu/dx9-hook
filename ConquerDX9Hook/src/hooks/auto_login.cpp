@@ -209,12 +209,11 @@ namespace AutoLogin
 
 	unsigned long g_bootWaitMs   = 6000;   // first submit delay after attach
 	unsigned long g_reloginWaitMs = 6000;  // submit delay after a disconnect
-	// Quiet gap between submits. The client dials the account server via an
-	// internal ~20s retry timer; frequent resubmits RESET that timer and starve
-	// the dial (verified: 4s retries => never connects, one quiet submit =>
-	// connects at ~T+26s and logs in).
-	unsigned long g_retryMs      = 28000;
-	int           g_maxRetries   = 6;      // per-cycle budget (~3min at default retry_ms)
+	// Resubmit cadence once PRIME owns the dialing: short nudges are fine now
+	// (the old dial-starvation problem is gone because PRIME connects
+	// deterministically). Covers the first-packet reject -> resend window.
+	unsigned long g_retryMs      = 6000;
+	int           g_maxRetries   = 12;     // per-cycle budget (~72s at default retry_ms)
 
 	// ------------------------------------------------------------------
 	// runtime state
@@ -257,11 +256,13 @@ namespace AutoLogin
 	typedef int (__stdcall *WSAConnectFn)(void*, const void*, int, void*, void*, void*, void*);
 	ConnectFn    g_OrigConnect    = nullptr;
 	WSAConnectFn g_OrigWSAConnect = nullptr;
+	unsigned long s_lastDialTick = 0;   // when the client last dialed anything (gates PRIME)
 
 	static void LogConnectTarget(void* sock, const void* addr, int addrlen)
 	{
 		if (!addr || addrlen < 4)
 			return;
+		s_lastDialTick = GetTickCount();
 		unsigned short family = *(const unsigned short*)addr;
 		if (family != 2) { // AF_INET
 			AutoLoginLog("wire C sock=%p family=%u (non-inet)", sock, (unsigned)family);
@@ -452,6 +453,11 @@ namespace AutoLogin
 	{
 		void* dialog = GetLoginDialog();
 		if (!dialog)
+			return;
+		// Skip if the account socket was dialed recently - FUN_010234e9 would
+		// otherwise churn connections on every fast retry.
+		unsigned long now = GetTickCount();
+		if (s_lastDialTick != 0 && now - s_lastDialTick < 60000)
 			return;
 		__try {
 			typedef void (__fastcall* RowSelectFn)(void*);
@@ -780,9 +786,9 @@ static void LoadConfig()
 		if (AutoLogin::g_reloginWaitMs < 500) AutoLogin::g_reloginWaitMs = 500;
 		if (IniGetString(narrow, "accounts", "retry_ms", buf, sizeof(buf), nullptr)) {
 			AutoLogin::g_retryMs = atoi(buf);
-		} else AutoLogin::g_retryMs = 28000;
+		} else AutoLogin::g_retryMs = 6000;
 		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
-		AutoLogin::g_maxRetries = IniGetInt(narrow, "accounts", "max_retries", 6);
+		AutoLogin::g_maxRetries = IniGetInt(narrow, "accounts", "max_retries", 12);
 	} else {
 		// Legacy fallback
 		GetPrivateProfileStringA(section, "account",  "", AutoLogin::g_account,  sizeof(AutoLogin::g_account),  AutoLogin::g_cfgPath);
@@ -795,10 +801,10 @@ static void LoadConfig()
 		GetPrivateProfileStringA("accounts", "relogin_wait_ms", "6000", buf, 32, AutoLogin::g_cfgPath);
 		AutoLogin::g_reloginWaitMs = atoi(buf);
 		if (AutoLogin::g_reloginWaitMs < 500) AutoLogin::g_reloginWaitMs = 500;
-		GetPrivateProfileStringA("accounts", "retry_ms", "28000", buf, 32, AutoLogin::g_cfgPath);
+		GetPrivateProfileStringA("accounts", "retry_ms", "6000", buf, 32, AutoLogin::g_cfgPath);
 		AutoLogin::g_retryMs = atoi(buf);
 		if (AutoLogin::g_retryMs < 250) AutoLogin::g_retryMs = 250;
-		AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 6, AutoLogin::g_cfgPath);
+		AutoLogin::g_maxRetries = GetPrivateProfileIntA("accounts", "max_retries", 12, AutoLogin::g_cfgPath);
 	}
 	if (AutoLogin::g_maxRetries < 0)
 		AutoLogin::g_maxRetries = 0;
@@ -815,8 +821,8 @@ static void LoadConfig()
 				"selected=0\n"
 				"boot_wait_ms=6000\n"
 				"relogin_wait_ms=6000\n"
-				"retry_ms=28000\n"
-				"max_retries=6\n"
+				"retry_ms=6000\n"
+				"max_retries=12\n"
 				"\n"
 				"[account_0]\n"
 				"; server = fallback realm name (leave empty to use the dialog's selected realm)\n"
