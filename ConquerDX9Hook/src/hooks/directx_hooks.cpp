@@ -122,13 +122,54 @@ void HandleAutoLoginSubmit(void* dialog)
 		// (manual logins always have multi-second human gaps here).
 		Sleep(1500);
 
-		// NOTE: an earlier build called GetServerInfo(dialog,1,...) here, before
-		// the login handler, for diagnostics. Removed: GetServerInfo participates
-		// in the account-socket setup, and running it an extra time right before
-		// FUN_008a8fba can tear down / restart the very socket the login packet
-		// is then queued onto - the send fires into a reconnecting socket and is
-		// silently dropped ("nothing happens"). Its question was answered:
-		// resolution succeeds (see auto_login.log history: ret=1 ip=... port=16000).
+		// FULL INPUT-LEVEL EMULATION: direct handler invocation leaves some
+		// session state uninitialised - auto-built packets were byte-stable
+		// across boots where manual packets vary. So instead of calling
+		// FUN_008a8fba, click the REAL controls like a human: realm-row
+		// button first (connects the account server), then the Login button
+		// (dispatches through the game's own BN_CLICKED path at 0x00a5b8fe).
+		{
+			struct Btn { HWND h; RECT r; };
+			Btn rows[4] = {}; int nRows = 0;
+			Btn login = {}; 
+			struct Ctx { Btn* rows; int* nRows; Btn* login; } ctx = { rows, &nRows, &login };
+			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
+				char cls[24] = {0};
+				GetClassNameA(h, cls, sizeof(cls));
+				if (_stricmp(cls, "Button") != 0) return TRUE;
+				RECT r = {};
+				GetWindowRect(h, &r);
+				Ctx* c = (Ctx*)lp;
+				// realm-row buttons: ~200x20 at x~626, y in 694..777 band
+				if ((r.right-r.left) > 150 && (r.bottom-r.top) < 40 &&
+				    r.left > 600 && r.left < 660 && r.top > 685 && r.top < 765 &&
+				    *c->nRows < 4) {
+					c->rows[*c->nRows].h = h; c->rows[*c->nRows].r = r; (*c->nRows)++;
+				}
+				// Login button: large bottom-right (~195x60 at ~956,714)
+				if (!c->login.h && (r.right-r.left) > 150 && (r.bottom-r.top) > 50 &&
+				    r.left > 900 && r.top > 690) {
+					c->login.h = h; c->login.r = r;
+				}
+				return TRUE;
+			}, (LPARAM)&ctx);
+
+			bool clickedReal = false;
+			if (nRows > 0) {
+				HWND rowBtn = rows[0].h; // first slot row; adjust if needed
+				SendMessageA(rowBtn, BM_CLICK, 0, 0);
+				AutoLoginLogFromHook("CLICKED realm-row button", dialog, dlgHwnd);
+				Sleep(1500); // server settle after connect chain
+				clickedReal = true;
+			}
+			if (login.h) {
+				SendMessageA(login.h, BM_CLICK, 0, 0);
+				AutoLoginLogFromHook("CLICKED Login button", dialog, dlgHwnd);
+				clickedReal = true;
+			}
+			if (clickedReal)
+				return; // native path did everything; no direct call needed
+		}
 
 		typedef void (__fastcall* LoginFn)(void* dialog);
 		LoginFn loginFn = (LoginFn)0x008A8FBA;
