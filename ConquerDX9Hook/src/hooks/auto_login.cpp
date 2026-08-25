@@ -257,6 +257,7 @@ namespace AutoLogin
 	ConnectFn    g_OrigConnect    = nullptr;
 	WSAConnectFn g_OrigWSAConnect = nullptr;
 	unsigned long s_lastDialTick = 0;   // when the client last dialed anything (gates PRIME)
+	int s_fullDumpCount = 0;            // full-payload dumps this probe window
 
 	static void LogConnectTarget(void* sock, const void* addr, int addrlen)
 	{
@@ -302,7 +303,23 @@ namespace AutoLogin
 	int __stdcall HookedWireSend(void* sock, const char* buf, int len, int flags)
 	{
 		if (g_OrigSend && GetTickCount() < g_wireProbeUntil && buf && len > 0)
+		{
 			WireHexLog('>', sock, buf, len);
+			// Full payload dump - limited count per probe window - so an auto
+			// packet can be diffed byte-for-byte against a manual-login packet.
+			if (len <= 600 && s_fullDumpCount < 4) {
+				s_fullDumpCount++;
+				for (int off = 0; off < len; off += 64) {
+					char line[200];
+					int n = 0;
+					int end = off + 64 < len ? off + 64 : len;
+					n += _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, "SEND[%d] +%03d:", s_fullDumpCount, off);
+					for (int i = off; i < end && n > 0; ++i)
+						n += _snprintf_s(line + n, sizeof(line) - n, _TRUNCATE, " %02X", (unsigned char)buf[i]);
+					AutoLoginLog("%s", line);
+				}
+			}
+		}
 		return g_OrigSend ? g_OrigSend(sock, buf, len, flags) : -1;
 	}
 
@@ -992,6 +1009,7 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 		// next 20s so we can verify the packet actually leaves and whether
 		// the server answers at all.
 		AutoLogin::g_wireProbeUntil = GetTickCount() + 20000;
+		AutoLogin::s_fullDumpCount = 0;   // fresh full-payload dumps per attempt
 		int r = AutoLogin::g_OriginalLoginSend(account, password, serverInfo, mode, port);
 		// 0 = queued onto the socket, 0xFFFFFFFF = rejected locally before any
 		// wire traffic (field-length/count checks). This split decides whether
