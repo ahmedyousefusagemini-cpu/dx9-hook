@@ -272,6 +272,13 @@ namespace AutoLogin
 		const unsigned char* a = (const unsigned char*)addr;
 		unsigned port = ((unsigned)a[2] << 8) | a[3];
 		AutoLoginLog("wire C sock=%p -> %u.%u.%u.%u:%u", sock, a[4], a[5], a[6], a[7], port);
+		// Game-server redirect = auth succeeded and the client is moving to the
+		// world. Close the cycle so no further auto-submits fire mid-transition.
+		if (port == 19000 && !AutoLogin::g_attemptDone) {
+			AutoLoginLog("WIRE: game-server redirect (:19000) - login complete");
+			AutoLogin::g_attemptDone = true;
+			strcpy_s(AutoLogin::g_lastResult, "login complete (:19000)");
+		}
 	}
 
 	int __stdcall HookedWireConnect(void* sock, const void* addr, int addrlen)
@@ -329,6 +336,16 @@ namespace AutoLogin
 		// Log successful reads only - async sockets hammer WSAEWOULDBLOCK.
 		if (g_OrigRecv && GetTickCount() < g_wireProbeUntil && r > 0 && buf)
 			WireHexLog('<', sock, buf, r);
+		// 10-byte payload during the login window = the auth-ACCEPT message
+		// (manual logins get it; rejects are 6 bytes). Close the cycle so no
+		// further auto-submits fire while the client transitions into the world.
+		if (g_OrigRecv && GetTickCount() < g_wireProbeUntil && r == 10 &&
+		    !AutoLogin::g_attemptDone)
+		{
+			AutoLoginLog("WIRE: auth ACCEPT (10B) received - closing cycle");
+			AutoLogin::g_attemptDone = true;
+			strcpy_s(AutoLogin::g_lastResult, "login accepted (server ACK)");
+		}
 		return r;
 	}
 
