@@ -376,8 +376,18 @@ namespace AutoLogin
 			h ^= (unsigned char)text[i];
 			h *= 16777619u;
 		}
-		AutoLoginLog("SETPSW obj=%p len=%d fnv=%08lX%s", self, n, h,
-			n < 0 ? " (null)" : "");
+		// Throttle: the login renderer re-encrypts into a display wrapper every
+		// frame (clear+set pairs); log at most 2 lines per second per object.
+		static unsigned long s_lastLogTick = 0;
+		static void* s_lastObj = nullptr;
+		unsigned long now = GetTickCount();
+		bool logIt = (self != s_lastObj) || (now - s_lastLogTick > 500);
+		if (logIt) {
+			s_lastObj = self;
+			s_lastLogTick = now;
+			AutoLoginLog("SETPSW obj=%p len=%d fnv=%08lX%s", self, n, h,
+				n < 0 ? " (null)" : "");
+		}
 		if (g_OrigSetPassword)
 			g_OrigSetPassword(self, edx, text);
 	}

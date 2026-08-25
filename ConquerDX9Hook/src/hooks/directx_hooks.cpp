@@ -82,6 +82,11 @@ void HandleAutoLoginSubmit(void* dialog)
 		// it every login send queues into a socket that never exists.
 		if (AutoLogin::g_retryCount <= 1)
 			AutoLogin::AutoLoginPrimeConnection();
+		// Give the server a moment after the dial before pushing credentials -
+		// an auth packet arriving ~300ms after TCP accept gets answered with
+		// the generic 6-byte reject the client renders as "wrong password"
+		// (manual logins always have multi-second human gaps here).
+		Sleep(1500);
 
 		// NOTE: an earlier build called GetServerInfo(dialog,1,...) here, before
 		// the login handler, for diagnostics. Removed: GetServerInfo participates
