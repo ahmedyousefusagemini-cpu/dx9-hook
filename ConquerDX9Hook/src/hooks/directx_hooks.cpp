@@ -173,39 +173,30 @@ void HandleAutoLoginSubmit(void* dialog)
 				return; // native path did everything; no direct call needed
 		}
 
-		// Direct-call fallback. The 7937 client appears to be running a
-		// 7937 dialog whose layout is at a different client-relative offset
-		// than the 0x39B948 we are using. Calling FUN_008cec7d (the 7937
-		// vtable[32] handler) directly with the lParam dlg crashes because
-		// the function reads dialog+0xD1D0 / +0x12EE8 / -0xA98 and lands
-		// in random memory for the wrong dialog. The BM_CLICK path above
-		// goes through the MFC command dispatcher, which uses the right
-		// object - that path is what we want to rely on.
+		// Direct-call fallback (used only when EnumChildWindows could not
+		// find the Login button). The MFC BN_CLICKED path above goes
+		// through the game's real message map and uses the right object
+		// - that is the path we want to rely on. This direct call is
+		// only an emergency fallback.
 		//
-		// This fallback only runs when EnumChildWindows could not find
-		// the Login button. Use the older FUN_008a8fba which the log
-		// shows "queues the packet" (it sends to the wrong wrapper
-		// field, hence the server reject, but does not crash). The
-		// __thiscall form below is for the 7937 handler and is gated
-		// behind a try/except so even if the dialog offset turns out
-		// to be wrong the process survives and we fall back to retrying
-		// BM_CLICK on the next cycle.
+		// We tried FUN_008cec7d here (the function at the vtable slot
+		// 0x80/4 from the dialog's +0xD1D0 vtable). That call CRASHES
+		// the client on Login click, even though the MFC dispatcher
+		// reaches the same vtable slot. Conclusion: FUN_008cec7d is
+		// not the 7937 Login button handler - it is some other vtable
+		// entry (perhaps a custom control OnClick override, or a
+		// Settings/Options handler) whose body dereferences fields
+		// that happen to be valid for whatever class owns it but not
+		// for the dialog class MFC is dispatching into.
 		//
-		// Diagnostic: log the vtable pointer at dialog+0xD1D0 so the
-		// next run tells us whether the dialog base is right.
-		__try {
-			uintptr_t vt = *(uintptr_t*)((unsigned char*)dialog + 0xD1D0);
-			char diag[160];
-			_snprintf_s(diag, _TRUNCATE, "DIAG dialog=%p hwnd=%p vt@d1d0=%p",
-				dialog, dlgHwnd, (void*)vt);
-			AutoLoginLogFromHook(diag, dialog, dlgHwnd);
-		} __except(EXCEPTION_EXECUTE_HANDLER) {
-			AutoLoginLogFromHook("DIAG vt read EXCEPTION", dialog, dlgHwnd);
-		}
-
-		// The OLDER button handler. Returns 0xFFFFFFFF when the dialog is
-		// not in the right state (the vfunc guard fires) - which causes
-		// the server reject. But it doesn't crash.
+		// The OLDER FUN_008a8fba does NOT crash and DOES send the
+		// login packet (the log shows 'HookedLoginSend: ... queued').
+		// The server then replies 'invalid Account or Psw' because
+		// the wrapper field offset it reads is for the wrong dialog
+		// version - but the flow runs end-to-end. Use that here until
+		// we can locate the real 7937 Login button handler through
+		// the MFC message map (look for ON_BN_CLICKED entries near
+		// the dialog's CDlgLogin class).
 		typedef void (__fastcall* LegacyBtnFn)(void* dialog);
 		LegacyBtnFn legacyFn = (LegacyBtnFn)0x008A8FBA;
 		legacyFn(dialog);
