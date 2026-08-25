@@ -337,6 +337,10 @@ namespace AutoLogin
 	// Popup logger - capture what the CLIENT says (error boxes etc.) during
 	// the login phase. Without this, silent failures are undiagnosable.
 	// ------------------------------------------------------------------
+	// Forward declarations: these helpers are defined further below.
+	static void* GetLoginDialog();
+	static const char* SsoCStr(const void* obj);
+
 	typedef int (__stdcall *MessageBoxAFn)(HWND, const char*, const char*, unsigned);
 	typedef int (__stdcall *MessageBoxWFn)(HWND, const wchar_t*, const wchar_t*, unsigned);
 	MessageBoxAFn g_OrigMsgBoxA = nullptr;
