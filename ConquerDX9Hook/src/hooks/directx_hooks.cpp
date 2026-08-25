@@ -194,9 +194,11 @@ void HandleAutoLoginSubmit(void* dialog)
 		// Diagnostic: log the vtable pointer at dialog+0xD1D0 so the
 		// next run tells us whether the dialog base is right.
 		__try {
-			uintptr_t* vt = *(uintptr_t**)((unsigned char*)dialog + 0xD1D0);
-			AutoLoginLogFromHook("DIAG dialog=%p dlgHwnd=%p vt@d1d0=%p",
+			uintptr_t vt = *(uintptr_t*)((unsigned char*)dialog + 0xD1D0);
+			char diag[160];
+			_snprintf_s(diag, _TRUNCATE, "DIAG dialog=%p hwnd=%p vt@d1d0=%p",
 				dialog, dlgHwnd, (void*)vt);
+			AutoLoginLogFromHook(diag, dialog, dlgHwnd);
 		} __except(EXCEPTION_EXECUTE_HANDLER) {
 			AutoLoginLogFromHook("DIAG vt read EXCEPTION", dialog, dlgHwnd);
 		}
