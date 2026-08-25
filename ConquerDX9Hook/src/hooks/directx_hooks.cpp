@@ -132,7 +132,7 @@ void HandleAutoLoginSubmit(void* dialog)
 			struct Btn { HWND h; RECT r; };
 			Btn rows[4] = {}; int nRows = 0;
 			Btn login = {}; 
-			struct Ctx { Btn* rows; int* nRows; Btn* login; } ctx = { rows, &nRows, &login };
+			struct Ctx { Btn* rows; int* nRows; Btn* loginPtr; } ctx = { rows, &nRows, &login };
 			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
 				char cls[24] = {0};
 				GetClassNameA(h, cls, sizeof(cls));
@@ -147,9 +147,9 @@ void HandleAutoLoginSubmit(void* dialog)
 					c->rows[*c->nRows].h = h; c->rows[*c->nRows].r = r; (*c->nRows)++;
 				}
 				// Login button: large bottom-right (~195x60 at ~956,714)
-				if (!c->login.h && (r.right-r.left) > 150 && (r.bottom-r.top) > 50 &&
+				if (!c->loginPtr->h && (r.right-r.left) > 150 && (r.bottom-r.top) > 50 &&
 				    r.left > 900 && r.top > 690) {
-					c->login.h = h; c->login.r = r;
+					c->loginPtr->h = h; c->loginPtr->r = r;
 				}
 				return TRUE;
 			}, (LPARAM)&ctx);
