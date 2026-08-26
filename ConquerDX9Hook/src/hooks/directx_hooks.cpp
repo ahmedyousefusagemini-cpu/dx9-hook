@@ -107,25 +107,46 @@ void HandleAutoLoginSubmit(void* dialog)
 		AutoLoginLogFromHook(tmp, dialog, dlgHwnd);
 	}
 	__try {
-		// Type the credentials through the dialog's REAL edit controls first
-		// (WM_CHAR on this, the game's message thread). The game-side handlers
-		// those messages trigger are what a manual login exercises - the
-		// keyboard handler (FUN_0089c003) writes the typed account into
-		// dialog+0x13B88 and the password wrapper at dialog+0x13BD0 (verified:
-		// a manual login that typed the creds got ACCEPTED, fnv=798F37FA).
+		// Type the ACCOUNT through the dialog's real edit control (WM_CHAR).
+		// The password is set directly via SetPassword on the wrapper at
+		// dialog+0x13BD0 (confirmed: PASSWORD CHECK MATCH, pswdump len=8).
+		// Do NOT type the password via WM_CHAR — the password bytes contain
+		// 0x04 control chars that the Windows edit control drops, producing
+		// a 6-char password (EDITREADBACK len=6 MISMATCH) that corrupts the
+		// game's display-wrapper sync.
 		AutoLogin::AutoLoginTypeViaControls();
-		// Simulate clicking the selected realm row once per cycle: that is the
-		// button whose handler establishes the ACCOUNT-SERVER connection
-		// (FUN_008a9348 -> FUN_0101aa52 -> FUN_010234e9(1,ip,port)). Without
-		// it every login send queues into a socket that never exists.
-		if (AutoLogin::g_retryCount <= 1)
-			AutoLogin::AutoLoginPrimeConnection();
+		// Click the REAL realm-row button (BM_CLICK) exactly like the manual
+		// login. This establishes the account-server connection and sets up
+		// the dialog's selected-server state through the game's own dispatch.
+		// Directly calling FUN_008a9348 skips the MFC message-map setup that
+		// the real click provides.
+		{
+			HWND rowBtn = nullptr;
+			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
+				char cls[24] = {0};
+				GetClassNameA(h, cls, sizeof(cls));
+				if (_stricmp(cls, "Button") != 0) return TRUE;
+				RECT r = {};
+				GetWindowRect(h, &r);
+				// Realm-row buttons: ~72x20 at x~838, y in 694..780 band
+				if ((r.right-r.left) > 50 && (r.right-r.left) < 100 &&
+				    (r.bottom-r.top) > 15 && (r.bottom-r.top) < 30 &&
+				    r.left > 800 && r.left < 860 && r.top > 680 && r.top < 790) {
+					*(HWND*)lp = h;
+					return FALSE;
+				}
+				return TRUE;
+			}, (LPARAM)&rowBtn);
+			if (rowBtn && IsWindow(rowBtn)) {
+				SendMessageA(rowBtn, BM_CLICK, 0, 0);
+				AutoLoginLogFromHook("CLICKED realm-row button (via BM_CLICK)", dialog, dlgHwnd);
+			} else {
+				AutoLoginLogFromHook("realm-row not found - direct FUN_008a9348 fallback", dialog, dlgHwnd);
+				AutoLogin::AutoLoginPrimeConnection();
+			}
+		}
 		// Match the MANUAL login's timing: the accepted manual run sent the
 		// auth packet ~353ms after the account-server's 6B challenge reply.
-		// A 1.5s gap (older versions) landed the packet after the server's
-		// session/challenge TTL and got rejected with the 6-byte error the
-		// client shows as "wrong password". Keep a short settle so the
-		// socket has processed the challenge, then click Login quickly.
 		Sleep(500);
 
 		// Click the REAL Login button (BM_CLICK) exactly like a human. The
