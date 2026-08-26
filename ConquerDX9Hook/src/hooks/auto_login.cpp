@@ -627,30 +627,14 @@ namespace AutoLogin
 
 		// The game's own keyboard handler (FUN_0089c003, dlglogin.cpp) routes
 		// typing through two MFC CWnd members of the dialog:
-		//   account CWnd @ dlg+0x0cd0, password CWnd @ dlg+0x0fe8 (HWND @ +0x20)
-		// HOWEVER, in this build the member HWNDs at +0xcd0/+0xfe8 are zero-size
-		// hidden Edit controls (rect 626,694 -> 0,0). The REAL visible account
-		// and password Edit controls are found by enumerating children with
-		// actual dimensions (>0 width/height, Edit class). Enum them below.
-		HWND editTargets[2] = { nullptr, nullptr };
-		EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
-			char cls[32] = {0};
-			GetClassNameA(h, cls, sizeof(cls));
-			if (_stricmp(cls, "edit") != 0)
-				return TRUE;
-			RECT r = {};
-			GetWindowRect(h, &r);
-			// Skip zero-size controls (the member CWnds at +0xcd0/+0xfe8
-			// are zero-size hidden edits, not the visible input fields).
-			if (r.right - r.left <= 0 || r.bottom - r.top <= 0)
-				return TRUE;
-			HWND* targets = (HWND*)lp;
-			if (!targets[0]) { targets[0] = h; return TRUE; }
-			if (!targets[1]) { targets[1] = h; return TRUE; }
-			return TRUE;
-		}, (LPARAM)editTargets);
-		HWND acctEdit = editTargets[0];
-		HWND pswEdit  = editTargets[1];
+		//   account CWnd @ dlg+0x0cd0, password CWnd @ dlg+0x0fe8
+		// These are the zero-size Edit controls at (626,694) visible in the
+		// child dump. The visible Edit controls at (542,434) are display-only
+		// overlays — typing into them does NOT trigger the game's keyboard
+		// handler (no SETPSW calls, no wrapper update). Always type into the
+		// member CWnds that the game actually monitors.
+		HWND acctEdit = *(HWND*)(dlg + 0x0cd0);
+		HWND pswEdit  = *(HWND*)(dlg + 0x0fe8);
 		bool useMemberWnds = acctEdit && IsWindow(acctEdit) && pswEdit && IsWindow(pswEdit);
 
 		// One-shot dump of the dialog's child controls (class/rect) so the
