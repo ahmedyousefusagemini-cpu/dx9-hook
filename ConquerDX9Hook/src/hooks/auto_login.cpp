@@ -632,8 +632,7 @@ namespace AutoLogin
 		// hidden Edit controls (rect 626,694 -> 0,0). The REAL visible account
 		// and password Edit controls are found by enumerating children with
 		// actual dimensions (>0 width/height, Edit class). Enum them below.
-		HWND acctEdit = nullptr;
-		HWND pswEdit  = nullptr;
+		HWND editTargets[2] = { nullptr, nullptr };
 		EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
 			char cls[32] = {0};
 			GetClassNameA(h, cls, sizeof(cls));
@@ -649,7 +648,9 @@ namespace AutoLogin
 			if (!targets[0]) { targets[0] = h; return TRUE; }
 			if (!targets[1]) { targets[1] = h; return TRUE; }
 			return TRUE;
-		}, (LPARAM)&acctEdit);
+		}, (LPARAM)editTargets);
+		HWND acctEdit = editTargets[0];
+		HWND pswEdit  = editTargets[1];
 		bool useMemberWnds = acctEdit && IsWindow(acctEdit) && pswEdit && IsWindow(pswEdit);
 
 		// One-shot dump of the dialog's child controls (class/rect) so the
