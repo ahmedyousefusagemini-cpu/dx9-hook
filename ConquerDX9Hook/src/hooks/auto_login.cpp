@@ -1541,7 +1541,13 @@ void AutoLoginTick()
 	if (AutoLogin::g_manualCapture)
 		return;
 
-	if (!AutoLogin::g_enabled || !AutoLogin::g_account[0]) {
+	// Install hooks when EITHER auto-login is enabled OR auto-learn is armed.
+	// The wire/setpsw probes must be live for a successful MANUAL login to be
+	// captured as password_hex (that is the whole point of auto_learn_password).
+	// When only learning (enabled=0), we never auto-submit - the caller still
+	// needs the probes recording.
+	if ((!AutoLogin::g_enabled || !AutoLogin::g_account[0]) &&
+	    !AutoLogin::g_autoLearnPassword) {
 		// Keep hooks installed even when disabled so manual logins still
 		// show diagnostics, but don't attempt auto-submit.
 		return;
@@ -1560,6 +1566,11 @@ void AutoLoginTick()
 		AutoLogin::g_cycleStartTick = GetTickCount();
 		AutoLoginLog("AutoLoginTick: hooks ready, cycleStart=%lu", AutoLogin::g_cycleStartTick);
 	}
+
+	// Learn-only mode: probes are live but never auto-submit. Return here so a
+	// human can log in and the wire probe captures the true password bytes.
+	if (!AutoLogin::g_enabled)
+		return;
 
 	unsigned long now = GetTickCount();
 
