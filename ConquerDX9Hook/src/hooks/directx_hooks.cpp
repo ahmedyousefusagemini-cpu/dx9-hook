@@ -45,6 +45,8 @@ namespace AutoLogin {
 	void AutoLoginTypeViaControls();
 	void AutoLoginPrimeConnection();
 	void AutoLoginArmWireProbe();
+	void AutoLoginResetChallengeSeen();
+	bool AutoLoginWaitForChallenge(unsigned long timeoutMs);
 	extern int  g_retryCount;
 	extern char g_account[128];
 	extern const uintptr_t LOGIN_BUTTON_HANDLER; // FUN_008a8fba - the game's Login button handler
@@ -128,17 +130,20 @@ void HandleAutoLoginSubmit(void* dialog)
 		AutoLogin::AutoLoginArmWireProbe();
 		if (AutoLogin::g_retryCount <= 1)
 			AutoLogin::AutoLoginPrimeConnection();
-		// Match the MANUAL login's timing: the accepted manual run sent the
-		// auth packet ~353ms after the account-server's 6B challenge reply.
-		// CRITICAL: pump messages during the wait rather than Sleep(),
-		// because the game's message loop must process the account server's
-		// 6-byte challenge into session state before we build the login
-		// packet. A raw Sleep(500) blocks the loop and the challenge never
-		// gets stored -> the password encryption skips the challenge ->
-		// server rejects.
+		// Wait for the account-server 6B challenge to be received AND
+		// processed into session state before clicking Login. The pump
+		// drives the game's message loop, which is what stores the challenge;
+		// a fixed Sleep/loop that ends before the challenge arrives (the
+		// stale pre-pump build clicked 6ms after connect, before the 55.7xx
+		// challenge, and got a 322B reject) must not happen. Wait until the
+		// wire probe actually sees the 6B head-69-12 challenge, up to 4s.
+		AutoLogin::AutoLoginResetChallengeSeen();
 		{
-			unsigned long waitStart = GetTickCount();
-			while (GetTickCount() - waitStart < 500) {
+			bool sawChallenge = AutoLogin::AutoLoginWaitForChallenge(4000);
+			// Even if the probe missed it, give the loop a small settle so the
+			// game finishes storing any challenge data it did receive.
+			unsigned long settleStart = GetTickCount();
+			while (GetTickCount() - settleStart < 200) {
 				MSG msg;
 				while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
 					TranslateMessage(&msg);
@@ -146,6 +151,9 @@ void HandleAutoLoginSubmit(void* dialog)
 				}
 				Sleep(1);
 			}
+			AutoLoginLogFromHook(sawChallenge ? "challenge seen; clicking Login"
+			                                  : "challenge NOT seen (timeout); clicking anyway",
+				dialog, dlgHwnd);
 		}
 
 		// Click the REAL Login button (BM_CLICK) exactly like a human. The

@@ -293,6 +293,14 @@ namespace AutoLogin
 	WSASendFn g_OrigWSASend = nullptr;
 	WSARecvFn g_OrigWSARecv = nullptr;
 	unsigned long g_wireProbeUntil = 0;
+	// Set by the recv hook when the account-server's 6-byte challenge (head
+	// 69 12 ...) is observed on any socket during the probe window. The login
+	// submit pumps the game's message loop until this is set, guaranteeing the
+	// challenge was received AND processed into session state before the Login
+	// button is clicked - otherwise the packet is built without the challenge
+	// and the server rejects (322B), exactly like the stale pre-pump build did.
+	volatile long g_challengeSeen = 0;
+	volatile long g_challengeResetTick = 0;
 
 	// connect()/WSAConnect() - ALWAYS logged (ungated; connects are rare and
 	// show exactly which endpoint each stage of the login chain dials,
@@ -321,6 +329,45 @@ namespace AutoLogin
 	{
 		g_wireProbeUntil = GetTickCount() + 20000;
 		s_fullDumpCount = 0;
+	}
+
+	// True once the account-server 6B challenge has been seen on the wire.
+	// The login submit uses this to wait (pumping) until the challenge is
+	// processed before clicking Login.
+	bool AutoLoginChallengeSeen()
+	{
+		return g_challengeSeen != 0;
+	}
+
+	// Clear before each auto attempt so a stale challenge from a previous
+	// connection can't satisfy the wait.
+	void AutoLoginResetChallengeSeen()
+	{
+		g_challengeSeen = 0;
+		g_challengeResetTick = GetTickCount();
+	}
+
+	// Pump the game's message loop until the account-server 6B challenge is
+	// observed (or timeoutMs elapses). Called on the game's message thread
+	// from the submit handler AFTER the account socket is dialed. The game's
+	// loop must process the challenge into session state before the Login
+	// button is clicked, or the built packet omits the challenge and the
+	// server rejects with 322B. Returns true if the challenge was seen.
+	bool AutoLoginWaitForChallenge(unsigned long timeoutMs)
+	{
+		unsigned long deadline = GetTickCount() + timeoutMs;
+		AutoLoginLog("WAITCHAL: waiting up to %ums for account-server 6B challenge", timeoutMs);
+		while (GetTickCount() < deadline && !g_challengeSeen) {
+			MSG msg;
+			while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+				TranslateMessage(&msg);
+				DispatchMessageA(&msg);
+			}
+			Sleep(1);
+		}
+		AutoLoginLog("WAITCHAL: challenge %s (%ums elapsed)", g_challengeSeen ? "SEEN" : "TIMEOUT",
+			GetTickCount() - (g_challengeResetTick ? g_challengeResetTick : GetTickCount()));
+		return g_challengeSeen != 0;
 	}
 
 	static void LogConnectTarget(void* sock, const void* addr, int addrlen)
@@ -400,6 +447,10 @@ namespace AutoLogin
 		// Log successful reads only - async sockets hammer WSAEWOULDBLOCK.
 		if (g_OrigRecv && WireProbeActive() && r > 0 && buf)
 			WireHexLog('<', sock, buf, r);
+		// Account-server 6-byte challenge (head 69 12 ...) detected - signal
+		// the submit handler that it can proceed with the Login click.
+		if (g_OrigRecv && WireProbeActive() && r == 6 && buf && buf[0] == 0x69 && buf[1] == 0x12)
+			g_challengeSeen = 1;
 		// 10-byte payload during the login window = the auth-ACCEPT message
 		// (manual logins get it; rejects are 6 bytes). Close the cycle so no
 		// further auto-submits fire while the client transitions into the world.
@@ -457,6 +508,11 @@ namespace AutoLogin
 		if (g_OrigWSARecv && GetTickCount() < g_wireProbeUntil && bufs && count > 0 &&
 		    recvd && *recvd > 0 && bufs[0].buf)
 			WireHexLog('<', sock, bufs[0].buf, (int)*recvd);
+		// Account-server 6-byte challenge (head 69 12 ...) - see HookedWireRecv.
+		if (g_OrigWSARecv && GetTickCount() < g_wireProbeUntil && bufs && count > 0 &&
+		    recvd && *recvd == 6 && bufs[0].buf &&
+		    bufs[0].buf[0] == 0x69 && bufs[0].buf[1] == 0x12)
+			g_challengeSeen = 1;
 		return r;
 	}
 
