@@ -124,7 +124,23 @@ void HandleAutoLoginSubmit(void* dialog)
 			AutoLogin::AutoLoginPrimeConnection();
 		// Match the MANUAL login's timing: the accepted manual run sent the
 		// auth packet ~353ms after the account-server's 6B challenge reply.
-		Sleep(500);
+		// CRITICAL: pump messages during the wait rather than Sleep(),
+		// because the game's message loop must process the account server's
+		// 6-byte challenge into session state before we build the login
+		// packet. A raw Sleep(500) blocks the loop and the challenge never
+		// gets stored -> the password encryption skips the challenge ->
+		// server rejects.
+		{
+			unsigned long waitStart = GetTickCount();
+			while (GetTickCount() - waitStart < 500) {
+				MSG msg;
+				while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+					TranslateMessage(&msg);
+					DispatchMessageA(&msg);
+				}
+				Sleep(1);
+			}
+		}
 
 		// Click the REAL Login button (BM_CLICK) exactly like a human. The
 		// manual login sequence is proven to work: one 472B packet -> 10B
