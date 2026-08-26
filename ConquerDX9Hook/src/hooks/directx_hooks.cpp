@@ -156,41 +156,19 @@ void HandleAutoLoginSubmit(void* dialog)
 				dialog, dlgHwnd);
 		}
 
-		// Click the REAL Login button (BM_CLICK) exactly like a human. The
-		// manual login sequence is proven to work: one 472B packet -> 10B
-		// ACCEPT. Directly calling FUN_008a8fba instead DOUBLE-SENDS (two
-		// 472B packets ~380ms apart) and the server rejects the duplicate.
-		// The button click goes through the game's own message map -> the
-		// handler at 0x00a5b8fe -> FUN_008a8fba -> single send.
+		// Click the REAL Login button exactly like a human - but call
+		// FUN_008a8fba DIRECTLY instead of SendMessage(BM_CLICK). The BM_CLICK
+		// path goes through 0x00a5b8fe, which re-runs the realm-row handler
+		// (FUN_008A9348) a second time; that re-entry blocks ~2.1s (the socket
+		// is already connected from our prime) and then FUN_008a8fba never
+		// sends (log evidence 2026-08-27: CLICKED logged, zero HookedLoginSend).
+		// Direct invocation with the realm already primed + challenge already
+		// in session state sends exactly one 472B packet, like the manual flow.
 		{
-			HWND loginBtn = nullptr;
-			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
-				char cls[24] = {0};
-				GetClassNameA(h, cls, sizeof(cls));
-				if (_stricmp(cls, "Button") != 0) return TRUE;
-				RECT r = {};
-				GetWindowRect(h, &r);
-				// Login button: large bottom-right (~195x60 at ~956,714)
-				if ((r.right-r.left) > 150 && (r.bottom-r.top) > 50 &&
-				    r.left > 900 && r.top > 690) {
-					*(HWND*)lp = h;
-					return FALSE;
-				}
-				return TRUE;
-			}, (LPARAM)&loginBtn);
-
-			if (loginBtn && IsWindow(loginBtn)) {
-				SendMessageA(loginBtn, BM_CLICK, 0, 0);
-				AutoLoginLogFromHook("CLICKED real Login button (single-send path)", dialog, dlgHwnd);
-			} else {
-				// Fallback: direct handler invocation. Only used when the
-				// button could not be located. NOTE: this path may double-send
-				// and the server may reject it - prefer the button click.
-				AutoLoginLogFromHook("Login button not found - direct FUN_008a8fba fallback", dialog, dlgHwnd);
-				typedef void (__fastcall* LoginBtnFn)(void* dialog);
-				LoginBtnFn loginFn = (LoginBtnFn)AutoLogin::LOGIN_BUTTON_HANDLER;
-				loginFn(dialog);
-			}
+			AutoLoginLogFromHook("calling FUN_008a8fba directly (realm primed, challenge in session state)", dialog, dlgHwnd);
+			typedef void (__fastcall* LoginBtnFn)(void* dialog);
+			LoginBtnFn loginFn = (LoginBtnFn)AutoLogin::LOGIN_BUTTON_HANDLER;
+			loginFn(dialog);
 		}
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
 		AutoLoginLogFromHook("submit EXCEPTION", dialog, dlgHwnd);
