@@ -179,8 +179,6 @@ namespace AutoLogin
 	const uintptr_t DLG_PORT_FLAG       = 0x13BC8;    // int != 0 -> use port text
 	const uintptr_t DLG_ACCOUNT_B       = 0x13938;
 	const uintptr_t DLG_PASSWORD_B      = 0x13980;
-	const uintptr_t SSO_LEN_OFFSET      = 0x14;       // SSO: len > 0xF -> heap ptr at +0
-
 	// (DLG_ACCOUNT_B = 0x13938 and DLG_PASSWORD_B = 0x13980 are read by
 	//  FUN_008a964f, the QR/relogin fallback path - mode 1.)
 
@@ -310,6 +308,7 @@ namespace AutoLogin
 	ConnectFn    g_OrigConnect    = nullptr;
 	WSAConnectFn g_OrigWSAConnect = nullptr;
 	unsigned long s_lastDialTick = 0;   // when the client last dialed anything (gates PRIME)
+	unsigned long s_lastAcctDialTick = 0; // when the client last dialed the ACCOUNT SERVER (port=16000)
 	int s_fullDumpCount = 0;            // full-payload dumps this probe window
 
 	// Probe is live during the 20s post-send window, the whole time while
@@ -383,6 +382,12 @@ namespace AutoLogin
 		const unsigned char* a = (const unsigned char*)addr;
 		unsigned port = ((unsigned)a[2] << 8) | a[3];
 		AutoLoginLog("wire C sock=%p -> %u.%u.%u.%u:%u", sock, a[4], a[5], a[6], a[7], port);
+		// Account-server dial (port 16000): remember separately from the generic
+		// dial tick, so AutoLoginPrimeConnection's churn guard only triggers on
+		// the ACCOUNT socket - not on the boot-time server-list fetches (9539/
+		// 9531/10200), which were blocking the relogin re-dial entirely.
+		if (port == 16000)
+			s_lastAcctDialTick = GetTickCount();
 		// Game-server redirect = auth succeeded and the client is moving to the
 		// world. Close the cycle so no further auto-submits fire mid-transition.
 		if (port == 19000 && !AutoLogin::g_attemptDone) {
@@ -799,10 +804,13 @@ namespace AutoLogin
 		void* dialog = GetLoginDialog();
 		if (!dialog)
 			return;
-		// Skip if the account socket was dialed recently - FUN_010234e9 would
-		// otherwise churn connections on every fast retry.
+		// Skip only if the ACCOUNT socket was dialed recently - FUN_010234e9
+		// would otherwise churn connections on every fast retry.  Using the
+		// account-specific tick (not the generic s_lastDialTick, which the
+		// boot-time server-list fetches to 9539/9531/10200 also bump) means a
+		// relogin right after back-to-login still re-dials the account server.
 		unsigned long now = GetTickCount();
-		if (s_lastDialTick != 0 && now - s_lastDialTick < 60000)
+		if (s_lastAcctDialTick != 0 && now - s_lastAcctDialTick < 3000)
 			return;
 		__try {
 			typedef void (__fastcall* RowSelectFn)(void*);
@@ -817,17 +825,25 @@ namespace AutoLogin
 	// SSO helpers for the dialog's string fields
 	// ------------------------------------------------------------------
 	// Layout used by the game's own readers (e.g. 0x008a929f):
-	//   obj+0x0..0xF inline data, obj+0x14 = length; length > 0xF -> heap,
-	//   the real data is at *(void**)obj.
+	//   obj+0x0..0xF inline data, obj+0x14 = capacity (0xF = short); capacity
+	//   > 0xF -> heap, the real data is at *(void**)obj.  The SIZE (length)
+	//   lives at obj+0x10 (MSVC basic_string SSO: _Buf[16] @ +0, _Mysize @
+	//   +0x10, _Myres @ +0x14).  Manual logins show +0x14 = 0xF (15) and
+	//   +0x10 = string length; our SsoSet must replicate BOTH fields so the
+	//   account SSO is byte-identical to what real typing produces.
+	static const uintptr_t SSO_SIZE_OFFSET = 0x10;
+	static const uintptr_t SSO_CAP_OFFSET  = 0x14;
 	static const char* SsoCStr(const void* obj)
 	{
 		const unsigned char* p = (const unsigned char*)obj;
-		if (*(const unsigned long*)(p + SSO_LEN_OFFSET) > 0xF)
+		if (*(const unsigned long*)(p + SSO_CAP_OFFSET) > 0xF)
 			return *(const char**)p;
 		return (const char*)p;
 	}
 
-	// Writes an inline SSO string (creds are short; longer ones truncate).
+	// Writes an inline SSO string exactly as the game's keyboard handler does:
+	// data + null-padded 16-byte buffer, _Mysize = length @ +0x10, _Myres =
+	// 0xF (short-string capacity) @ +0x14.  creds are short; longer truncate.
 	static void SsoSet(void* obj, const char* text)
 	{
 		unsigned char* p = (unsigned char*)obj;
@@ -836,7 +852,8 @@ namespace AutoLogin
 			n = 0xF;
 		memcpy(p, text, n);
 		memset(p + n, 0, 0x10 - n);
-		*(unsigned long*)(p + SSO_LEN_OFFSET) = (unsigned long)n;
+		*(unsigned long*)(p + SSO_SIZE_OFFSET) = (unsigned long)n; // _Mysize
+		*(unsigned long*)(p + SSO_CAP_OFFSET)  = 0xF;              // _Myres (short)
 	}
 
 	// Reads an ATL CSimpleStringT<char,1> (CString) field by calling the game's
@@ -1325,23 +1342,23 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 		ours ? "auto" : "manual", account?account:"(null)", mode, port, serverInfo?serverInfo:"(null)");
 	// Dump the account bytes at send — compare manual vs auto to see if
 	// the account string differs at the byte level.  Reads 16 bytes (the
-	// full SSO inline buffer) and the length field at +0x14 (SSO_LEN_OFFSET).
-	// The manual login's acctdump showed trailing "XS" (58 53) after the
-	// null terminator while the auto path showed 00 00 — this dump proves
-	// whether the string LENGTH differs (the root cause would be an SSO
-	// length mismatch, not the trailing garbage bytes).
+	// full SSO inline buffer) plus the true _Mysize (+0x10) and _Myres
+	// (+0x14) fields. The manual login's acctdump showed trailing garbage
+	// ("TS"/"XS") after the null terminator while the auto path zeroed it —
+	// this dump proves both carry the same null-terminated "halms" with the
+	// same size field; only padding past the null differs (irrelevant to the
+	// packet, which uses strlen + strncpy that stop at the null).
 	if (account && !IsBadReadPtr(account, 16))
 	{
 		unsigned char* a = (unsigned char*)account;
-		unsigned long acctLen = 0;
-		// SSO length at +0x14 from the string object. The account pointer is
-		// the inline buffer for short strings; the string object is at
-		// (account - 0) when inline. Length is at account + 0x14.
-		if (!IsBadReadPtr(account + 0x14, sizeof(unsigned long)))
-			acctLen = *(unsigned long*)(account + 0x14);
-		AutoLoginLog("HookedLoginSend: acctdump len=%lu bytes=%02X%02X%02X%02X%02X%02X%02X%02X"
+		unsigned long ssoSize = 0, ssoCap = 0;
+		if (!IsBadReadPtr(account + SSO_SIZE_OFFSET, sizeof(unsigned long)))
+			ssoSize = *(unsigned long*)(account + SSO_SIZE_OFFSET);
+		if (!IsBadReadPtr(account + SSO_CAP_OFFSET, sizeof(unsigned long)))
+			ssoCap = *(unsigned long*)(account + SSO_CAP_OFFSET);
+		AutoLoginLog("HookedLoginSend: acctdump size=%lu cap=%lu bytes=%02X%02X%02X%02X%02X%02X%02X%02X"
 			"%02X%02X%02X%02X%02X%02X%02X%02X",
-			acctLen,
+			ssoSize, ssoCap,
 			a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
 			a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
 	}
@@ -1406,9 +1423,10 @@ void __cdecl HookedBackToLogin()
 	AutoLogin::g_backToLoginSeen = true;
 	AutoLogin::g_cycleStartTick = GetTickCount();
 	// Force the next AutoLoginPrimeConnection to re-dial the account server:
-	// the 60s s_lastDialTick guard would otherwise skip it (we just returned
-	// from the game world - the old account socket is gone/dead).
+	// clear BOTH dial ticks (the old socket is gone/dead after returning from
+	// the game world). s_lastAcctDialTick is the one the churn guard reads.
 	AutoLogin::s_lastDialTick = 0;
+	AutoLogin::s_lastAcctDialTick = 0;
 
 	AutoLoginLog("HookedBackToLogin: quickFail=%d failedCycles=%d re-arming", quickFailure?1:0, AutoLogin::g_failedCycles);
 
@@ -1939,7 +1957,7 @@ void AutoLoginTick()
 		AutoLoginLog("AutoLoginTick: pre-submit psw(cnt=%u len=%u) enc=%02X%02X%02X%02X%02X%02X%02X%02X acct='%s' acctlen=%u dlgsrv='%s'",
 			cnt, len, enc[0], enc[1], enc[2], enc[3], enc[4], enc[5], enc[6], enc[7],
 			AutoLogin::SsoCStr(accountObj),
-			*(unsigned long*)((unsigned char*)accountObj + AutoLogin::SSO_LEN_OFFSET),
+			*(unsigned long*)((unsigned char*)accountObj + AutoLogin::SSO_SIZE_OFFSET),
 			dlgSrv ? dlgSrv : "");
 		AutoLoginLog("AutoLoginTick: PASSWORD CHECK: storedFNV=%08lX iniFNV=%08lX => %s%s",
 			storedF, iniF,
