@@ -46,6 +46,7 @@ namespace AutoLogin {
 	void AutoLoginPrimeConnection();
 	extern int  g_retryCount;
 	extern char g_account[128];
+	extern const uintptr_t LOGIN_BUTTON_HANDLER; // FUN_008a8fba - the game's Login button handler
 }
 
 // Auto-login submit message handler.  Called on the game's message thread
@@ -110,6 +111,9 @@ void HandleAutoLoginSubmit(void* dialog)
 		// (WM_CHAR on this, the game's message thread). The game-side handlers
 		// those messages trigger are what a manual login exercises and our
 		// direct memory fills never did - including the account-server dial.
+		// The keyboard handler (FUN_0089c003) writes the typed account into
+		// dialog+0x13B88 and the password wrapper at dialog+0x13BD0 - the
+		// same fields FUN_008a8fba reads.
 		AutoLogin::AutoLoginTypeViaControls();
 		// Simulate clicking the selected realm row once per cycle: that is the
 		// button whose handler establishes the ACCOUNT-SERVER connection
@@ -123,84 +127,18 @@ void HandleAutoLoginSubmit(void* dialog)
 		// (manual logins always have multi-second human gaps here).
 		Sleep(1500);
 
-		// FULL INPUT-LEVEL EMULATION: direct handler invocation leaves some
-		// session state uninitialised - auto-built packets were byte-stable
-		// across boots where manual packets vary. So instead of calling
-		// the login handler directly, click the REAL controls like a human:
-		// realm-row button first (connects the account server), then the
-		// Login button (dispatches through the game's own BN_CLICKED path
-		// at 0x00a5b8fe -> vtable[32] = FUN_008cec7d in the 7937 dialog).
-		{
-			struct Btn { HWND h; RECT r; };
-			Btn rows[4] = {}; int nRows = 0;
-			Btn login = {}; 
-			struct Ctx { Btn* rows; int* nRows; Btn* loginPtr; } ctx = { rows, &nRows, &login };
-			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
-				char cls[24] = {0};
-				GetClassNameA(h, cls, sizeof(cls));
-				if (_stricmp(cls, "Button") != 0) return TRUE;
-				RECT r = {};
-				GetWindowRect(h, &r);
-				Ctx* c = (Ctx*)lp;
-				// realm-row buttons: ~200x20 at x~626, y in 694..777 band
-				if ((r.right-r.left) > 150 && (r.bottom-r.top) < 40 &&
-				    r.left > 600 && r.left < 660 && r.top > 685 && r.top < 765 &&
-				    *c->nRows < 4) {
-					c->rows[*c->nRows].h = h; c->rows[*c->nRows].r = r; (*c->nRows)++;
-				}
-				// Login button: large bottom-right (~195x60 at ~956,714)
-				if (!c->loginPtr->h && (r.right-r.left) > 150 && (r.bottom-r.top) > 50 &&
-				    r.left > 900 && r.top > 690) {
-					c->loginPtr->h = h; c->loginPtr->r = r;
-				}
-				return TRUE;
-			}, (LPARAM)&ctx);
-
-			bool clickedReal = false;
-			if (nRows > 0) {
-				HWND rowBtn = rows[0].h; // first slot row; adjust if needed
-				SendMessageA(rowBtn, BM_CLICK, 0, 0);
-				AutoLoginLogFromHook("CLICKED realm-row button", dialog, dlgHwnd);
-				Sleep(1500); // server settle after connect chain
-				clickedReal = true;
-			}
-			if (login.h) {
-				SendMessageA(login.h, BM_CLICK, 0, 0);
-				AutoLoginLogFromHook("CLICKED Login button", dialog, dlgHwnd);
-				clickedReal = true;
-			}
-			if (clickedReal)
-				return; // native path did everything; no direct call needed
-		}
-
-		// Direct-call fallback (used only when EnumChildWindows could not
-		// find the Login button). The MFC BN_CLICKED path above goes
-		// through the game's real message map and uses the right object
-		// - that is the path we want to rely on. This direct call is
-		// only an emergency fallback.
-		//
-		// We tried FUN_008cec7d here (the function at the vtable slot
-		// 0x80/4 from the dialog's +0xD1D0 vtable). That call CRASHES
-		// the client on Login click, even though the MFC dispatcher
-		// reaches the same vtable slot. Conclusion: FUN_008cec7d is
-		// not the 7937 Login button handler - it is some other vtable
-		// entry (perhaps a custom control OnClick override, or a
-		// Settings/Options handler) whose body dereferences fields
-		// that happen to be valid for whatever class owns it but not
-		// for the dialog class MFC is dispatching into.
-		//
-		// The OLDER FUN_008a8fba does NOT crash and DOES send the
-		// login packet (the log shows 'HookedLoginSend: ... queued').
-		// The server then replies 'invalid Account or Psw' because
-		// the wrapper field offset it reads is for the wrong dialog
-		// version - but the flow runs end-to-end. Use that here until
-		// we can locate the real 7937 Login button handler through
-		// the MFC message map (look for ON_BN_CLICKED entries near
-		// the dialog's CDlgLogin class).
-		typedef void (__fastcall* LegacyBtnFn)(void* dialog);
-		LegacyBtnFn legacyFn = (LegacyBtnFn)0x008A8FBA;
-		legacyFn(dialog);
-		AutoLoginLogFromHook("FUN_008a8fba returned", dialog, dlgHwnd);
+		// Invoke the game's OWN Login button handler FUN_008a8fba (the
+		// function the game dispatches at 0x00a5b8fe with ECX=dialog after
+		// the IsWindowVisible gate). Its classic mode-0 path reads account
+		// SSO at dialog+0x13B88 and the password wrapper at dialog+0x13BD0,
+		// resolves the realm via GetServerInfo and sends FUN_0101bfe7.
+		// Ghidra-verified 2026-08: FUN_008cec7d is NOT the Login button -
+		// it is a vtable[+0xd1d0][32] handler for a different control and
+		// crashes when invoked as the Login button.
+		typedef void (__fastcall* LoginBtnFn)(void* dialog);
+		LoginBtnFn loginFn = (LoginBtnFn)AutoLogin::LOGIN_BUTTON_HANDLER;
+		loginFn(dialog);
+		AutoLoginLogFromHook("FUN_008a8fba returned (login button handler)", dialog, dlgHwnd);
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
 		AutoLoginLogFromHook("direct-call EXCEPTION", dialog, dlgHwnd);
 	}
