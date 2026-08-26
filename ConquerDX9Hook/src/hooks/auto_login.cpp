@@ -291,6 +291,7 @@ namespace AutoLogin
 	WSASendFn g_OrigWSASend = nullptr;
 	WSARecvFn g_OrigWSARecv = nullptr;
 	unsigned long g_wireProbeUntil = 0;
+	unsigned long g_lastAutoSendTick = 0;  // dedup: suppress game re-fire within 5s of our send
 	// Set by the recv hook when the account-server's 6-byte challenge (head
 	// 69 12 ...) is observed on any socket during the probe window. The login
 	// submit pumps the game's message loop until this is set, guaranteeing the
@@ -1327,6 +1328,21 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	// clear it here - HookedBackToLogin needs it to classify the cycle and
 	// clears it itself.
 	bool ours = AutoLogin::g_autoSubmitInFlight;
+	// Dedup: FUN_008a8fba (or the game's own re-fire path) can invoke the send
+	// twice ~330ms apart when called directly with the challenge already in
+	// session state. The server rejects the duplicate (log 2026-08-27 02:19:
+	// two 472B wire-outs, then two 322B rejects). Suppress any second send
+	// within 5s of our first auto send.
+	if (ours) {
+		unsigned long now = GetTickCount();
+		if (AutoLogin::g_lastAutoSendTick != 0 &&
+		    now - AutoLogin::g_lastAutoSendTick < 5000) {
+			AutoLoginLog("HookedLoginSend: suppressing re-fire (%lums after our send)",
+				now - AutoLogin::g_lastAutoSendTick);
+			return 0;
+		}
+		AutoLogin::g_lastAutoSendTick = now;
+	}
 	// NOTE: intentionally NOT setting g_attemptDone here anymore. The account
 	// socket often does not exist yet when the first send is queued (the client
 	// dials 170.33.x.x:16000 on its own ~20s internal retry), and that first
