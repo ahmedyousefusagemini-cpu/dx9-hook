@@ -44,6 +44,7 @@ static DWORD g_lastSubclassEnumTick = 0;
 namespace AutoLogin {
 	void AutoLoginTypeViaControls();
 	void AutoLoginPrimeConnection();
+	void AutoLoginArmWireProbe();
 	extern int  g_retryCount;
 	extern char g_account[128];
 	extern const uintptr_t LOGIN_BUTTON_HANDLER; // FUN_008a8fba - the game's Login button handler
@@ -120,6 +121,11 @@ void HandleAutoLoginSubmit(void* dialog)
 		// NOTE: an actual BM_CLICK on the (838,694) child does NOT dispatch to
 		// FUN_008a9348 in this build (no 'SEQ: realm-row handler' fires), so
 		// the direct call is required to open the account socket.
+		// Arm the wire probe BEFORE connecting, so the account-server
+		// handshake (2B+6B challenge) is captured and can be compared to the
+		// manual login's handshake. Also click the REAL realm-row button
+		// path is replaced by the direct FUN_008a9348 call below.
+		AutoLogin::AutoLoginArmWireProbe();
 		if (AutoLogin::g_retryCount <= 1)
 			AutoLogin::AutoLoginPrimeConnection();
 		// Match the MANUAL login's timing: the accepted manual run sent the

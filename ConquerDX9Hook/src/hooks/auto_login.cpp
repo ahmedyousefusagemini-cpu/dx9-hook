@@ -314,6 +314,15 @@ namespace AutoLogin
 			GetTickCount() < g_wireProbeUntil;
 	}
 
+	// Arm the probe from the moment an auto-login is about to fire, so the
+	// account-server handshake (2B+6B challenge) is captured too. Used by
+	// directx_hooks.cpp before clicking Login.
+	void AutoLoginArmWireProbe()
+	{
+		g_wireProbeUntil = GetTickCount() + 20000;
+		s_fullDumpCount = 0;
+	}
+
 	static void LogConnectTarget(void* sock, const void* addr, int addrlen)
 	{
 		if (!addr || addrlen < 4)
