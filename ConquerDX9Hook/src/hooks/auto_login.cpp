@@ -1703,14 +1703,7 @@ void AutoLoginTick()
 		__try {
 			AutoLogin::SetPasswordFn setPsw = (AutoLogin::SetPasswordFn)AutoLogin::SET_PASSWORD_ADDRESS;
 			setPsw(pswObj, nullptr, pswText);
-			// SetPassword writes len@+0x104 but does NOT write the count
-			// at +0x100. The packet hash (FUN_00ed335e -> VM ordinals 47/1/65)
-			// reads BOTH +0x100 (count via FUN_00eaf082) and +0x104 (length
-			// via FUN_00eaff3b). On a manual login the count is set by the
-			// wrapper ctor to the same value as the length; replicate it.
-			unsigned int pwLen = *(unsigned int*)((unsigned char*)pswObj + 0x104);
-			*(unsigned int*)((unsigned char*)pswObj + 0x100) = pwLen;
-			AutoLoginLog("AutoLoginTick: SetPassword ok wrapper=%p len=%u cnt=%u", pswObj, pwLen, pwLen);
+			AutoLoginLog("AutoLoginTick: SetPassword ok wrapper=%p len=%u", pswObj, *(unsigned int*)((unsigned char*)pswObj + 0x104));
 		} __except(EXCEPTION_EXECUTE_HANDLER) {
 			AutoLoginLog("AutoLoginTick: SetPassword exception wrapper=%p", pswObj);
 			strcpy_s(AutoLogin::g_lastResult, "SetPassword crash");
