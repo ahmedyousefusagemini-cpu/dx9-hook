@@ -304,11 +304,14 @@ namespace AutoLogin
 	unsigned long s_lastDialTick = 0;   // when the client last dialed anything (gates PRIME)
 	int s_fullDumpCount = 0;            // full-payload dumps this probe window
 
-	// Probe is live during the 20s post-send window OR the whole time while
-	// manual-capture mode records a human login.
+	// Probe is live during the 20s post-send window, the whole time while
+	// manual-capture mode records a human login, or whenever auto-learn is
+	// enabled (so a successful MANUAL login gets its password captured and
+	// persisted as password_hex regardless of the probe window).
 	static bool WireProbeActive()
 	{
-		return AutoLogin::g_manualCapture || GetTickCount() < g_wireProbeUntil;
+		return AutoLogin::g_autoLearnPassword || AutoLogin::g_manualCapture ||
+			GetTickCount() < g_wireProbeUntil;
 	}
 
 	static void LogConnectTarget(void* sock, const void* addr, int addrlen)
