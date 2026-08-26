@@ -1352,10 +1352,10 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	{
 		unsigned char* a = (unsigned char*)account;
 		unsigned long ssoSize = 0, ssoCap = 0;
-		if (!IsBadReadPtr(account + SSO_SIZE_OFFSET, sizeof(unsigned long)))
-			ssoSize = *(unsigned long*)(account + SSO_SIZE_OFFSET);
-		if (!IsBadReadPtr(account + SSO_CAP_OFFSET, sizeof(unsigned long)))
-			ssoCap = *(unsigned long*)(account + SSO_CAP_OFFSET);
+		if (!IsBadReadPtr(account + AutoLogin::SSO_SIZE_OFFSET, sizeof(unsigned long)))
+			ssoSize = *(unsigned long*)(account + AutoLogin::SSO_SIZE_OFFSET);
+		if (!IsBadReadPtr(account + AutoLogin::SSO_CAP_OFFSET, sizeof(unsigned long)))
+			ssoCap = *(unsigned long*)(account + AutoLogin::SSO_CAP_OFFSET);
 		AutoLoginLog("HookedLoginSend: acctdump size=%lu cap=%lu bytes=%02X%02X%02X%02X%02X%02X%02X%02X"
 			"%02X%02X%02X%02X%02X%02X%02X%02X",
 			ssoSize, ssoCap,
