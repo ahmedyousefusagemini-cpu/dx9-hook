@@ -115,36 +115,13 @@ void HandleAutoLoginSubmit(void* dialog)
 		// a 6-char password (EDITREADBACK len=6 MISMATCH) that corrupts the
 		// game's display-wrapper sync.
 		AutoLogin::AutoLoginTypeViaControls();
-		// Click the REAL realm-row button (BM_CLICK) exactly like the manual
-		// login. This establishes the account-server connection and sets up
-		// the dialog's selected-server state through the game's own dispatch.
-		// Directly calling FUN_008a9348 skips the MFC message-map setup that
-		// the real click provides.
-		{
-			HWND rowBtn = nullptr;
-			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
-				char cls[24] = {0};
-				GetClassNameA(h, cls, sizeof(cls));
-				if (_stricmp(cls, "Button") != 0) return TRUE;
-				RECT r = {};
-				GetWindowRect(h, &r);
-				// Realm-row buttons: ~72x20 at x~838, y in 694..780 band
-				if ((r.right-r.left) > 50 && (r.right-r.left) < 100 &&
-				    (r.bottom-r.top) > 15 && (r.bottom-r.top) < 30 &&
-				    r.left > 800 && r.left < 860 && r.top > 680 && r.top < 790) {
-					*(HWND*)lp = h;
-					return FALSE;
-				}
-				return TRUE;
-			}, (LPARAM)&rowBtn);
-			if (rowBtn && IsWindow(rowBtn)) {
-				SendMessageA(rowBtn, BM_CLICK, 0, 0);
-				AutoLoginLogFromHook("CLICKED realm-row button (via BM_CLICK)", dialog, dlgHwnd);
-			} else {
-				AutoLoginLogFromHook("realm-row not found - direct FUN_008a9348 fallback", dialog, dlgHwnd);
-				AutoLogin::AutoLoginPrimeConnection();
-			}
-		}
+		// Simulate clicking the selected realm row: the button whose handler
+		// establishes the ACCOUNT-SERVER connection (FUN_008a9348 -> connect).
+		// NOTE: an actual BM_CLICK on the (838,694) child does NOT dispatch to
+		// FUN_008a9348 in this build (no 'SEQ: realm-row handler' fires), so
+		// the direct call is required to open the account socket.
+		if (AutoLogin::g_retryCount <= 1)
+			AutoLogin::AutoLoginPrimeConnection();
 		// Match the MANUAL login's timing: the accepted manual run sent the
 		// auth packet ~353ms after the account-server's 6B challenge reply.
 		Sleep(500);
