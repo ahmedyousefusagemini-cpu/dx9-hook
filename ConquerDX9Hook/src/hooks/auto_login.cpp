@@ -1267,6 +1267,14 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	}
 	AutoLoginLog("HookedLoginSend: %s pass-through account=%s mode=%d port=%d server=%s",
 		ours ? "auto" : "manual", account?account:"(null)", mode, port, serverInfo?serverInfo:"(null)");
+	// Dump the account bytes at send — compare manual vs auto to see if
+	// the account string differs at the byte level.
+	if (account && !IsBadReadPtr(account, 16))
+	{
+		unsigned char* a = (unsigned char*)account;
+		AutoLoginLog("HookedLoginSend: acctdump bytes=%02X%02X%02X%02X%02X%02X%02X%02X",
+			a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+	}
 	// Dump the exact wrapper state the send is about to read: count@+0x100,
 	// length@+0x104, first encrypted bytes@+0x108. Fires for BOTH auto and
 	// manual sends - diffing an auto line against a manual-typed line isolates
