@@ -120,11 +120,13 @@ void HandleAutoLoginSubmit(void* dialog)
 		// it every login send queues into a socket that never exists.
 		if (AutoLogin::g_retryCount <= 1)
 			AutoLogin::AutoLoginPrimeConnection();
-		// Give the server a moment after the dial before pushing credentials -
-		// an auth packet arriving ~300ms after TCP accept gets answered with
-		// the generic 6-byte reject the client renders as "wrong password"
-		// (manual logins always have multi-second human gaps here).
-		Sleep(1500);
+		// Match the MANUAL login's timing: the accepted manual run sent the
+		// auth packet ~353ms after the account-server's 6B challenge reply.
+		// A 1.5s gap (older versions) landed the packet after the server's
+		// session/challenge TTL and got rejected with the 6-byte error the
+		// client shows as "wrong password". Keep a short settle so the
+		// socket has processed the challenge, then click Login quickly.
+		Sleep(500);
 
 		// Click the REAL Login button (BM_CLICK) exactly like a human. The
 		// manual login sequence is proven to work: one 472B packet -> 10B
