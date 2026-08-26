@@ -1338,7 +1338,7 @@ void __cdecl HookedBackToLogin()
 	// Force the next AutoLoginPrimeConnection to re-dial the account server:
 	// the 60s s_lastDialTick guard would otherwise skip it (we just returned
 	// from the game world - the old account socket is gone/dead).
-	s_lastDialTick = 0;
+	AutoLogin::s_lastDialTick = 0;
 
 	AutoLoginLog("HookedBackToLogin: quickFail=%d failedCycles=%d re-arming", quickFailure?1:0, AutoLogin::g_failedCycles);
 
