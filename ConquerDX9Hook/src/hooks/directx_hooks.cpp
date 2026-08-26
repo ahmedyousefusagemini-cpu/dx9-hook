@@ -109,11 +109,10 @@ void HandleAutoLoginSubmit(void* dialog)
 	__try {
 		// Type the credentials through the dialog's REAL edit controls first
 		// (WM_CHAR on this, the game's message thread). The game-side handlers
-		// those messages trigger are what a manual login exercises and our
-		// direct memory fills never did - including the account-server dial.
-		// The keyboard handler (FUN_0089c003) writes the typed account into
-		// dialog+0x13B88 and the password wrapper at dialog+0x13BD0 - the
-		// same fields FUN_008a8fba reads.
+		// those messages trigger are what a manual login exercises - the
+		// keyboard handler (FUN_0089c003) writes the typed account into
+		// dialog+0x13B88 and the password wrapper at dialog+0x13BD0 (verified:
+		// a manual login that typed the creds got ACCEPTED, fnv=798F37FA).
 		AutoLogin::AutoLoginTypeViaControls();
 		// Simulate clicking the selected realm row once per cycle: that is the
 		// button whose handler establishes the ACCOUNT-SERVER connection
@@ -127,20 +126,44 @@ void HandleAutoLoginSubmit(void* dialog)
 		// (manual logins always have multi-second human gaps here).
 		Sleep(1500);
 
-		// Invoke the game's OWN Login button handler FUN_008a8fba (the
-		// function the game dispatches at 0x00a5b8fe with ECX=dialog after
-		// the IsWindowVisible gate). Its classic mode-0 path reads account
-		// SSO at dialog+0x13B88 and the password wrapper at dialog+0x13BD0,
-		// resolves the realm via GetServerInfo and sends FUN_0101bfe7.
-		// Ghidra-verified 2026-08: FUN_008cec7d is NOT the Login button -
-		// it is a vtable[+0xd1d0][32] handler for a different control and
-		// crashes when invoked as the Login button.
-		typedef void (__fastcall* LoginBtnFn)(void* dialog);
-		LoginBtnFn loginFn = (LoginBtnFn)AutoLogin::LOGIN_BUTTON_HANDLER;
-		loginFn(dialog);
-		AutoLoginLogFromHook("FUN_008a8fba returned (login button handler)", dialog, dlgHwnd);
+		// Click the REAL Login button (BM_CLICK) exactly like a human. The
+		// manual login sequence is proven to work: one 472B packet -> 10B
+		// ACCEPT. Directly calling FUN_008a8fba instead DOUBLE-SENDS (two
+		// 472B packets ~380ms apart) and the server rejects the duplicate.
+		// The button click goes through the game's own message map -> the
+		// handler at 0x00a5b8fe -> FUN_008a8fba -> single send.
+		{
+			HWND loginBtn = nullptr;
+			EnumChildWindows(dlgHwnd, [](HWND h, LPARAM lp)->BOOL {
+				char cls[24] = {0};
+				GetClassNameA(h, cls, sizeof(cls));
+				if (_stricmp(cls, "Button") != 0) return TRUE;
+				RECT r = {};
+				GetWindowRect(h, &r);
+				// Login button: large bottom-right (~195x60 at ~956,714)
+				if ((r.right-r.left) > 150 && (r.bottom-r.top) > 50 &&
+				    r.left > 900 && r.top > 690) {
+					*(HWND*)lp = h;
+					return FALSE;
+				}
+				return TRUE;
+			}, (LPARAM)&loginBtn);
+
+			if (loginBtn && IsWindow(loginBtn)) {
+				SendMessageA(loginBtn, BM_CLICK, 0, 0);
+				AutoLoginLogFromHook("CLICKED real Login button (single-send path)", dialog, dlgHwnd);
+			} else {
+				// Fallback: direct handler invocation. Only used when the
+				// button could not be located. NOTE: this path may double-send
+				// and the server may reject it - prefer the button click.
+				AutoLoginLogFromHook("Login button not found - direct FUN_008a8fba fallback", dialog, dlgHwnd);
+				typedef void (__fastcall* LoginBtnFn)(void* dialog);
+				LoginBtnFn loginFn = (LoginBtnFn)AutoLogin::LOGIN_BUTTON_HANDLER;
+				loginFn(dialog);
+			}
+		}
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		AutoLoginLogFromHook("direct-call EXCEPTION", dialog, dlgHwnd);
+		AutoLoginLogFromHook("submit EXCEPTION", dialog, dlgHwnd);
 	}
 }
 
