@@ -1708,6 +1708,22 @@ void AutoLoginTick()
 	// Fill the dialog's OWN credential fields - the exact inputs a manual
 	// typing + Login click would produce.
 	AutoLogin::SsoSet(accountObj, AutoLogin::g_account);
+	// Also write the account as a std::string at +0x12EA0 (second copy at +0x130F0),
+	// matching what the game's keyboard handler (FUN_0089c003) and the vtable
+	// handler (FUN_008cec7d) produce during real typing. Some internal read path
+	// may reference these.
+	__try {
+		const char* acctText = AutoLogin::g_account;
+		size_t alen = strlen(acctText);
+		if (alen > 0xFF) alen = 0xFF;
+		memcpy(dlg + 0x12EA0, acctText, alen);
+		*(size_t*)(dlg + 0x12EA0 + 0x10) = alen;
+		*(size_t*)(dlg + 0x12EA0 + 0x14) = 0xFF;
+		memcpy(dlg + 0x130F0, acctText, alen);
+		*(size_t*)(dlg + 0x130F0 + 0x10) = alen;
+		*(size_t*)(dlg + 0x130F0 + 0x14) = 0xFF;
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+	}
 	AutoLoginLog("AutoLoginTick: filled account '%s' into %p (SSO @+0x13B88)", AutoLogin::g_account, accountObj);
 
 	// Password: call the game's OWN CGameInputStr::SetPassword on the
