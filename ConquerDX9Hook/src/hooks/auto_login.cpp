@@ -1324,12 +1324,26 @@ int __cdecl HookedLoginSend(const char* account, void* password, const char* ser
 	AutoLoginLog("HookedLoginSend: %s pass-through account=%s mode=%d port=%d server=%s",
 		ours ? "auto" : "manual", account?account:"(null)", mode, port, serverInfo?serverInfo:"(null)");
 	// Dump the account bytes at send — compare manual vs auto to see if
-	// the account string differs at the byte level.
+	// the account string differs at the byte level.  Reads 16 bytes (the
+	// full SSO inline buffer) and the length field at +0x14 (SSO_LEN_OFFSET).
+	// The manual login's acctdump showed trailing "XS" (58 53) after the
+	// null terminator while the auto path showed 00 00 — this dump proves
+	// whether the string LENGTH differs (the root cause would be an SSO
+	// length mismatch, not the trailing garbage bytes).
 	if (account && !IsBadReadPtr(account, 16))
 	{
 		unsigned char* a = (unsigned char*)account;
-		AutoLoginLog("HookedLoginSend: acctdump bytes=%02X%02X%02X%02X%02X%02X%02X%02X",
-			a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+		unsigned long acctLen = 0;
+		// SSO length at +0x14 from the string object. The account pointer is
+		// the inline buffer for short strings; the string object is at
+		// (account - 0) when inline. Length is at account + 0x14.
+		if (!IsBadReadPtr(account + 0x14, sizeof(unsigned long)))
+			acctLen = *(unsigned long*)(account + 0x14);
+		AutoLoginLog("HookedLoginSend: acctdump len=%lu bytes=%02X%02X%02X%02X%02X%02X%02X%02X"
+			"%02X%02X%02X%02X%02X%02X%02X%02X",
+			acctLen,
+			a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
+			a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
 	}
 	// Dump the exact wrapper state the send is about to read: count@+0x100,
 	// length@+0x104, first encrypted bytes@+0x108. Fires for BOTH auto and
