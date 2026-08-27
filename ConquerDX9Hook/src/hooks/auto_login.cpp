@@ -516,6 +516,21 @@ namespace AutoLogin
 		g_clickInProgress = false;
 	}
 
+	// Manual one-shot: reload accountinfo.ini, find the login dialog and fill
+	// the account field right away (independent of the auto-fill toggle).
+	void FillAccountNow()
+	{
+		LoadActiveAccount();
+		HWND dialog = FindLoginDialog();
+		if (!IsDialogUsable(dialog))
+			dialog = g_cachedDialog;
+		if (!IsDialogUsable(dialog))
+			return;
+		g_cachedDialog = dialog;
+		g_filledAccountDialog = NULL;  // let the auto loop also see it as done
+		FillAccountField(dialog);
+	}
+
 	// ------------------------------------------------------------------
 	// Per-frame state
 	// ------------------------------------------------------------------
@@ -625,7 +640,11 @@ void RenderAutoLoginInterface()
 		AutoLogin::ClickLoginOnce();
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("(programmatic press, no cursor movement)");
+	if (ImGui::Button("Fill Account"))
+	{
+		AutoLogin::FillAccountNow();
+	}
+	ImGui::TextDisabled("(programmatic press / account fill, no cursor movement)");
 
 	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
 		AutoLogin::g_autoClickLogin)
