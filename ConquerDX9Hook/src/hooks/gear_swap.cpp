@@ -17,8 +17,8 @@ extern unsigned int GetXpBarValue();
 //
 //   Swapuse_SwapmainbBtn click
 //     -> 0x00A58AA8  (button dispatcher: MOV ECX,EAX after FUN_0043e581)
-//     -> FUN_00FF219D  CMyHero::SwapEquipMode  (heroitem.cpp)
-//          this = FUN_0043e581() -> DAT_01a53980 (CMyHero singleton)
+//     -> FUN_00FF2B8E  CMyHero::SwapEquipMode  (heroitem.cpp)
+//          this = FUN_0043e581() -> DAT_01a549a0 (CMyHero singleton)
 //          equip mode flag at hero+0x193C: 0 = main, 1 = alternate
 //          if (mode == 0) send CMsgItem{action=0x2D}  (0x97B)  // swap to ALT
 //                         + CMsgAction{action=0x198} (0x833)  // equip refresh
@@ -27,7 +27,7 @@ extern unsigned int GetXpBarValue();
 //     -> server replies; inbound CMsgItem::Process (FUN_00F0959C) re-renders
 //        all 8 equipment slots (FUN_00ff1eff clear + FUN_00ff49c4 set pairs).
 //
-// So the complete native swap = FUN_00FF219D(hero) - exactly what the button
+// So the complete native swap = FUN_00FF2B8E(hero) - exactly what the button
 // runs. This module wears ALT while the XP pop is on screen and switches back
 // to MAIN the moment the pop goes away (the skill activation consumes it):
 //
@@ -35,13 +35,13 @@ extern unsigned int GetXpBarValue();
 //   - pop gone (skill activated) -> wear MAIN
 //
 // Pop detection (VERIFIED EMPIRICALLY on the live game): the modded client's
-// main-window WndProc drives the pop panel through FUN_00AE61F8 - the show
+// main-window WndProc drives the pop panel through FUN_00AE6208 - the show
 // flag setter (panel+0xAC8 = 1/0):
 //   show: WndProc msg -> FUN_00601E67(mainWindow+0x3B7B68)
-//         -> FUN_00AE61F8(panel, 1) + FUN_00AD0EA2 (pick XpSkillType%u icon,
+//         -> FUN_00AE6208(panel, 1) + FUN_00AD0EA2 (pick XpSkillType%u icon,
 //            MoveWindow to the right edge)
-//   hide: WndProc msg -> FUN_00AE61F8(panel, 0) + fgui hide
-// We MinHook FUN_00AE61F8 (body: MOV [ECX+0xAC8],AL / RET 4), remember the
+//   hide: WndProc msg -> FUN_00AE6208(panel, 0) + fgui hide
+// We MinHook FUN_00AE6208 (body: MOV [ECX+0xAC8],AL / RET 4), remember the
 // panel instance(s), and each frame read +0xAC8 (plus real HWND visibility)
 // as ground truth. The CDlgXp::SetBar path (FUN_00AE622B) and the
 // status-gate path (ChkStatus status 10/5) are NOT live in this build -
@@ -51,13 +51,13 @@ extern unsigned int GetXpBarValue();
 
 namespace GearSwap
 {
-	// --- game constants (client 7937) --------------------------------------
-	const uintptr_t HERO_GLOBAL_ADDRESS = 0x01A53980;  // DAT_01a53980 - CMyHero*
-	const uintptr_t SWAP_FUNC           = 0x00FF219D;  // FUN_00ff219d - CMyHero::SwapEquipMode
+	// --- game constants (client 7950) --------------------------------------
+	const uintptr_t HERO_GLOBAL_ADDRESS = 0x01A549A0;  // DAT_01a549a0 - CMyHero*
+	const uintptr_t SWAP_FUNC           = 0x00FF2B8E;  // FUN_00ff2b8e - CMyHero::SwapEquipMode
 	const size_t    EQUIP_MODE_OFFSET   = 0x193C;      // 0 = main, 1 = alternate
 
 	// The hero's 576-bit status bitfield. The game's own ChkStatus
-	// (FUN_00F1AF78: ADD ECX,0x138) reads it from DAT_01a53980+0x138, and the
+	// (FUN_00F1B838: ADD ECX,0x138) reads it from DAT_01a549a0+0x138, and the
 	// bit layout (from FUN_00D4ED8E) is: bit (id & 63) of 64-bit word (id >> 6),
 	// i.e. ((unsigned long long*)(hero+0x138))[id >> 6] >> (id & 63).
 	const size_t STATUS_BITFIELD_OFFSET = 0x138;
@@ -72,14 +72,14 @@ namespace GearSwap
 	// The LIVE XP-pop show/hide setter. The modded client's main-window
 	// WndProc drives the pop panel state through this one choke point:
 	//   show: WndProc msg -> FUN_00601E67(mainWindow+0x3B7B68)
-	//         -> FUN_00AE61F8(panel, 1) : panel+0xAC8 = 1
+	//         -> FUN_00AE6208(panel, 1) : panel+0xAC8 = 1
 	//         -> FUN_00AD0EA2(panel)    : pick XpSkillType%u icon, MoveWindow
-	//   hide: WndProc msg -> FUN_00AE61F8(panel, 0) (panel+0x7C0760)
+	//   hide: WndProc msg -> FUN_00AE6208(panel, 0) (panel+0x7C0760)
 	//         -> FUN_00C264D1(panel, 0) : fgui hide the window
 	// The old FUN_00AE622B (CDlgXp::SetBar) + status-gate path is NOT what the
 	// live game uses (verified empirically: never fired, statuses 10/5 stayed
 	// off while the icon was up). Body: MOV [ECX+0xAC8],AL / RET 4.
-	const uintptr_t XP_PANEL_SHOW_FUNC = 0x00AE61F8;
+	const uintptr_t XP_PANEL_SHOW_FUNC = 0x00AE6208;
 	const size_t    XP_PANEL_SHOW_FLAG = 0xAC8;   // byte: 1 = pop shown, 0 = hidden
 
 	// --- configuration -----------------------------------------------------
@@ -105,10 +105,10 @@ namespace GearSwap
 	char g_lastResult[48] = "idle";
 	DWORD g_lastResultTick = 0;
 
-	int GetHero();   // defined below - the CMyHero singleton (DAT_01a53980)
+	int GetHero();   // defined below - the CMyHero singleton (DAT_01a549a0)
 
 	// --- XP pop visibility hook --------------------------------------------
-	// FUN_00AE61F8 is the live show/hide setter for the XP pop panel
+	// FUN_00AE6208 is the live show/hide setter for the XP pop panel
 	// (this in ECX, show flag on the stack): the WndProc's show handler
 	// FUN_00601E67 calls it with 1 (panel = mainWindow+0x3B7B68) and the
 	// hide handler with 0 (panel = mainWindow+0x7C0760). The client keeps
@@ -172,7 +172,7 @@ namespace GearSwap
 	const size_t HWND_OFFSET = 0x20;   // CWnd::m_hWnd (ground-truth visibility check)
 
 	// Secondary gate: the game's own ChkStatus mirror. Statuses live in
-	// the 576-bit bitfield at hero+0x138 (FUN_00F1AF78 = C3DUser::ChkStatus:
+	// the 576-bit bitfield at hero+0x138 (FUN_00F1B838 = C3DUser::ChkStatus:
 	// ADD ECX,0x138; bit layout per FUN_00D4ED8E: bit (id&63) of word (id>>6)).
 	// Not the live pop trigger in this build (verified empirically) - kept as
 	// a configurable fallback for servers that DO set a status on the pop.
@@ -189,7 +189,7 @@ namespace GearSwap
 	}
 
 	// Ground-truth check: the game's own +0xAC8 show flag on the captured
-	// panel(s) - the exact field FUN_00AE61F8 writes on every pop show/hide.
+	// panel(s) - the exact field FUN_00AE6208 writes on every pop show/hide.
 	// Falls back to real HWND visibility (CWnd::m_hWnd at +0x20), then to the
 	// configured hero-status ids (secondary, off by default of the gate).
 	bool IsXpIconVisible()
@@ -216,7 +216,7 @@ namespace GearSwap
 
 	bool IsHeroSupported()
 	{
-		// Prologue of FUN_00ff219d (verified byte-for-byte):
+		// Prologue of FUN_00ff2b8e (verified byte-for-byte):
 		//   68 4C 09 00 00          push 0x94C                       @ 0x00
 		//   B8 F6 E7 4A 01          mov  eax, 0x14AE7F6             @ 0x05
 		//   E8 DD ED 26 00          call __EH_prolog3_GS            @ 0x0A
@@ -255,7 +255,7 @@ namespace GearSwap
 		g_lastResultTick = GetTickCount();
 	}
 
-	// The native swap: FUN_00FF219D(ECX = hero), no stack args. Sends the
+	// The native swap: FUN_00FF2B8E(ECX = hero), no stack args. Sends the
 	// right CMsgItem action (0x2D to ALT / 0x2C to MAIN) + equip refresh.
 	void SendNativeSwap(int hero)
 	{
@@ -299,7 +299,7 @@ namespace GearSwap
 		if (!hero)
 			return;
 
-		// The FUN_00AE61F8 hook captures the live pop panel instance(s); the
+		// The FUN_00AE6208 hook captures the live pop panel instance(s); the
 		// +0xAC8 flag read in IsXpIconVisible() is the real signal.
 		EnsureIconHookInstalled();
 

@@ -1,4 +1,4 @@
-# Reverse Engineering Notes — Conquer.exe (client 7937)
+# Reverse Engineering Notes — Conquer.exe (client 7950)
 
 **Current status: auto-hunt FULLY WORKING from the ImGui overlay** (kills, loots
 gold/items, XP + skill bars fill normally). See the "WORKING STATE" section below for
@@ -6,6 +6,12 @@ the final solution; the detailed research follows.
 
 Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll imported).
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
+
+
+> **2026-08-27: client recompiled again (version 7950).** All hook modules
+> re-pointed at the new build via Ghidra MCP. Full migration table in OFFSETS.md.
+> Key AOB signatures from the 2026-08-20 work still matched; the re-find workflow
+> (signature -> xref -> decompile verify) was identical to the last update.
 
 ---
 

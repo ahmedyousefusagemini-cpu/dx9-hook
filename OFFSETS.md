@@ -1,17 +1,66 @@
-# RE Offsets & Signatures — Conquer.exe (client 7937)
+# RE Offsets & Signatures — Conquer.exe (client 7950)
 
 Durable reverse-engineering reference for the auto-hunt / VIP / speed work. **Absolute
 addresses shift on every recompile** — the byte signatures (AOB) and the unique
 string/RTTI anchors below are what let you re-locate each value after a binary
 update.
 
-Image base for all addresses below: `0x00400000`. Build analyzed: client 7937.
+Image base for all addresses below: `0x00400000`. Build analyzed: client 7950.
 
-> **2026-08-20: client recompiled (new build).** All addresses below were
-> re-located and VERIFIED against the new binary; the old → new migration
-> table is in the next section. The older tables further down still list
-> previous-build addresses (kept as the signature/anchor reference — every
-> entry's "Found via" mechanism still works on the new build).
+> **2026-08-27: client recompiled (new build, version 7950).** All addresses still
+> used by the overlay were re-located and VERIFIED against the new binary via
+> Ghidra (AOB / xref / decompile). The old → new migration table is in the next
+> section. The older tables further down still list previous-build addresses
+> (kept as the signature/anchor reference — every entry's "Found via" mechanism
+> still works on the new build).
+
+---
+
+## 2026-08-27 (7950) — verified old → new address table
+
+All entries below were re-verified in Ghidra on the 7950 build (AOB signature,
+xref check or decompile). This is a full recompile: per-region shifts are not
+uniform.
+
+| Old (2026-08-20 build) | New (7950 build) | What |
+|---|---|---|
+| `0x01A53980` | `0x01A549A0` | client / CMyHero object global (read by `FUN_0043e581`) |
+| `0x01A54200` | `0x01A55220` | CAutoHangUpMgr singleton global (read by `FUN_00482805`) |
+| `0x01A57F40` | `0x01A58FE0` | CUserAttribMgr singleton global (read by `FUN_00832a5d`) |
+| `0x01A5DDE4` | `0x01A5EE04` | hunt brain tick global (`timeGetTime` gate, read+write only in the brain) |
+| `0x00482805` | `0x00482805` | manager accessor (unchanged) |
+| `0x00832AB1` | `0x00832A5D` | CUserAttribMgr accessor |
+| `0x00BD8025` | `0x00BD8035` | auto-hunt toggle handler (PUSH 0; CALL mgr-accessor; MOV ECX,EAX; CALL) |
+| `0x00F30A75` | `0x00F31335` | toggle impl `Toggle(mgr, flag)` (called by the toggle handler) |
+| `0x00F54DF8` | `0x00F556FC` | per-frame hunt brain |
+| `0x00F48B93` | `0x00F49497` | walk-to-coord (brain helper, called by the brain with radius 4) |
+| `0x00F43828` | `0x00F4412C` | find-target (brain helper, writes `{id,dist}` pair) |
+| `0x01117254` | `0x01117C44` | is-hunting check (`client+0x5385 && mgr+0x11`) |
+| `0x01116280` | `0x01116C70` | auto-battle byte getter (`8A 81 85 53 00 00 C3`) |
+| `0x00D3203A` / `0x00D3244A` | `0x00D3313A` | my-role list match (role+0x54 == client+0x268) |
+| `0x010B0A9A` | `0x010B148B` | action-interval virtual (vtable check) |
+| `0x00DE93E2` | `0x00DE93F2` | master interval computation |
+| `0x016F8E84` | `0x016F9E84` | speed cap table (13 dwords `{100..200}`) |
+| `0x01116549` | `0x01116F39` | XP-fill gate (`75 49` → `90 90`; inside FUN_01116f1a) |
+| `0x011B3286` | `0x011B3CE6` | use-skill-on-target gate (`75 4B` → `EB 4B`; inside FUN_011b39c9) |
+| `0x011B4BF8` | `0x011B5658` | use-skill-at-position gate (`75 3C` → `EB 3C`; inside FUN_011b502c) |
+| `0x011B2F69` | `0x011B39C9` | use skill on target (callable: `__thiscall(client, magicId, selfUid, 0, 1)`) |
+| `0x011B45CC` | `0x011B502C` | use skill at position |
+| `0x01743024` | `0x01744044` | string `STR_CANNOT_USE_XP_WHEN_HANGUP` |
+| `0x00D96E5C` | `0x00D96E6C` | magic-info getter (this + 0x70) |
+| `0x00E49AC2` | `0x00E49BD7` | status apply chokepoint (`6A 1C B8` prologue, 6-arg thiscall, RET 0x14) |
+| `0x00A73B7E` | `0x00A73B8E` | status bitfield core set/clear (`__thiscall(bitfield, id, set)`) |
+| `0x00EEDD80` | `0x00EEE64D` | `C3DUser::AddStatus` (`ADD ECX,0x138`; calls `0x00a73b8e`) |
+| `0x00EF25C5` | `0x00EF2E91` | `C3DUser::ClearStatus` |
+| `0x00F1AF78` | `0x00F1B838` | `C3DUser::ChkStatus` (`ADD ECX,0x138; JMP 0x00f2012d`) |
+| `0x00FF219D` | `0x00FF2B8E` | `CMyHero::SwapEquipMode` (reads `hero+0x193C`, sends 0x2C/0x2D + 0x198) |
+| `0x00AE61F8` | `0x00AE6208` | XP-pop panel show/hide setter (`MOV [ECX+0xAC8],AL / RET 4`) |
+
+Client-side field offsets unchanged and still verified: `client+0x5385`
+(auto-battle byte), `client+0xaec` (XP bar 0–100), `client+0x268` (my id),
+`mgr+0x11` (hunting flag), `mgr+0x04` (attack-target X / loot ptr),
+`hero+0x193C` (equip mode), `role+0x44/+0x48/+0xc0` (speed paths),
+`status bitfield at client+0x138` (576 bits).
 
 ---
 
@@ -323,7 +372,7 @@ FUN_00c3c2d0: 55 8B EC 83 7D 08 00 74 1F FF 75 0C 83 C1 04 FF 75 08 E8 ?? ?? ?? 
 | `+0x18`/`+0x1c` | int | hunt anchor X/Y (the brain re-sets these each tick) |
 | `+0x04` | int | attack-target X written by the brain (FUN_00f54df8) when attacking in range; `0` while walking / target out of range. **In-combat signal for the attack boost** — treat as combat only when `0 < value < 0x100000` (the brain writes a loot POINTER here while looting). Can go stale after a kill — clear it (`ClearAutoHuntTarget`) when the finder sees nothing |
 
-### Speed cap table contents (client 7937)
+### Speed cap table contents (client 7950)
 
 `0x016F7E44` — per-state caps (max nSpeedPercent), states 0–12:
 `{100, 105, 110, 115, 120, 130, 140, 150, 165, 185, 190, 195, 200}`
@@ -406,7 +455,7 @@ Use these to locate the code after an update when signatures fail:
 
 ---
 
-## Character Buffs / StatusIcons (VERIFIED on client 7937)
+## Character Buffs / StatusIcons (VERIFIED on client 7950)
 
 The client calls character buffs **StatusIcons**. The active buffs on the
 character are a **576-bit bitfield at `C3DUser+0x138`** (72 bytes = 9×8-byte
@@ -496,7 +545,7 @@ server-driven debuffs too (the binders only see script-applied ones).
 
 ---
 
-## Auto Gear Swap (native alternate-equipment feature, client 7937)
+## Auto Gear Swap (native alternate-equipment feature, client 7950)
 
 The client ships a native "switch to alternate equipment" feature (the fgui
 swap button, string key `STR_SWAP_SUB_WEAPONBTNTIP` = Cn_Res.ini line 672).

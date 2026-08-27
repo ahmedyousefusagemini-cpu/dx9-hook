@@ -6,7 +6,7 @@ DirectX9 hooking for Conquer Online with ImGui overlay
 
 ## Info
 
-- Tested on Conquer Online game versions (developed against 7937)
+- Tested on Conquer Online game versions (developed against 7950)
 - Compile on Release & x86
 - Uses MinHook for function hooking
 - ImGui overlay (toggle with INSERT key)
