@@ -25,7 +25,7 @@ extern GameWindowInfo g_gameWindow;
 //
 // Reverse-engineered anchors (Ghidra-verified, client 7937):
 //
-//   * The account-login dialog lives at *(void**)0x01A594F0 + 0x39B948
+//   * The account-login dialog lives at *(void**)0x01A549A0 + 0x39B948
 //     (CMyShellDlg main window object).  The dialog's HWND is at dialog+0x20.
 //   * The REAL Login button's control id is 0xCDF (3295).  The shell window's
 //     WM_COMMAND switch at 0x00a5b60b maps control id 0xCDF -> case 9 of the
@@ -63,7 +63,9 @@ namespace AutoLogin
 	// only way to start a real login sequence that the server responds to.
 	// NOT FUN_008cec7d - that is a vtable[+0xd1d0][32] handler for a
 	// different control and crashes when invoked as the Login button.
-	extern const uintptr_t LOGIN_BUTTON_HANDLER = 0x008A8FBA;
+	// 2026-08-27 build: prologue moved 0x008A8FBA -> 0x008A8FCA
+	// (PUSH 0x10C; MOV EAX,0x13D3EB9; CALL).
+	extern const uintptr_t LOGIN_BUTTON_HANDLER = 0x008A8FCA;
 
 	// Offset of the CGameInputStr WRAPPER inside the login dialog.
 	// The game's own login button handler (FUN_008a8fba, dispatched at
@@ -85,7 +87,9 @@ namespace AutoLogin
 	const uintptr_t DLG_ACCOUNT_SSO      = 0x13B88;
 
 	// Client object + login dialog (see header comment).
-	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A594F0; // CMyShellDlg main window (runtime-set, ~37MB)
+	// 2026-08-27 build: global moved 0x01A594F0 -> 0x01A549A0 (read by the
+	// client accessor FUN_0043e581, verified in Ghidra).
+	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A549A0; // CMyShellDlg main window (runtime-set, ~37MB)
 	const uintptr_t LOGIN_DIALOG_OFFSET = 0x39B948;   // dialog = client + 0x39B948
 	const uintptr_t DLG_HWND_OFFSET     = 0x20;       // dialog+0x20 = HWND
 	const uintptr_t DLG_PAIR_FLAG       = 0x13620;    // byte != 0 -> pair B (poker-only)

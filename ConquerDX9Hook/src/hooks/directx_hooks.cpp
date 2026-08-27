@@ -51,12 +51,12 @@ void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
 //
 //   PostMessage(dialog, WM_COMMAND, MAKEWPARAM(0xCDF, BN_CLICKED), btnHwnd)
 //
-//   -> MFC routes to the shell window's WM_COMMAND case at 0x00a5b8dd
-//      -> FUN_00bfee7b(dialog,1)   visibility gate (0x00a5b8eb)
-//      -> FUN_008a8fba(dialog)     Login handler (0x00a5b8fe)
+//   -> MFC routes to the shell window's WM_COMMAND case at 0x00a5b8ed
+//      -> FUN_00bfee8b(dialog,1)   visibility gate (0x00a5b8fb)
+//      -> FUN_008a8fca(dialog)     Login handler (0x00a5b908)
 //
-// Control id 0xCDF is the Login button (Ghidra-verified: the shell switch at
-// 0x00a5b60b maps 0xCDF -> case 9 -> 0x00a5b8dd).
+// Control id 0xCDF is the Login button (Ghidra-verified 2026-08-27 build:
+// the shell switch at 0x00a5b61b maps 0xCDF -> case 9 -> 0x00a5b8ed).
 //
 // WHY a posted WM_COMMAND and NOT a direct call: the direct call runs NESTED
 // inside this WndProc - FUN_008a8fba does GetServerInfo + socket work that
@@ -110,9 +110,10 @@ void HandleAutoLoginClick(void* dialog)
 
 	// The game only processes the Login command while the dialog is visible
 	// (IsWindowVisible gate at 0x00a5b8eb).  Skip posting if hidden.
+	// 2026-08-27 build: gate body moved 0x00BFEE7B -> 0x00BFEE8B.
 	__try {
 		typedef int (__fastcall* GateFn)(void* dlg, int one);
-		if (((GateFn)0x00BFEE7B)(dialog, 1) == 0) {
+		if (((GateFn)0x00BFEE8B)(dialog, 1) == 0) {
 			AutoLoginLogFromHook("CLICK dialog not visible, skipping", dialog, dlgHwnd);
 			return;
 		}
