@@ -189,7 +189,6 @@
     <ClInclude Include="libs\imgui\imstb_truetype.h" />
     <ClInclude Include="libs\minhook\include\MinHook.h" />
     <ClInclude Include="src\hooks\common.h" />
-    <ClInclude Include="src\hooks\memory_scanner.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\dllmain.cpp" />
@@ -202,8 +201,6 @@
     <ClCompile Include="src\hooks\xp_skill.cpp" />
     <ClCompile Include="src\hooks\speed.cpp" />
     <ClCompile Include="src\hooks\chams.cpp" />
-    <ClCompile Include="src\hooks\string_editor.cpp" />
-    <ClCompile Include="src\hooks\memory_scanner.cpp" />
     <ClCompile Include="src\hooks\buffs.cpp" />
     <ClCompile Include="src\hooks\gear_swap.cpp" />
     <ClCompile Include="libs\imgui\imgui.cpp" />

@@ -3,7 +3,6 @@
 
 extern GameWindowInfo g_gameWindow;
 extern bool g_isWireframeEnabled;
-extern void UpdateRainbowColors();
 extern void RenderAutoHuntInterface();
 extern void ApplyAutoHuntClientState();
 extern void RenderXpSkillInterface();
@@ -46,8 +45,6 @@ void RenderImGuiInterface()
 	ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_FirstUseEver);
 	
 	ImGui::Begin("ConquerDX9.Hook by Carniato", nullptr, ImGuiWindowFlags_None);
-
-	UpdateRainbowColors();
 
 	// Temporary diagnostics: these counters must go UP when moving/clicking
 	// the mouse over the game and when pressing keys. If they stay at 0,
