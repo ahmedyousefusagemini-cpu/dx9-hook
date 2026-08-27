@@ -39,20 +39,30 @@ static WNDPROC g_originalChildWindowProcedure = NULL;
 static std::map<HWND, WNDPROC> g_subclassedWindows;
 static DWORD g_lastSubclassEnumTick = 0;
 
-// Auto-login click button (defined in auto_login.cpp): finds and BM_CLICKs
-// the game's real Login button on the game's message thread.
-namespace AutoLogin {
-	extern const uintptr_t LOGIN_BUTTON_HANDLER; // FUN_008a8fba - the game's Login button handler
-	extern const uintptr_t LOGIN_BUTTON_CONTROL_ID; // 0xCDF - the real Login button's control id
-}
-
 // Cross-thread logger defined in auto_login.cpp (writes auto_login.log).
 void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
 
 // ============================================================================
 // WM_AUTOLOGIN_CLICK handler: the overlay's "Click Login" button posted this
-// to the dialog's HWND.  We find the real Login button (control id 0xCDF) and
-// BM_CLICK it - exactly what a human click produces.  Runs on the game thread.
+// to the dialog's HWND.  Replicates the FULL real-login-click sequence on the
+// game thread (this is what a human clicking realm-row then Login produces):
+//
+//   1. FUN_00bfee7b(dialog,1)  - IsWindow + IsWindowVisible gate (0x00a5b8eb)
+//   2. FUN_008a9348(dialog)    - realm-ROW handler: resolves the realm,
+//                                persists PlaySetUP.ini and establishes the
+//                                ACCOUNT-SERVER connection (FUN_010188fb ->
+//                                FUN_0101aa52 -> FUN_010234e9).  Without this
+//                                the Login packet lands on a socket that never
+//                                exists ("queued" forever, no server reply).
+//                                Churn-guarded to once per 3s.
+//   3. pump the game's message loop briefly so the account-server handshake is
+//      processed into session state before the Login handler reads it.
+//   4. FUN_008a8fba(dialog)    - the Login handler: GetServerInfo (resolves
+//                                the account server) + credential send.
+//
+// Do NOT SendMessage(BM_CLICK): that re-enters MFC and blocks ~2.1s (socket
+// already connected from priming) and then the handler never sends (log
+// evidence 2026-08-27) - it also made the whole UI unresponsive.
 // ============================================================================
 static HANDLE g_alClickMap = nullptr;
 static unsigned long* g_alClickTick = nullptr;
@@ -70,6 +80,11 @@ static unsigned long* AlClickSharedTick()
 	}
 	return g_alClickTick;
 }
+
+// Native anchors (client 7937).
+#define AL_LOGIN_HANDLER  0x008A8FBA   // FUN_008a8fba - Login button handler
+#define AL_REALM_HANDLER  0x008A9348   // FUN_008a9348 - realm-row handler (primes account socket)
+#define AL_VISIBLE_GATE   0x00BFEE7B   // FUN_00bfee7b - IsWindow+IsWindowVisible gate
 
 void HandleAutoLoginClick(void* dialog)
 {
@@ -93,40 +108,47 @@ void HandleAutoLoginClick(void* dialog)
 		return;
 	}
 
-	// Find the real Login button (control id = 0xCDF) among the dialog's
-	// children.  BM_CLICK on it produces the exact same WM_COMMAND dispatch
-	// chain as a human click - MFC routing, control state, everything.
-	UINT_PTR targetId = (UINT_PTR)AutoLogin::LOGIN_BUTTON_CONTROL_ID;
-	HWND loginBtn = GetDlgItem(dlgHwnd, (int)targetId);
-	if (loginBtn && IsWindow(loginBtn))
-	{
-		AutoLoginLogFromHook("CLICK sending BM_CLICK to real button", dialog, loginBtn);
-		__try {
-			SendMessageA(loginBtn, BM_CLICK, 0, 0);
-		} __except(EXCEPTION_EXECUTE_HANDLER) {
-			AutoLoginLogFromHook("CLICK BM_CLICK exception", dialog, loginBtn);
-		}
-		return;
-	}
-
-	// Fallback: the button wasn't found by control id (different build / dialog
-	// not fully initialised).  Replicate the game's OWN dispatch:
-	//   IsWindowVisible gate -> FUN_008a8fba(dialog)
-	// This is what the shell window's WM_COMMAND case at 0x00a5b8dd does.
-	AutoLoginLogFromHook("CLICK button not found by control id - calling handler directly", dialog, dlgHwnd);
 	__try {
-		// The game gates the handler on IsWindowVisible(dialog+0x20) via
-		// FUN_00bfee7b (0x00a5b8eb); skip the handler when the dialog is
-		// not actually visible, matching the JZ at 0x00a5b8f2.
-		bool visible = IsWindowVisible(dlgHwnd) != 0;
-		if (visible) {
-			typedef void (__fastcall* LoginBtnFn)(void* dialog);
-			((LoginBtnFn)AutoLogin::LOGIN_BUTTON_HANDLER)(dialog);
-		} else {
-			AutoLoginLogFromHook("CLICK fallback: dialog not visible, skipping handler", dialog, dlgHwnd);
+		// 1. Visibility gate - the exact check the shell window does at
+		//    0x00a5b8eb before CALL FUN_008a8fba.  Skip if hidden.
+		typedef int (__fastcall* GateFn)(void* dlg, int one);
+		if (((GateFn)AL_VISIBLE_GATE)(dialog, 1) == 0) {
+			AutoLoginLogFromHook("CLICK dialog not visible, skipping", dialog, dlgHwnd);
+			return;
 		}
+
+		// 2. Prime the account-server connection (realm-row handler).  A login
+		//    click without an existing account socket is silently dropped, so
+		//    replicate the manual flow that connects first.  Churn-guarded.
+		static unsigned long s_lastPrimeTick = 0;
+		if (nowMs - s_lastPrimeTick > 3000) {
+			s_lastPrimeTick = nowMs;
+			typedef void (__fastcall* RealmFn)(void* dlg);
+			((RealmFn)AL_REALM_HANDLER)(dialog);
+			AutoLoginLogFromHook("CLICK primed account-server connection (realm-row handler)", dialog, dlgHwnd);
+		}
+
+		// 3. Settle: pump the game's message loop briefly so the account-server
+		//    challenge is stored in session state before Login reads it (a
+		//    stale build that clicked 6ms after connect got a 322B reject).
+		{
+			unsigned long settleStart = GetTickCount();
+			while (GetTickCount() - settleStart < 1500) {
+				MSG msg;
+				while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+					TranslateMessage(&msg);
+					DispatchMessageA(&msg);
+				}
+				Sleep(1);
+			}
+		}
+
+		// 4. The Login handler - GetServerInfo + credential send.
+		typedef void (__fastcall* LoginBtnFn)(void* dialog);
+		((LoginBtnFn)AL_LOGIN_HANDLER)(dialog);
+		AutoLoginLogFromHook("CLICK dispatched FUN_008a8fba (login send)", dialog, dlgHwnd);
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		AutoLoginLogFromHook("CLICK fallback EXCEPTION", dialog, dlgHwnd);
+		AutoLoginLogFromHook("CLICK EXCEPTION", dialog, dlgHwnd);
 	}
 }
 
@@ -493,10 +515,11 @@ HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* pres
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam) 
 {
-	// Overlay "Click Login" emulation button: BM_CLICK the real login button
-	// on the game thread (posted from the render thread; the game's MFC-heavy
-	// login handler must run in its native message-thread context - calling it
-	// from the render thread crashed the client).
+	// Overlay "Click Login" emulation button: runs the game's real login-click
+	// sequence (gate + account-server prime + login handler) on the game thread
+	// (posted from the render thread; the game's MFC-heavy login handler must
+	// run in its native message-thread context - calling it from the render
+	// thread crashed the client).
 	if (message == WM_AUTOLOGIN_CLICK)
 	{
 		HandleAutoLoginClick((void*)lParam);
