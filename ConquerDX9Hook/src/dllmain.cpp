@@ -40,6 +40,20 @@ static void SafeApplyAutoLogin()
 	__try { ApplyAutoLoginClientState(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// One-shot auto-click of the Login button (test).  Separate wrapper so the
+// __try lives in a function with no C++ objects (C2712 otherwise - the main
+// hook thread has std::vector).  Returns true once the click has fired.
+static bool SafeAutoClickLogin()
+{
+	__try {
+		if (AutoLoginLoginDialogVisible()) {
+			AutoLoginClickLoginButton();
+			return true;
+		}
+	} __except(EXCEPTION_EXECUTE_HANDLER) {}
+	return false;
+}
+
 
 void StringHookInstallThread() 
 {
@@ -181,12 +195,8 @@ void HookInitializationThread()
 		SafeApplyAutoLogin();
 
 		if (!clickFired && GetTickCount() - clickArmTick >= 2000) {
-			__try {
-				if (AutoLoginLoginDialogVisible()) {
-					AutoLoginClickLoginButton();
-					clickFired = true;
-				}
-			} __except(EXCEPTION_EXECUTE_HANDLER) {}
+			if (SafeAutoClickLogin())
+				clickFired = true;
 		}
 
 		if (GetAsyncKeyState(VK_INSERT) & 1) 
