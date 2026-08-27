@@ -89,6 +89,17 @@ the game syncs on EN_KILLFOCUS, so the fill ends with `SetFocus(accountEdit)` â†
 in the password field. The `CDlgLogin::OnEnKillfocusEditAccount` handler string is
 `0x016042E4` (its Catch stub at `0x0088CDF8`).
 
+**Account auto-fill fix (user report "not working"):** two flaws in the first version:
+(1) `g_filledAccountDialog` was stamped BEFORE the fill attempt, so a first-frame
+failure (edit not yet created / ini not readable yet) never retried; (2) a stale
+pre-filled account (the client remembers the last login) was never overwritten. Fixed:
+the stamp only happens on SUCCESS (retry every 500 ms otherwise), and the fill now
+overwrites whenever the field text differs from the active account (left alone only
+when already equal). Added diagnostics: debug tree lists ALL Edit children (index, Y,
+text) so the account field pick can be verified, plus "Reload"/"Fill now" buttons. The
+client's `accountinfo.ini` (ANSI, `[Account1] User=halms Use=1 ...`) was confirmed to
+parse with GetPrivateProfileStringA.
+
 ---
 
 > **2026-08-27: client recompiled again (version 7950).** All hook modules

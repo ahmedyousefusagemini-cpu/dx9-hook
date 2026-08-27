@@ -73,6 +73,11 @@ namespace AutoLogin
 	BtnInfo g_buttons[64];
 	int g_buttonListCount = 0;
 
+	// All Edit children of the dialog (for the debug list).
+	struct EditInfo { HWND hwnd; int y; char text[64]; };
+	EditInfo g_edits[16];
+	int g_editListCount = 0;
+
 	static DWORD g_lastClickTick = 0;
 	static bool g_clickInProgress = false;
 
@@ -280,6 +285,25 @@ namespace AutoLogin
 		return TRUE;
 	}
 
+	// Collects every Edit child into g_edits for the debug list.
+	static BOOL CALLBACK CollectEditsProc(HWND hwnd, LPARAM lParam)
+	{
+		char cls[32];
+		if (GetClassNameA(hwnd, cls, sizeof(cls)) <= 0)
+			return TRUE;
+		if (lstrcmpiA(cls, "Edit") != 0)
+			return TRUE;
+		if (g_editListCount >= 16)
+			return FALSE;
+		EditInfo& ei = g_edits[g_editListCount++];
+		ei.hwnd = hwnd;
+		RECT rc;
+		ei.y = (GetWindowRect(hwnd, &rc)) ? rc.top : -1;
+		ei.text[0] = 0;
+		GetWindowTextA(hwnd, ei.text, sizeof(ei.text));
+		return TRUE;
+	}
+
 	// ------------------------------------------------------------------
 	// Account auto-fill (accountinfo.ini)
 	// ------------------------------------------------------------------
@@ -375,7 +399,10 @@ namespace AutoLogin
 	// member the login handler reads (dlg+0x13B88) is synced by the edit's
 	// EN_KILLFOCUS handler, so focus is moved to the account field and then to
 	// the password field - that runs the game's own sync path and leaves the
-	// cursor ready for the password. Never overwrites a non-empty field.
+	// cursor ready for the password. Returns true when the field now carries
+	// the account (already matching or just written). A stale pre-filled name
+	// (the client remembers the last account) IS overwritten - the field is
+	// only left alone when it already equals the active account.
 	static bool FillAccountField(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
@@ -388,9 +415,10 @@ namespace AutoLogin
 		if (!scan.top)
 			return false;
 
-		// Respect what the user already typed.
-		if (GetWindowTextLengthA(scan.top) > 0)
-			return false;
+		char current[128] = "";
+		GetWindowTextA(scan.top, current, sizeof(current));
+		if (lstrcmpA(current, g_activeAccount) == 0)
+			return true;  // already filled with the right account
 
 		SendMessage(scan.top, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
 
@@ -399,7 +427,11 @@ namespace AutoLogin
 			SetFocus(scan.top);
 			SetFocus(scan.second);
 		}
-		return true;
+
+		// Verify the write actually landed (fgui edits can ignore WM_SETTEXT).
+		char after[128] = "";
+		GetWindowTextA(scan.top, after, sizeof(after));
+		return lstrcmpA(after, g_activeAccount) == 0;
 	}
 
 	// ------------------------------------------------------------------
@@ -509,6 +541,7 @@ namespace AutoLogin
 				g_editCount = 0;
 				g_buttonCount = 0;
 				g_buttonListCount = 0;
+				g_editListCount = 0;
 				if (button)
 				{
 					GetWindowTextA(button, g_buttonText, sizeof(g_buttonText));
@@ -524,6 +557,7 @@ namespace AutoLogin
 					g_editCount = (unsigned int)scan.edits;
 					g_buttonCount = (unsigned int)scan.buttons;
 					EnumChildWindows(dialog, CollectButtonsProc, (LPARAM)g_buttons);
+					EnumChildWindows(dialog, CollectEditsProc, (LPARAM)g_edits);
 				}
 			}
 		}
@@ -543,13 +577,14 @@ namespace AutoLogin
 			return;
 		}
 
-		// Auto-fill the account edit from accountinfo.ini, once per dialog
-		// instance (before the click, so the click's focus move syncs it).
+		// Auto-fill the account edit from accountinfo.ini. Retried until it
+		// succeeds (the edit/ini may not be ready on the first frame; the
+		// client may pre-fill a stale account that needs overwriting).
 		if (g_autoFillAccount && g_filledAccountDialog != g_cachedDialog)
 		{
-			g_filledAccountDialog = g_cachedDialog;
 			LoadActiveAccount();
-			FillAccountField(g_cachedDialog);
+			if (FillAccountField(g_cachedDialog))
+				g_filledAccountDialog = g_cachedDialog;  // done - stop retrying
 		}
 
 		if (!g_autoClickLogin)
@@ -619,6 +654,19 @@ void RenderAutoLoginInterface()
 			ImGui::TextDisabled("from %s (Use=1) - fills the account field once", AutoLogin::g_accountSection);
 		else
 			ImGui::TextDisabled("no Use=1 account in accountinfo.ini");
+		ImGui::SameLine(0, 8);
+		if (ImGui::SmallButton("Reload"))
+		{
+			AutoLogin::g_filledAccountDialog = NULL;  // force re-fill
+			AutoLogin::LoadActiveAccount();
+		}
+		ImGui::SameLine(0, 2);
+		if (ImGui::SmallButton("Fill now"))
+		{
+			AutoLogin::g_filledAccountDialog = NULL;
+			AutoLogin::LoadActiveAccount();
+			AutoLogin::FillAccountField(AutoLogin::g_cachedDialog);
+		}
 	}
 
 	if (AutoLogin::g_loginCompleted)
@@ -638,6 +686,17 @@ void RenderAutoLoginInterface()
 			AutoLogin::g_accountSection[0] ? AutoLogin::g_accountSection : "none");
 		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
+
+		if (AutoLogin::g_editListCount > 0)
+		{
+			ImGui::Text("Edit fields (top = account):");
+			for (int i = 0; i < AutoLogin::g_editListCount; i++)
+			{
+				const AutoLogin::EditInfo& ei = AutoLogin::g_edits[i];
+				ImGui::Text("  #%02d y=%-5d 0x%08X \"%s\"",
+					i, ei.y, (unsigned int)ei.hwnd, ei.text[0] ? ei.text : "(empty)");
+			}
+		}
 
 		ImGui::InputInt("Button ID override (0=auto)", &AutoLogin::g_buttonIdOverride);
 		ImGui::TextDisabled("Pin the exact login button: set its CtrlID from the list below");
