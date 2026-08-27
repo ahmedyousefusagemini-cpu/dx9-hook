@@ -44,25 +44,26 @@ void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
 
 // ============================================================================
 // WM_AUTOLOGIN_CLICK handler: the overlay's "Click Login" button posted this
-// to the dialog's HWND.  Replicates the FULL real-login-click sequence on the
-// game thread (this is what a human clicking realm-row then Login produces):
+// to the dialog's HWND.  Replicates the REAL Login button dispatch EXACTLY -
+// this is what the shell window's WM_COMMAND case at 0x00a5b8dd does and
+// nothing more:
 //
 //   1. FUN_00bfee7b(dialog,1)  - IsWindow + IsWindowVisible gate (0x00a5b8eb)
-//   2. FUN_008a9348(dialog)    - realm-ROW handler: resolves the realm,
-//                                persists PlaySetUP.ini and establishes the
-//                                ACCOUNT-SERVER connection (FUN_010188fb ->
-//                                FUN_0101aa52 -> FUN_010234e9).  Without this
-//                                the Login packet lands on a socket that never
-//                                exists ("queued" forever, no server reply).
-//                                Churn-guarded to once per 3s.
-//   3. pump the game's message loop briefly so the account-server handshake is
-//      processed into session state before the Login handler reads it.
-//   4. FUN_008a8fba(dialog)    - the Login handler: GetServerInfo (resolves
-//                                the account server) + credential send.
+//   2. FUN_008a8fba(dialog)    - the Login handler (GetServerInfo + credential
+//                                send) at 0x00a5b8fe
+//
+// The account-server connection is ALREADY up whenever the user can see and
+// click Login (the realm-row handler / dialog init dials it).  Do NOT add the
+// realm-row handler (FUN_008a9348) here - it re-resolves the realm and RESETS
+// the login form state (FUN_0113fd9f), wiping the account/password the user
+// just typed, which produces "Failed to login: Invalid Account ID or
+// Password" even with correct credentials.  A real MFC Login click never runs
+// it.  (VERIFIED 2026-08-27: manual creds + real button logged in; the same
+// creds + this handler's former prime step were rejected.)
 //
 // Do NOT SendMessage(BM_CLICK): that re-enters MFC and blocks ~2.1s (socket
-// already connected from priming) and then the handler never sends (log
-// evidence 2026-08-27) - it also made the whole UI unresponsive.
+// already connected) and then the handler never sends (log evidence
+// 2026-08-27) - it also made the whole UI unresponsive.
 // ============================================================================
 static HANDLE g_alClickMap = nullptr;
 static unsigned long* g_alClickTick = nullptr;
@@ -83,7 +84,6 @@ static unsigned long* AlClickSharedTick()
 
 // Native anchors (client 7937).
 #define AL_LOGIN_HANDLER  0x008A8FBA   // FUN_008a8fba - Login button handler
-#define AL_REALM_HANDLER  0x008A9348   // FUN_008a9348 - realm-row handler (primes account socket)
 #define AL_VISIBLE_GATE   0x00BFEE7B   // FUN_00bfee7b - IsWindow+IsWindowVisible gate
 
 void HandleAutoLoginClick(void* dialog)
@@ -117,33 +117,9 @@ void HandleAutoLoginClick(void* dialog)
 			return;
 		}
 
-		// 2. Prime the account-server connection (realm-row handler).  A login
-		//    click without an existing account socket is silently dropped, so
-		//    replicate the manual flow that connects first.  Churn-guarded.
-		static unsigned long s_lastPrimeTick = 0;
-		if (nowMs - s_lastPrimeTick > 3000) {
-			s_lastPrimeTick = nowMs;
-			typedef void (__fastcall* RealmFn)(void* dlg);
-			((RealmFn)AL_REALM_HANDLER)(dialog);
-			AutoLoginLogFromHook("CLICK primed account-server connection (realm-row handler)", dialog, dlgHwnd);
-		}
-
-		// 3. Settle: pump the game's message loop briefly so the account-server
-		//    challenge is stored in session state before Login reads it (a
-		//    stale build that clicked 6ms after connect got a 322B reject).
-		{
-			unsigned long settleStart = GetTickCount();
-			while (GetTickCount() - settleStart < 1500) {
-				MSG msg;
-				while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-					TranslateMessage(&msg);
-					DispatchMessageA(&msg);
-				}
-				Sleep(1);
-			}
-		}
-
-		// 4. The Login handler - GetServerInfo + credential send.
+		// 2. The Login handler - GetServerInfo + credential send.  This is the
+		//    ONLY call the real MFC Login button makes (0x00a5b8fe).  It reads
+		//    the account/password the user typed into the dialog's own fields.
 		typedef void (__fastcall* LoginBtnFn)(void* dialog);
 		((LoginBtnFn)AL_LOGIN_HANDLER)(dialog);
 		AutoLoginLogFromHook("CLICK dispatched FUN_008a8fba (login send)", dialog, dlgHwnd);
