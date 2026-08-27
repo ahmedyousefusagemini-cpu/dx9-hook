@@ -652,19 +652,31 @@ themed chrome (`Login_xOrangeBtn`/`Login_xRedBtn` @ `0x015598F8`/`0x01559940`).
 | `FUN_LoginButtonHandler` | `0x008A8FCA` | `__fastcall(CDlgLogin*)` — the Login button handler. Reads account (`dlg+0x13B88` std::string), password (`dlg+0x13BD0` buffer), group/server (`dlg+0x135F8`/`+0x135FC`), server name; then calls `FUN_0101C9D8` |
 | `FUN_0101C9D8` | `0x0101C9D8` | **the login-packet sender**: `login(account, password, serverName, mode, extra)`. mode 0 → `CMsgAccountEx` (`FUN_00F7F7E8`), 1 → QR `CMsgAccountByQRCode` (`FUN_00DE30E0`), 2 → poker `CMsgAccountPoker` (`FUN_00F7F9E3`) |
 | `FUN_00BFEE8B` | `0x00BFEE8B` | visibility gate used by the dispatcher: `IsWindow(dlg+0x20) && IsWindowVisible(dlg+0x20)` |
-| dispatcher call site | `0x00A5B90E` | `LEA ECX,[EBX+0x39B948]; CALL FUN_LoginButtonHandler` — CDlgLogin instance = `appObj+0x39B948` |
+| app object accessor | `0x0041F880` | returns `DAT_01a546f4` (the main app object; same `83 3D` lazy-accessor shape as #14/#15 in the re-find map — disambiguate by the `0x01A546F4` dword) |
+| `appObj + 0x39B948` | member | the `CDlgLogin` instance inside the app object (dispatcher does `LEA ECX,[EBX+0x39B948]` before `CALL FUN_LoginButtonHandler`) |
+| dispatcher call site | `0x00A5B90E` | `LEA ECX,[EBX+0x39B948]; CALL FUN_LoginButtonHandler` — the fgui button click route |
 | `FUN_008A965F` | `0x008A965F` | the server-select-first variant (called instead when the client must pick a server before login) |
 | `FUN_0089C013` | `0x0089C013` | `CDlgLogin::Process` (per-frame input/focus handling; identifies the edits via `dlg+0xCD0`/`+0xFE8`/`+0x1300` CWnd members) |
 | `login_xzk` fgui window | `0x01603D80` | shown via `FUN_00875E43`, hidden via `FUN_008A79AE` |
+
+**⚠️ The login button is an fgui control, NOT a standard MFC button.** Live test:
+`SendMessage(btn, BM_CLICK)` × 784 did NOTHING (dialog stayed up). The button's Win32
+text is e.g. `"EnterGame"` (CtrlID 5680, set at runtime — the literal is not in the
+binary) while the displayed label is e.g. `"Log In"` (drawn by the fgui engine). The
+fgui UI layer only responds to real mouse input. **The working click is a real mouse
+click (SetCursorPos + SendInput LBDOWN/UP) at the button's screen center** — it also
+triggers the normal focus→killfocus→member-sync (`dlg+0x13B88`/`+0x13BD0`) the handler
+needs before reading the credentials.
 
 Re-find anchors: the `dlglogin.cpp` path string `0x016035F8` — its code xrefs land in
 every `CDlgLogin` method (Ghidra auto-names the handler `FUN_LoginButtonHandler`);
 the `"CDlgLogin"` RTTI string `0x016036A0` → type-info at `0x015FD208`.
 
-**Implementation (`auto_login.cpp`): pure Win32 — no game addresses.** Finds the login
-dialog by window shape (process-owned window with ≥1 Edit + ≥1 Button child), finds the
-Login button (ASCII text match "Login"/"log in"/"enter game" …, else the longest-text
-enabled+visible non-close Button), then `SendMessage(btn, BM_CLICK, 0, 0)` → the game's
-own BN_CLICKED → `FUN_LoginButtonHandler` chain. Auto mode re-clicks every `g_clickIntervalMs`
-(1 s default) until the dialog disappears, then disarms. Survives recompiles untouched —
-nothing to re-find.
+**Implementation (`auto_login.cpp`): window-shape discovery (no game addresses) + real
+mouse click.** Finds the login dialog by child-window shape (process-owned window with
+≥1 Edit + ≥1 Button child), finds the Login button (pinned CtrlID override → text match
+"Login"/"log in"/"enter game" … → longest enabled+visible non-close Button), then
+performs a REAL mouse click at the button's screen center (default) — BM_CLICK kept as
+a selectable fallback. Auto mode re-clicks every `g_clickIntervalMs` (1 s default) until
+the dialog disappears, then disarms. The debug tree lists every Button child with its
+CtrlID + a per-button "use"/"click" tester to pin the exact control on any build.

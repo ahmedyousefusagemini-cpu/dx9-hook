@@ -5,26 +5,31 @@
 // Auto Login (MFC CDlgLogin) - Conquer.exe client 7950 (image base 0x400000)
 // ----------------------------------------------------------------------------
 // The login screen is an MFC dialog (CDlgLogin, source myshell/dlglogin.cpp,
-// RTTI string "CDlgLogin" @ 0x016036A0) hosting a real account/password Edit
-// pair and a real Login Button HWND. It is a WS_CHILD dialog of the game's
-// root window (the overlay subclasses it - see directx_hooks.cpp), so it can
-// be found at runtime purely by window enumeration, with no game addresses.
+// RTTI string "CDlgLogin" @ 0x016036A0). It is a WS_CHILD dialog of the game's
+// root window hosting the fgui login UI (`login_xzk`): a real account/password
+// Edit pair plus a real Login Button HWND (window text e.g. "EnterGame",
+// displayed label e.g. "Log In").
 //
 // RE-verified click chain (Ghidra, 7950 build):
-//   Login button BN_CLICKED
+//   Login button click
 //     -> FUN_LoginButtonHandler @ 0x008A8FCA (__fastcall(CDlgLogin*))
 //          reads account (dlg+0x13B88), password (dlg+0x13BD0), server fields
 //     -> FUN_0101C9D8 @ 0x0101C9D8
 //          login(account, password, serverName, mode, extra) - sends the
 //          CMsgAccountEx login packet (mode 0; 1 = QR code, 2 = poker)
-//   The dispatcher gates the call on FUN_00BFEE8B (IsWindow + IsWindowVisible
-//   of dlg+0x20 = the dialog's m_hWnd) - this module mirrors that guard before
-//   clicking.
+//   Dispatched from the big UI event dispatcher (FUN_00a5b653 area) with
+//   ECX = appObj + 0x39B948 (CDlgLogin is a member of the main app object,
+//   returned by the accessor FUN_0041f880 -> DAT_01a546f4), gated on
+//   FUN_00BFEE8B (IsWindow + IsWindowVisible of dlg+0x20 = the dialog HWND).
 //
-// This module drives the button through the game's OWN code path (SendMessage
-// BM_CLICK), so the login flow (server selection, config save, packet send) is
-// exactly what a human click does. No direct game-function calls, no byte
-// patches - robust across client recompiles.
+// CLICK MECHANISM (why not BM_CLICK): these are fgui-drawn controls, not
+// standard MFC buttons - BM_CLICK does nothing (784 clicks observed, zero
+// effect). The default method therefore performs a REAL mouse click
+// (SetCursorPos + SendInput LBDOWN/UP) at the button's screen center, which
+// also triggers the normal focus->killfocus->member-sync the handler needs.
+// A BM_CLICK method is kept as a selectable fallback, plus a button-ID
+// override and a full button list in the debug tree for pinning the exact
+// control on a given build.
 // ============================================================================
 
 namespace AutoLogin
@@ -34,6 +39,8 @@ namespace AutoLogin
 	int  g_clickIntervalMs = 1000;   // min ms between automatic clicks
 	int  g_clickCount = 0;           // total clicks sent this session
 	bool g_loginCompleted = false;   // a click made the login dialog disappear
+	int  g_clickMethod = 0;          // 0 = real mouse click, 1 = BM_CLICK
+	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
@@ -45,6 +52,11 @@ namespace AutoLogin
 	unsigned int g_buttonId = 0;
 	unsigned int g_editCount = 0;
 	unsigned int g_buttonCount = 0;
+
+	// All Button children of the dialog (for the debug list).
+	struct BtnInfo { HWND hwnd; char text[64]; unsigned int id; };
+	BtnInfo g_buttons[64];
+	int g_buttonListCount = 0;
 
 	static DWORD g_lastClickTick = 0;
 	static bool g_clickInProgress = false;
@@ -140,7 +152,7 @@ namespace AutoLogin
 	static bool IsLoginButtonText(const char* text)
 	{
 		static const char* const kLogin[] = {
-			"login", "log in", "enter game", "enter", "sign in"
+			"login", "log in", "enter game", "enter game!", "enter", "sign in"
 		};
 		for (int i = 0; i < (int)(sizeof(kLogin) / sizeof(kLogin[0])); i++)
 		{
@@ -193,11 +205,15 @@ namespace AutoLogin
 		}
 
 		// Fallback: remember the longest-text enabled+visible non-close
-		// button (a localized label that no exact match knows).
+		// button (a localized label that no exact match knows). Empty-text
+		// fgui buttons (labels drawn by the engine) still qualify, but only
+		// when nothing with a real label was seen.
 		if (IsWindowEnabled(hwnd) && IsWindowVisible(hwnd) && !IsCloseButtonText(text))
 		{
 			int len = (int)lstrlenA(text);
-			if (len > 0 && (scan->fallback == NULL || len > scan->bestLen))
+			if (scan->fallback == NULL ||
+				(len > 0 && len > scan->bestLen) ||
+				(len == 0 && scan->bestLen <= 0))
 			{
 				scan->fallback = hwnd;
 				scan->bestLen = len;
@@ -206,12 +222,20 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-	// Finds the Login button child of the dialog. Exact text match first;
-	// otherwise the widest enabled+visible non-close button.
+	// Finds the Login button child of the dialog. A pinned ID override wins;
+	// otherwise exact text match, then the longest enabled+visible non-close
+	// button.
 	static HWND FindLoginButton(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
 			return NULL;
+
+		if (g_buttonIdOverride > 0)
+		{
+			HWND byId = GetDlgItem(dialog, g_buttonIdOverride);
+			if (byId)
+				return byId;
+		}
 
 		ButtonScan scan;
 		scan.best = NULL;
@@ -223,13 +247,54 @@ namespace AutoLogin
 		return scan.best ? scan.best : scan.fallback;
 	}
 
+	// Collects every Button child into g_buttons for the debug list.
+	static BOOL CALLBACK CollectButtonsProc(HWND hwnd, LPARAM lParam)
+	{
+		char cls[32];
+		if (GetClassNameA(hwnd, cls, sizeof(cls)) <= 0)
+			return TRUE;
+		if (lstrcmpiA(cls, "Button") != 0)
+			return TRUE;
+		if (g_buttonListCount >= 64)
+			return FALSE;
+		BtnInfo& bi = g_buttons[g_buttonListCount++];
+		bi.hwnd = hwnd;
+		bi.id = (unsigned int)GetDlgCtrlID(hwnd);
+		bi.text[0] = 0;
+		GetWindowTextA(hwnd, bi.text, sizeof(bi.text));
+		return TRUE;
+	}
+
 	// ------------------------------------------------------------------
 	// Clicking
 	// ------------------------------------------------------------------
 
-	// Sends one synchronous BM_CLICK to the login button. Safe from the
-	// render thread: SendMessage marshals to the dialog's thread and MFC
-	// dispatches BN_CLICKED through its normal path.
+	// Real mouse click at the button's screen center. Identical to a human
+	// click: moves the cursor over the control, presses and releases the left
+	// button. This is what the fgui UI layer actually responds to (BM_CLICK is
+	// ignored by these controls) and it naturally performs the focus switch
+	// that syncs the account/password fields before the handler runs.
+	static bool RealClickButton(HWND button)
+	{
+		RECT rc;
+		if (!GetWindowRect(button, &rc))
+			return false;
+		int cx = (rc.left + rc.right) / 2;
+		int cy = (rc.top + rc.bottom) / 2;
+		if (!SetCursorPos(cx, cy))
+			return false;
+
+		INPUT input = { 0 };
+		input.type = INPUT_MOUSE;
+		input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+		if (SendInput(1, &input, sizeof(INPUT)) != 1)
+			return false;
+		input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+		if (SendInput(1, &input, sizeof(INPUT)) != 1)
+			return false;
+		return true;
+	}
+
 	void ClickLoginOnce()
 	{
 		if (g_clickInProgress)
@@ -241,9 +306,21 @@ namespace AutoLogin
 
 		if (button)
 		{
-			SendMessage(button, BM_CLICK, 0, 0);
-			g_clickCount++;
-			g_lastClickTick = GetTickCount();
+			bool ok = false;
+			if (g_clickMethod == 1)
+			{
+				SendMessage(button, BM_CLICK, 0, 0);
+				ok = true;
+			}
+			else
+			{
+				ok = RealClickButton(button);
+			}
+			if (ok)
+			{
+				g_clickCount++;
+				g_lastClickTick = GetTickCount();
+			}
 		}
 
 		g_cachedDialog = dialog;
@@ -275,6 +352,7 @@ namespace AutoLogin
 				g_buttonId = 0;
 				g_editCount = 0;
 				g_buttonCount = 0;
+				g_buttonListCount = 0;
 				if (button)
 				{
 					GetWindowTextA(button, g_buttonText, sizeof(g_buttonText));
@@ -289,6 +367,7 @@ namespace AutoLogin
 					EnumChildWindows(dialog, CountChildControls, (LPARAM)&scan);
 					g_editCount = (unsigned int)scan.edits;
 					g_buttonCount = (unsigned int)scan.buttons;
+					EnumChildWindows(dialog, CollectButtonsProc, (LPARAM)g_buttons);
 				}
 			}
 		}
@@ -343,7 +422,7 @@ void RenderAutoLoginInterface()
 		AutoLogin::ClickLoginOnce();
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("(sends one BM_CLICK to the MFC Login button)");
+	ImGui::TextDisabled("(real mouse click on the Login button)");
 
 	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
 		AutoLogin::g_autoClickLogin)
@@ -355,6 +434,9 @@ void RenderAutoLoginInterface()
 		ImGui::SliderInt("Click interval (ms)", &AutoLogin::g_clickIntervalMs, 250, 5000);
 		ImGui::TextDisabled("Stops automatically once the login dialog closes");
 	}
+
+	ImGui::Combo("Click method", &AutoLogin::g_clickMethod,
+		"Mouse (real click)\0BM_CLICK (fallback)\0");
 
 	if (AutoLogin::g_loginCompleted)
 	{
@@ -370,6 +452,38 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Dialog children: %u edits, %u buttons", AutoLogin::g_editCount, AutoLogin::g_buttonCount);
 		ImGui::Text("Clicks sent: %d", AutoLogin::g_clickCount);
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
+
+		ImGui::InputInt("Button ID override (0=auto)", &AutoLogin::g_buttonIdOverride);
+		ImGui::TextDisabled("Pin the exact login button: set its CtrlID from the list below");
+
+		if (AutoLogin::g_buttonListCount > 0)
+		{
+			ImGui::Text("All buttons:");
+			for (int i = 0; i < AutoLogin::g_buttonListCount; i++)
+			{
+				const AutoLogin::BtnInfo& bi = AutoLogin::g_buttons[i];
+				ImGui::PushID(i);
+				ImGui::Text("  #%02d 0x%08X id=%-5u \"%s\"",
+					i, (unsigned int)bi.hwnd, bi.id, bi.text[0] ? bi.text : "(no text)");
+				ImGui::SameLine();
+				if (ImGui::SmallButton("use"))
+				{
+					AutoLogin::g_buttonIdOverride = (int)bi.id;
+					AutoLogin::g_cachedButton = bi.hwnd;
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton("click"))
+				{
+					AutoLogin::g_loginCompleted = false;
+					AutoLogin::g_cachedButton = bi.hwnd;
+					AutoLogin::g_clickInProgress = true;
+					AutoLogin::RealClickButton(bi.hwnd);
+					AutoLogin::g_clickInProgress = false;
+					AutoLogin::g_clickCount++;
+				}
+				ImGui::PopID();
+			}
+		}
 		ImGui::TreePop();
 	}
 }

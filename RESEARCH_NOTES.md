@@ -35,19 +35,42 @@ RE-verified click chain (all on the 7950 build):
   `FUN_LoginButtonHandler`; the single `UNCONDITIONAL_CALL` xref to it is the
   dispatcher at `0x00A5B90E`.
 
-Implementation (`auto_login.cpp`): **pure Win32, zero game addresses.** The overlay
-finds the login dialog by child-window shape (≥1 Edit + ≥1 Button, process-owned),
-finds the Login button (exact-text match on "Login"/"log in"/"enter game" etc. →
-fallback: longest-text enabled+visible non-close button), and sends
-`SendMessage(btn, BM_CLICK, 0, 0)` — the game's own code path, so
-server-select/config-save/packet-send all run exactly like a human click. Auto mode
-re-clicks every 1 s (configurable) until the dialog disappears (= login went through),
-then self-disables; a manual "Click Login Now" button is also exposed. This needs NO
-re-finding after a recompile (window-enumeration based).
+Implementation (`auto_login.cpp`): **window-shape discovery, zero game addresses, real
+mouse click.** The overlay finds the login dialog by child-window shape (≥1 Edit + ≥1
+Button, process-owned), finds the Login button (pinned CtrlID override → exact-text match
+on "Login"/"log in"/"enter game" etc. → fallback: longest enabled+visible non-close
+button), and performs a REAL mouse click (SetCursorPos + SendInput) at the button's
+screen center — `BM_CLICK` is ignored by the fgui controls (see the follow-up below).
+Auto mode re-clicks every 1 s (configurable) until the dialog disappears (= login went
+through), then self-disables; a manual "Click Login Now" button is also exposed. This
+needs NO re-finding after a recompile (window-enumeration based).
 
 Gotcha: `FUN_008827D2` (the server-info reader the handler calls) is NOT the login
 sender — it just loads `ServerIP`/`ServerPort` etc. from ini. The one-and-only login
 packet builder is `FUN_0101C9D8`.
+
+**Follow-up fix (same day): `BM_CLICK` does NOT work — the login button is fgui.**
+Live test on the 7950 client: `SendMessage(btn, BM_CLICK)` × 784 with the login dialog
+up → zero effect (dialog never closed, no login attempt). The found button's Win32 text
+was `"EnterGame"` (CtrlID 5680) while the visible label reads `"Log In"` — the text is
+set at runtime (neither literal exists in the binary, not even in the dialog template
+resource), and the fgui UI layer ignores BM_CLICK entirely. **The working click is a
+REAL mouse click: `SetCursorPos` to the button's screen center + `SendInput`
+`MOUSEEVENTF_LEFTDOWN`/`LEFTUP`.** Bonus: a real click moves focus away from the last
+Edit, so the killfocus handlers sync the account/password into the dialog members
+(`dlg+0x13B88`/`+0x13BD0`) BEFORE `FUN_LoginButtonHandler` runs — a direct function
+call would have raced that sync.
+
+Also confirmed the alternative direct-call path for future use: the app object accessor
+`FUN_0041f880` (same `83 3D` lazy-accessor shape, reads `DAT_01a546f4`) and the
+`CDlgLogin` instance = `appObj + 0x39B948` (the dispatcher at `0x00A5B90E` does
+`LEA ECX,[EBX+0x39B948]; CALL FUN_LoginButtonHandler`). Not used — the window-shape +
+real-click route needs no addresses and survives recompiles.
+
+`auto_login.cpp` now: default method = real mouse click (BM_CLICK selectable fallback),
+a Button-ID override (`GetDlgItem(dialog, id)`), and the debug tree lists EVERY Button
+child (index/HWND/CtrlID/text) with per-row "use" (pin the override) and "click" (test
+that exact button) actions, so the correct control can be pinned live on any build.
 
 ---
 
