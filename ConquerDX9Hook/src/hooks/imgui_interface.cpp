@@ -14,10 +14,6 @@ extern void RenderBuffsInterface();
 extern void ApplyBuffsClientState();
 extern void RenderGearSwapInterface();
 extern void ApplyGearSwapClientState();
-extern void ApplyAutoLoginClientState();
-extern const char* GetAutoLoginStateString();
-extern bool AutoLoginLoginDialogVisible();
-extern bool AutoLoginClickLoginButton();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -43,9 +39,6 @@ void RenderImGuiInterface()
 	// Auto gear swap ticks every frame too (XP buff edge detection).
 	ApplyGearSwapClientState();
 
-	// Auto login/relogin ticks every frame (boot + back-to-login detection).
-	ApplyAutoLoginClientState();
-
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
 
@@ -69,27 +62,6 @@ void RenderImGuiInterface()
 	ImGui::Checkbox("Wireframe (Chams)", &g_isWireframeEnabled);   
 	
 	ImGui::Spacing();
-	
-	// Emulation button: identical to clicking the MFC Login button.
-	// Enabled only while the account-login dialog is visible.
-	{
-		const char* st = GetAutoLoginStateString();
-		ImGui::Text("Click Login: %s", st ? st : "(null)");
-		bool dlgUp = AutoLoginLoginDialogVisible();
-		if (!dlgUp)
-			ImGui::BeginDisabled();
-		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 1.0f));
-		if (ImGui::Button("Click Login Button (emulate MFC)", ImVec2(0, 0)))
-		{
-			AutoLoginClickLoginButton();
-		}
-		ImGui::PopStyleColor();
-		if (!dlgUp)
-			ImGui::EndDisabled();
-		if (!dlgUp)
-			ImGui::TextDisabled("Login dialog not up - button disabled");
-		ImGui::Separator();
-	}
 	
 	RenderAutoHuntInterface();
 	

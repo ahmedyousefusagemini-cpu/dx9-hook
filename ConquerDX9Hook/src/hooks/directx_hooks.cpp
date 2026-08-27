@@ -39,116 +39,6 @@ static WNDPROC g_originalChildWindowProcedure = NULL;
 static std::map<HWND, WNDPROC> g_subclassedWindows;
 static DWORD g_lastSubclassEnumTick = 0;
 
-// Cross-thread logger defined in auto_login.cpp (writes auto_login.log).
-void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
-
-// ============================================================================
-// WM_AUTOLOGIN_CLICK handler: the overlay's "Click Login" button posted this
-// to the dialog's HWND.  Runs the game's genuine Login-button dispatch
-// (visibility gate + FUN_008a8fca handler) on the game thread.
-//
-// The dispatch at 0x00a5b8ed (shell window, control id 0xCDF):
-//     MOV EBX,[EBP+0xffff8d04]          ; main window (this)
-//     PUSH 1
-//     LEA ECX,[EBX+0x39b948]            ; dialog = mainWindow + 0x39b948
-//     CALL 0x00bfee8b                    ; IsWindow+IsWindowVisible gate
-//     TEST AL,AL
-//     JZ skip
-//     LEA ECX,[EBX+0x39b948]
-//     CALL 0x008a8fca                    ; Login handler (GetServerInfo + send)
-//
-// We call the handler DIRECTLY rather than posting WM_COMMAND(0xCDF) —
-// posted WM_COMMAND doesn't reach the shell window's dispatch through MFC
-// routing on this fairygui-based client.  Direct call on the game thread
-// works (proven in the old build: it fired with a server response).
-//
-// Do NOT send BM_CLICK (re-enters MFC synchronously, blocks the game
-// thread).  Do NOT add the realm-row handler (FUN_008a9348) — it resets
-// the login form state, wiping the account/password the user just typed.
-// ============================================================================
-static HANDLE g_alClickMap = nullptr;
-static unsigned long* g_alClickTick = nullptr;
-
-static unsigned long* AlClickSharedTick()
-{
-	if (!g_alClickTick) {
-		g_alClickMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
-			PAGE_READWRITE, 0, 64, "Local\\CDX9Hook_AutoLoginClick");
-		if (g_alClickMap)
-			g_alClickTick = (unsigned long*)MapViewOfFile(g_alClickMap,
-				FILE_MAP_ALL_ACCESS, 0, 0, 64);
-		if (g_alClickTick)
-			*g_alClickTick = 0;
-	}
-	return g_alClickTick;
-}
-
-void HandleAutoLoginClick(void* dialog)
-{
-	// Cross-copy duplicate suppression: the DLL loads twice (proxy + injected
-	// sibling); both subclass the dialog, so one posted message reaches both
-	// copies.  Whichever processes it first wins; the other skips.
-	unsigned long* shTick = AlClickSharedTick();
-	unsigned long nowMs = GetTickCount();
-	if (shTick && nowMs - *shTick < 3000) {
-		AutoLoginLogFromHook("CLICK duplicate suppressed", dialog,
-			dialog ? *(HWND*)((unsigned char*)dialog + 0x20) : NULL);
-		return;
-	}
-	if (shTick)
-		*shTick = nowMs;
-
-	HWND dlgHwnd = dialog ? *(HWND*)((unsigned char*)dialog + 0x20) : NULL;
-	if (!dlgHwnd || !IsWindow(dlgHwnd))
-	{
-		AutoLoginLogFromHook("CLICK no dialog HWND", dialog, NULL);
-		return;
-	}
-
-	// 1. Visibility gate (FUN_00bfee8b @ 0x00BFEE8B): same check the shell
-	//    window's WM_COMMAND case does at 0x00a5b8fb.  Skip if not visible.
-	__try {
-		typedef int (__fastcall* GateFn)(void* dlg, int one);
-		if (((GateFn)0x00BFEE8B)(dialog, 1) == 0) {
-			AutoLoginLogFromHook("CLICK dialog not visible, skipping", dialog, dlgHwnd);
-			return;
-		}
-	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		AutoLoginLogFromHook("CLICK gate exception", dialog, dlgHwnd);
-		return;
-	}
-
-	// 1b. Ensure a server is selected.  The Login handler's GetServerInfo
-	//     (FUN_008827d2 mode 1) reads dialog+0x135f8/+0x135fc and silently
-	//     gives up if they are invalid (-1) — which is the case before the
-	//     user clicks a realm row.  FUN_00883ed4 (server-select, 2026-08-27
-	//     build) picks the first group/server from the loaded list and only
-	//     touches the indices — it does NOT reset account/password fields.
-	__try {
-		int* groupIdx = (int*)((unsigned char*)dialog + 0x135f8);
-		int* srvIdx   = (int*)((unsigned char*)dialog + 0x135fc);
-		if (*groupIdx == -1 || *srvIdx == -1) {
-			typedef void (__fastcall* SelectFn)(void* dlg);
-			((SelectFn)0x00883ED4)(dialog);
-			AutoLoginLogFromHook("CLICK server-select ran: group=%d server=%d",
-				dialog, (HWND)(uintptr_t)*groupIdx);
-		}
-	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		AutoLoginLogFromHook("CLICK server-select exception", dialog, dlgHwnd);
-	}
-
-	// 2. Login handler (FUN_008a8fca @ 0x008A8FCA): GetServerInfo + credential
-	//    send.  Reads the account/password the user typed into the dialog's
-	//    own fields at +0x13B88 and +0x13BD0.
-	__try {
-		typedef void (__fastcall* LoginBtnFn)(void* dialog);
-		((LoginBtnFn)0x008A8FCA)(dialog);
-		AutoLoginLogFromHook("CLICK dispatched FUN_008a8fca (login send)", dialog, dlgHwnd);
-	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		AutoLoginLogFromHook("CLICK login handler EXCEPTION", dialog, dlgHwnd);
-	}
-}
-
 // [overlay] subclass_all_windows in overlay.ini (next to the game exe).
 // 1 (default): every process window is subclassed so the overlay also receives
 //              input while the MFC login dialog owns it. The login screen is a
@@ -512,17 +402,6 @@ HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* pres
 
 LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam) 
 {
-	// Overlay "Click Login" emulation button: runs the game's real login-click
-	// sequence (gate + account-server prime + login handler) on the game thread
-	// (posted from the render thread; the game's MFC-heavy login handler must
-	// run in its native message-thread context - calling it from the render
-	// thread crashed the client).
-	if (message == WM_AUTOLOGIN_CLICK)
-	{
-		HandleAutoLoginClick((void*)lParam);
-		return 0;
-	}
-
 	// Diagnostics: count input messages reaching the hook.
 	switch (message) 
 	{

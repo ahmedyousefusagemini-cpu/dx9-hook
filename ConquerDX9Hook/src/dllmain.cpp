@@ -7,10 +7,6 @@
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "libMinHook.x86.lib")
 
-extern void ApplyAutoLoginClientState();
-extern bool AutoLoginLoginDialogVisible();
-extern bool AutoLoginClickLoginButton();
-
 static void HookLog(const char* fmt, ...)
 {
 	char exePath[MAX_PATH]={0};
@@ -32,27 +28,6 @@ extern void InstallShowStringExHook();
 extern uintptr_t FindMemoryPattern(uintptr_t startAddress, size_t searchLength, const std::vector<int>& pattern);
 extern HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device);
 extern HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* presentationParameters);
-
-// SEH wrapper must not have C++ objects with dtors (std::vector etc.) in same function.
-// HookInitializationThread contains std::vector -> C2712 if __try is directly inside it.
-static void SafeApplyAutoLogin()
-{
-	__try { ApplyAutoLoginClientState(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
-
-// One-shot auto-click of the Login button (test).  Separate wrapper so the
-// __try lives in a function with no C++ objects (C2712 otherwise - the main
-// hook thread has std::vector).  Returns true once the click has fired.
-static bool SafeAutoClickLogin()
-{
-	__try {
-		if (AutoLoginLoginDialogVisible()) {
-			AutoLoginClickLoginButton();
-			return true;
-		}
-	} __except(EXCEPTION_EXECUTE_HANDLER) {}
-	return false;
-}
 
 
 void StringHookInstallThread() 
@@ -175,29 +150,9 @@ void HookInitializationThread()
 	// game versions where graphic.dll never loads.
 	CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)StringHookInstallThread, NULL, 0, NULL);
 
-	// TEST (2026-08-27): start the ImGui overlay DISABLED and auto-post the
-	// Login-button click 2s after launch, to isolate whether the ImGui render
-	// / input hook is what blocks the MFC Login button.  Press INSERT any time
-	// to show the overlay.  (Set to true to restore normal overlay-on behavior.)
-	g_gameWindow.isGuiWindowOpen = false;
-
-	// One-shot auto-click: 2s after launch, once the login dialog is visible,
-	// trigger the same WM_COMMAND the overlay's "Click Login" button posts.
-	unsigned long clickArmTick = GetTickCount();
-	bool clickFired = false;
-
 	while (true) 
 	{
 		Sleep(16);
-		// Fallback tick: ensures auto-login still progresses even if EndScene
-		// hook hasn't fired yet (device not created) or the overlay is closed.
-		// Use SEH wrapper (no C++ unwind objects in the wrapper).
-		SafeApplyAutoLogin();
-
-		if (!clickFired && GetTickCount() - clickArmTick >= 2000) {
-			if (SafeAutoClickLogin())
-				clickFired = true;
-		}
 
 		if (GetAsyncKeyState(VK_INSERT) & 1) 
 		{

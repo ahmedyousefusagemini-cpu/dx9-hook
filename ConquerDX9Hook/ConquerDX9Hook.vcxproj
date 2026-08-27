@@ -199,7 +199,6 @@
     <ClCompile Include="src\hooks\imgui_interface.cpp" />
     <ClCompile Include="src\hooks\always_jump.cpp" />
     <ClCompile Include="src\hooks\auto_hunt.cpp" />
-    <ClCompile Include="src\hooks\auto_login.cpp" />
     <ClCompile Include="src\hooks\xp_skill.cpp" />
     <ClCompile Include="src\hooks\speed.cpp" />
     <ClCompile Include="src\hooks\chams.cpp" />

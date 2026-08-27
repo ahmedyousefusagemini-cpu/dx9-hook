@@ -75,15 +75,6 @@ struct GameWindowInfo {
 		direct3DDevice(nullptr), isGuiWindowOpen(true) {}
 };
 
-// Custom message posted to the login dialog's HWND so the ImGui "Click Login"
-// emulation button runs the game's Login button handler (FUN_008a8fba) ON THE
-// GAME'S OWN MESSAGE THREAD.  HookedWindowProcedure receives it and BM_CLICKs
-// the real Login button (control id 0xCDF) - calling the handler directly from
-// the render thread (EndScene/ImGui) crashed the client because it does heavy
-// MFC UI work.
-// wParam = 0, lParam = pointer to the login dialog (mainwindow + 0x39B948).
-#define WM_AUTOLOGIN_CLICK (WM_APP + 0x41)
-
 struct Direct3DRenderStateBackup {
 	DWORD flexibleVertexFormat;       
 	DWORD lightingState;              
