@@ -109,8 +109,8 @@ LONG NTAPI Hooked_NtQuerySystemInformation(ULONG cls, PVOID info, ULONG len, PUL
 }
 
 // ---- NtOpenFile / NtCreateFile - block \Device\DBK* ----
-typedef LONG (NTAPI* NtOpenFile_t)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PVOID, ULONG, ULONG);
-typedef LONG (NTAPI* NtCreateFile_t)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PVOID, PVOID, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+typedef LONG (NTAPI* NtOpenFile_t)(PHANDLE, ACCESS_MASK, PVOID, PVOID, ULONG, ULONG);
+typedef LONG (NTAPI* NtCreateFile_t)(PHANDLE, ACCESS_MASK, PVOID, PVOID, PVOID, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
 NtOpenFile_t Real_NtOpenFile = nullptr;
 NtCreateFile_t Real_NtCreateFile = nullptr;
 
