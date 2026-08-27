@@ -311,7 +311,67 @@ namespace AutoLogin
 	}
 
 	// ------------------------------------------------------------------
-	// Account auto-fill (accountinfo.ini)
+	// Direct member set (bypasses the fgui edit-sync that was failing)
+	// ------------------------------------------------------------------
+
+	// App accessor: FUN_0041f880 -> DAT_01a546f4 (the main app object).
+	// CDlgLogin = app + 0x39B948 (verified from the dispatcher at 0x00A5B90E).
+	// Account setter: FUN_008acefa(this, account) -> dlg+0x13B88 = account.
+	// All three addresses are guarded with byte checks.
+
+	const uintptr_t APP_ACCESSOR_ADDR = 0x0041F880;
+	const uintptr_t ACCOUNT_SETTER_ADDR = 0x008ACEFA;
+	const size_t DLG_OFFSET = 0x39B948;
+
+	// Verifies the app accessor hasn't been moved by a recompile.
+	static bool IsAppAccessorValid()
+	{
+		if (IsBadReadPtr((const void*)APP_ACCESSOR_ADDR, 3))
+			return false;
+		const unsigned char* code = (const unsigned char*)APP_ACCESSOR_ADDR;
+		// "83 3D ?? ?? ?? ?? 00" - the lazy accessor pattern
+		return code[0] == 0x83 && code[1] == 0x3D;
+	}
+
+	// Verifies the account setter hasn't been moved by a recompile.
+	static bool IsAccountSetterValid()
+	{
+		if (IsBadReadPtr((const void*)ACCOUNT_SETTER_ADDR, 3))
+			return false;
+		const unsigned char* code = (const unsigned char*)ACCOUNT_SETTER_ADDR;
+		// "55 8B EC 83 7D 08 00" - PUSH EBP; MOV EBP,ESP; CMP [EBP+8],0
+		return code[0] == 0x55 && code[1] == 0x8B && code[2] == 0xEC &&
+			code[3] == 0x83 && code[4] == 0x7D && code[5] == 0x08 && code[6] == 0x00;
+	}
+
+	// Calls the game's own account setter (FUN_008acefa) to write the
+	// account string directly into dlg+0x13B88 - the field the login
+	// handler actually reads. This bypasses the fragile fgui edit-sync.
+	static bool SetAccountMemberDirectly(const char* account)
+	{
+		if (!account || !account[0])
+			return false;
+		if (!IsAppAccessorValid() || !IsAccountSetterValid())
+			return false;
+
+		typedef int (__fastcall* AppAccessorFunc)();
+		int app = ((AppAccessorFunc)APP_ACCESSOR_ADDR)();
+		if (IsBadReadPtr((const void*)app, DLG_OFFSET + 0x100))
+			return false;
+
+		void* dlg = (void*)(app + DLG_OFFSET);
+		// Verify the dialog's m_hWnd is valid (mirrors FUN_00BFEE8B).
+		HWND hwnd = *(HWND*)((intptr_t)dlg + 0x20);
+		if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
+			return false;
+
+		typedef void (__fastcall* AccountSetter)(void* dlg, void* /*unused edx*/, const char* acct);
+		((AccountSetter)ACCOUNT_SETTER_ADDR)(dlg, NULL, account);
+		return true;
+	}
+
+	// ------------------------------------------------------------------
+	// Account loading (accountinfo.ini)
 	// ------------------------------------------------------------------
 
 	// Path of accountinfo.ini, next to the game exe (same folder as
@@ -532,6 +592,15 @@ namespace AutoLogin
 		else if (FillViaChar(accountEdit))
 			result = 2;
 
+		// Regardless of the display fill, ALSO set the account member
+		// directly via the game's own setter. The login handler reads the
+		// member (dlg+0x13B88), not the edit - this is what actually matters.
+		if (SetAccountMemberDirectly(g_activeAccount))
+		{
+			if (result < 0)
+				result = 3;  // member set directly (display failed but OK)
+		}
+
 		if (result >= 0 && passwordEdit && IsWindow(passwordEdit))
 			SetFocus(passwordEdit);
 		return result;
@@ -640,6 +709,7 @@ namespace AutoLogin
 		case 0:  msg = "account set (WM_SETTEXT)"; break;
 		case 1:  msg = "account typed (click+keys)"; break;
 		case 2:  msg = "account set (WM_CHAR)"; break;
+		case 3:  msg = "member set directly (OK)"; break;
 		default: msg = "FAILED - see Edit fields below"; break;
 		}
 		strcpy_s(g_fillStatus, msg);
