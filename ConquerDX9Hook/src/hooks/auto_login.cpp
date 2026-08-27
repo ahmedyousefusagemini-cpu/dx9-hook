@@ -11,117 +11,32 @@
 extern GameWindowInfo g_gameWindow;
 
 // ============================================================================
-// Auto Login + Auto Relogin - Conquer.exe client 7937 (image base 0x400000)
+// "Click Login" emulation button - Conquer.exe client 7937 (image base 0x400000)
 // ----------------------------------------------------------------------------
-// Reads credentials from auto_login.ini (next to Conquer.exe) and drives the
-// game's OWN login chain - no overlay UI, no packet forging, no extra threads.
+// Provides a single ImGui button that reproduces a human click on the game's
+// MFC Login button.  The overlay posts WM_AUTOLOGIN_CLICK to the login dialog
+// and HookedWindowProcedure (directx_hooks.cpp) BM_CLICKs the real Login
+// button (control id 0xCDF) on the game's message thread - identical to a
+// manual click (visibility gate + FUN_008a8fba dispatch).
 //
-// Config file format:
-//   [accounts]
-//   enabled  = 1        ; feature master switch
-//   selected = 0        ; WHICH account block to use (0-based)
+// The old auto-login / auto-relogin automation (credential filling from
+// auto_login.ini, wire probes, SetPassword/MessageBox/realm-row hooks) hit a
+// dead end and is kept below ONLY inside #if 0 blocks for reference.
 //
-//   [account_0]
-//   server   = DevServer    ; fallback server name (the dialog's own selected
-//                            ; realm is used first - see below)
-//   account  = MyUser
-//   password = MyPass
+// Reverse-engineered anchors (Ghidra-verified, client 7937):
 //
-//   [account_1] ...        ; etc
-//
-// Reverse-engineered chain (verified in Ghidra, client 7937, base 0x400000):
-//
-//   1. The account-login dialog lives at *(void**)0x01A594F0 + 0x39B948
-//      (the CMyShellDlg main window object, ~37MB, runtime-set; the game's own
-//      message dispatcher FUN_0089ca75 reads it as `DAT_01a594f0 + 0x39b948`
-//      and gates it with FUN_00bfee7b - see 0x0089cf2f. The dispatcher
-//      FUN_00a525b4 saves the same this at 0x00a525ec and the Login-button
-//      call site at 0x00a5b8dd-0x00a5b8fe reads dialog+0x39B948).
-//      The dialog's HWND is at dialog+0x20.
-//
-//      Ghidra-verified 2026-08: the Login button handler invoked at
-//      0x00a5b8fe (after the IsWindowVisible gate) is FUN_008a8fba, not
-//      FUN_008cec7d. FUN_008cec7d is a vtable[+0xd1d0][32] handler for
-//      a different control (it crashes when called directly as the
-//      Login button). The dialog's account SSO is at +0x13B88 and the
-//      password wrapper (CGameInputStr) is at +0x13BD0 — these are the
-//      fields FUN_008a8fba reads in its classic path (mode 0) and that
-//      the keyboard handler (FUN_0089c003) writes on manual input.
-//
-//   2. The game itself only invokes the Login handler while the dialog is
-//      visible: at 0x00a5b896/0x00a5b8eb it calls FUN_00bfee7b(dialog,1) =
-//      IsWindow/IsWindowVisible(dialog+0x20) before CALL 0x008a8fba. We gate
-//      the auto-submit on the SAME condition. Sending before the dialog is up
-//      queues the packet into a dead socket and the client silently drops it
-//      (this was the "no login sequence at boot" bug).
-//
-//   3. The Login button handler (FUN_008a8fba, __thiscall ECX=dialog)
-//      reads the typed account/password from the dialog's own fields
-//      and drives the credential send via the network layer:
-//
-//          FUN_0101bfe7(account_cstr, password_obj, serverName_cstr, mode, port)
-//
-//      - account   : SSO string at dialog+0x13B88 (the classic mode-0
-//                    path ALWAYS uses this pair, never +0x13938/+0x13980
-//                    which belong to the QR fallback FUN_008a964f).
-//                    SSO layout: inline data at +0..+0xF, length at +0x14;
-//                    length > 0xF means heap (pointer at +0).
-//      - password  : wrapper object at dialog+0x13BD0 (A) / +0x13980 (B).
-//                    The send reads its length at +0x104 (0x0101c03e, fails
-//                    >= 0x81), a count at +0x100 and the ENCRYPTED text at
-//                    +0x108 (FUN_00ed335e -> VM ordinals 47/1/65).
-//                    The wrapper is CGameInputStr (encryptdata.cpp): text is
-//                    XOR-encrypted in place against the wrapper's own +0..0xFF
-//                    random key table (set once per boot by the dialog ctor);
-//                    the ONLY correct way to fill it is the game's own
-//                    SetPassword FUN_00ea1692(ECX=wrapper, text) - it writes
-//                    len@+0x104 + encrypted text@+0x108 + terminator@+0x207.
-//                    NOTE: passing a plain char* here is WRONG - the send
-//                    interprets the pointer as this object and reads
-//                    [ptr+0x104] (garbage >= 0x81 -> "invalid Account or Psw"
-//                    -> 0xFFFFFFFF). That was the original auto-login bug.
-//      - serverName: the dialog's own selected realm string at dialog+0x13628.
-//                    NOTE: this field is an ATL CSimpleStringT<char,1> (a
-//                    CString), NOT an SSO std::string - the game reads it via
-//                    its own operator_char_const_ (IAT slot 0x014F4E38, called
-//                    at 0x008a903f) and uses it verbatim as arg3 in the
-//                    non-poker path. Treating it with SsoCStr was the old bug
-//                    (CStringData* pointer garbage). We now call the game's
-//                    own imported method exactly like the button handler does.
-//      - port      : atoi(dialog+0x13BB8 SSO string), but only when the int
-//                    flag at dialog+0x13BC8 != 0, else 0 (0x008a91b2).
-//      - mode 0    = classic account/password (CMsgAccountEx).
-//      Returns 0 when the send was queued, 0xFFFFFFFF on local rejection.
-//
-//   4. After logout/disconnect the game runs FUN_00a37821 (the big
-//      "reset and return to account login" routine) which calls
-//      FUN_00c3ac82 (CQMain_BackToLogin) from 0x00a37c4f (and 0x00a267da in an
-//      unanalyzed region - the hook catches both).
-//
-// So this module:
-//   - passes EVERY game login through unmodified (passthrough hook) - manual
-//     logins now work exactly as before; the hook only marks that an attempt
-//     is in flight so the auto-submit does not double-fire,
-//   - watches FUN_00c3ac82 (back to login) to re-arm for the next auto
-//     re-login,
-//   - auto-submits once the dialog is visible by writing the configured
-//     credentials into the dialog's OWN fields (exactly what typing + clicking
-//     Login produces) and calling FUN_0101bfe7 with the game-identical
-//     argument shapes.
-//
-// Known residual: none expected on the password side - the fill calls the
-// game's own CGameInputStr::SetPassword (FUN_00ea1692) on the dialog's
-// wrapper object, byte-identical to what typing produces. The only field the
-// packet hash reads that SetPassword does not touch is the +0x100 count
-// (set by the wrapper ctor); if the server still rejects the auto-login while
-// a manual login with the same creds works, verify dynamically (compare
-// wrapper+0x100 after a manual typing vs. after the auto-fill) and mirror it.
-//
-// Ghidra-verified 2026-08: dialog+0x13628 is an ATL CSimpleStringT (CString),
-// not an SSO std::string - read it through the game's own operator_char_const_
-// (IAT slot 0x014F4E38) exactly like the login-button handler at 0x008a903f.
-// And the classic path (mode 0) always uses account/password pair A (+0x13B88/
-// +0x13BD0); the 0x13620 flag only selects the pair in the poker path (mode 2).
+//   * The account-login dialog lives at *(void**)0x01A594F0 + 0x39B948
+//     (CMyShellDlg main window object).  The dialog's HWND is at dialog+0x20.
+//   * The REAL Login button's control id is 0xCDF (3295).  The shell window's
+//     WM_COMMAND switch at 0x00a5b60b maps control id 0xCDF -> case 9 of the
+//     jump table (byte map @ 0x00a6f820, table @ 0x00a6f434 -> 0x00a6f458 ->
+//     0x00a5b8dd), which runs FUN_00bfee7b(dialog,1) [IsWindowVisible] then
+//     FUN_008a8fba (the Login handler).
+//   * FUN_008a8fba (__thiscall ECX=dialog) reads the typed account/password
+//     from the dialog's own fields and drives the credential send via
+//     FUN_0101bfe7(account_cstr, password_obj, serverName_cstr, mode, port).
+//     Calling it directly from the render thread crashed the client (heavy
+//     MFC UI work) - hence the message-thread BM_CLICK delivery.
 // ============================================================================
 
 static void AutoLoginLog(const char* fmt, ...);
@@ -195,6 +110,15 @@ namespace AutoLogin
 	// buttons.  __fastcall(ECX = dialog).
 	const uintptr_t SERVER_SELECT_HANDLER = 0x00883EC4;
 
+	// The REAL Login button's control ID inside the account-login dialog.
+	// Ghidra-verified 2026-08: the shell window's WM_COMMAND switch at
+	// 0x00a5b60b maps control id 0xCDF to case 9 of the jump table
+	// (byte map @ 0x00a6f820, table @ 0x00a6f434 -> 0x00a6f458 -> 0x00a5b8dd),
+	// which runs FUN_00bfee7b(dialog,1) [IsWindowVisible] then FUN_008a8fba
+	// (the Login handler).  A BM_CLICK on the button whose GetDlgCtrlID()==0xCDF
+	// produces exactly that dispatch - identical to a human click.
+	extern const uintptr_t LOGIN_BUTTON_CONTROL_ID = 0xCDF;
+
 	// ATL::CSimpleStringT<char,1>::operator_char_const_ - delay-loaded import
 	// whose IAT slot the game's own login-button handler calls at 0x008a903f.
 	// Slot is resolved to the real function address by the delay-load thunk on
@@ -220,6 +144,12 @@ namespace AutoLogin
 	//   FUN_008827c2 - CDlgLogin::GetServerInfo (mode 1 = account server).
 	const uintptr_t REALM_ROW_HANDLER = 0x008A9348;
 	const uintptr_t GET_SERVER_INFO   = 0x008827C2;
+
+#if 0  // ================= OLD AUTO-LOGIN (dead end) - disabled 2026-08-27 =================
+	// The auto-login / auto-relogin experiment hit a dead end (the server
+	// rejects even byte-identical auto packets).  Keep this code as reference
+	// only; the module now provides just the ImGui "Click Login" button that
+	// BM_CLICKs the game's real Login button.
 	typedef void(__fastcall* SetPasswordFn)(void* pswObj, void* /*edx_dummy*/, const char* text);
 
 	// cdecl, 5 params; the caller cleans the stack (bare RET at 0x0101C250).
@@ -821,6 +751,13 @@ namespace AutoLogin
 			AutoLoginLog("PRIME: row-select handler EXCEPTION");
 		}
 	}
+#endif  // ================= END OLD AUTO-LOGIN =================
+
+	// ------------------------------------------------------------------
+	// Minimal runtime state (the ImGui "Click Login" button).
+	// ------------------------------------------------------------------
+	bool  g_hooks = false;
+	char  g_lastResult[64] = "idle";
 
 	// ------------------------------------------------------------------
 	// SSO helpers for the dialog's string fields
@@ -970,6 +907,7 @@ static void AutoLoginLog(const char* fmt, ...)
 // ============================================================================
 // Config loading - UTF-8/UTF-16 tolerant, no GetPrivateProfile* dependency
 // ============================================================================
+#if 0  // ================= OLD AUTO-LOGIN: ini config =================
 static void AutoLoginSetPath()
 {
 	if (AutoLogin::g_cfgPath[0])
@@ -1280,6 +1218,7 @@ static void LoadConfig()
 // ============================================================================
 // Support check: the two anchor prologues must match this build.
 // ============================================================================
+#endif  // ================= END OLD AUTO-LOGIN: ini config =================
 static bool IsSupported()
 {
 	if (IsBadReadPtr((const void*)AutoLogin::LOGIN_SEND_ADDRESS, 12)) {
@@ -1313,6 +1252,7 @@ static bool IsSupported()
 // ============================================================================
 // Hooks
 // ============================================================================
+#if 0  // ================= OLD AUTO-LOGIN: hooks =================
 int __cdecl HookedLoginSend(const char* account, void* password, const char* serverInfo, int mode, int port)
 {
 	// Passthrough. The game (or the user's Login click) initiated a login with
@@ -1630,6 +1570,7 @@ bool  InstallHooks()
 }
 
 // Hot-reload helper - checks mtime every 1500ms
+#endif  // ================= END OLD AUTO-LOGIN: hooks =================
 static unsigned long g_lastConfigCheckTick = 0;
 static FILETIME g_lastConfigWriteTime = {0};
 static unsigned long g_lastDiagTick = 0;
@@ -1666,6 +1607,7 @@ static void MaybeReloadConfig(unsigned long now)
 // ============================================================================
 // Auto-submit tick - call every frame (even with the overlay closed).
 // ============================================================================
+#if 0  // ================= OLD AUTO-LOGIN: submit tick =================
 void AutoLoginTick()
 {
 	// Static-load once.
@@ -2015,11 +1957,14 @@ void AutoLoginTick()
 }
 
 // Periodic refresh of the config (called from the topic too, cheap enough).
+#endif  // ================= END OLD AUTO-LOGIN: submit tick =================
+#if 0  // ================= OLD AUTO-LOGIN: config refresh =================
 void AutoLoginReloadConfig()
 {
 	if (!AutoLogin::g_cfgPath[0])
 		LoadConfig();
 }
+#endif  // ================= END OLD AUTO-LOGIN: config refresh =================
 
 // ============================================================================
 // Public entry points
@@ -2033,15 +1978,16 @@ void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd)
 }
 
 // Runs every frame from the ImGui loop (menu open or closed), same slot as the
-// other Apply*ClientState() helpers.
+// other Apply*ClientState() helpers.  The old auto-login tick is disabled.
 void ApplyAutoLoginClientState()
 {
-	AutoLoginTick();
 }
 
-// Debug/status readout for the overlay-free module (visible via a file log or
-// just left as string state used by future diagnostics).
+// Debug/status readout for the overlay (the click button posts its status
+// into AutoLogin::g_lastResult, surfaced here in the ImGui window).
 const char* GetAutoLoginStateString()     { return AutoLogin::g_lastResult; }
+
+#if 0  // ================= OLD AUTO-LOGIN: status getters =================
 bool        GetAutoLoginEnabled()         { return AutoLogin::g_enabled; }
 bool        GetAutoLoginHooksInstalled()  { return AutoLogin::g_hooks; }
 unsigned long GetAutoLoginSubmitCount()   { return AutoLogin::g_submitCount; }
@@ -2066,3 +2012,74 @@ void AutoLoginSetManualCapture(bool on)
 }
 
 bool AutoLoginGetManualCapture() { return AutoLogin::g_manualCapture; }
+#endif  // ================= END OLD AUTO-LOGIN: status getters =================
+
+// ============================================================================
+// ImGui "Click Login" emulation button
+// ----------------------------------------------------------------------------
+// True when the account-login dialog is currently up and visible - used by the
+// overlay to enable/disable the emulation button (a raw click on a hidden
+// dialog is a no-op anyway; the game itself gates the Login handler on
+// IsWindowVisible(dialog+0x20) at 0x00a5b8eb).
+// ============================================================================
+bool AutoLoginLoginDialogVisible()
+{
+	void* dialog = AutoLogin::GetLoginDialog();
+	if (!dialog)
+		return false;
+	HWND dlgHwnd = nullptr;
+	__try {
+		if (IsBadReadPtr(dialog, AutoLogin::DLG_HWND_OFFSET + sizeof(HWND)))
+			return false;
+		dlgHwnd = *(HWND*)((unsigned char*)dialog + AutoLogin::DLG_HWND_OFFSET);
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+	if (!dlgHwnd || !IsWindow(dlgHwnd))
+		return false;
+	__try {
+		return IsWindowVisible(dlgHwnd) != 0;
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+// The ImGui "Click Login" button handler.  Does NOT touch the credentials /
+// realm / challenge state - it simply asks the game's own message thread to
+// BM_CLICK the real Login button, exactly like a human click.  Returns false
+// (and logs) if the dialog is not up, so the overlay can surface it.
+// Runs on the render thread (ImGui/EndScene); the actual click happens on the
+// game thread via WM_AUTOLOGIN_CLICK.
+bool AutoLoginClickLoginButton()
+{
+	void* dialog = AutoLogin::GetLoginDialog();
+	if (!dialog)
+	{
+		strcpy_s(AutoLogin::g_lastResult, "click login: dialog not up");
+		AutoLoginLog("AutoLoginClickLoginButton: no dialog");
+		return false;
+	}
+	HWND dlgHwnd = nullptr;
+	__try {
+		if (IsBadReadPtr(dialog, AutoLogin::DLG_HWND_OFFSET + sizeof(HWND)))
+			return false;
+		dlgHwnd = *(HWND*)((unsigned char*)dialog + AutoLogin::DLG_HWND_OFFSET);
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+	if (!dlgHwnd || !IsWindow(dlgHwnd))
+	{
+		strcpy_s(AutoLogin::g_lastResult, "click login: dialog hwnd invalid");
+		AutoLoginLog("AutoLoginClickLoginButton: invalid dlg hwnd");
+		return false;
+	}
+	if (PostMessageA(dlgHwnd, WM_AUTOLOGIN_CLICK, 0, (LPARAM)dialog))
+	{
+		strcpy_s(AutoLogin::g_lastResult, "click login posted");
+		AutoLoginLog("AutoLoginClickLoginButton: posted WM_AUTOLOGIN_CLICK to dlg hwnd=%p", dlgHwnd);
+		return true;
+	}
+	strcpy_s(AutoLogin::g_lastResult, "click login: PostMessage failed");
+	AutoLoginLog("AutoLoginClickLoginButton: PostMessage failed hwnd=%p", dlgHwnd);
+	return false;
+}

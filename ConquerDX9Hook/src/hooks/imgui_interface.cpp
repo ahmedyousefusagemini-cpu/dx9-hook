@@ -16,11 +16,8 @@ extern void RenderGearSwapInterface();
 extern void ApplyGearSwapClientState();
 extern void ApplyAutoLoginClientState();
 extern const char* GetAutoLoginStateString();
-extern bool GetAutoLoginEnabled();
-extern bool GetAutoLoginHooksInstalled();
-extern unsigned long GetAutoLoginSubmitCount();
-extern void AutoLoginSetManualCapture(bool on);
-extern bool AutoLoginGetManualCapture();
+extern bool AutoLoginLoginDialogVisible();
+extern bool AutoLoginClickLoginButton();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -73,30 +70,24 @@ void RenderImGuiInterface()
 	
 	ImGui::Spacing();
 	
-	// Always show auto-login status, even when disabled, so the user can
-	// diagnose "no login sequence" without checking a log file.
+	// Emulation button: identical to clicking the MFC Login button.
+	// Enabled only while the account-login dialog is visible.
 	{
 		const char* st = GetAutoLoginStateString();
-		bool en = GetAutoLoginEnabled();
-		bool hk = GetAutoLoginHooksInstalled();
-		ImVec4 col = en ? ImVec4(0.4f,1.0f,0.4f,1) : ImVec4(1.0f,0.6f,0.4f,1);
-		ImGui::TextColored(col, "Auto login: %s | hooks: %s | submits: %lu%s",
-			st ? st : "(null)",
-			hk ? "ok" : "missing",
-			GetAutoLoginSubmitCount(),
-			en ? "" : " (disabled)");
-		if (!en) {
-			ImGui::TextDisabled("Enable: auto_login.ini [accounts] enabled=1 -> [account_0] account/password");
+		ImGui::Text("Click Login: %s", st ? st : "(null)");
+		bool dlgUp = AutoLoginLoginDialogVisible();
+		if (!dlgUp)
+			ImGui::BeginDisabled();
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 1.0f));
+		if (ImGui::Button("Click Login Button (emulate MFC)", ImVec2(0, 0)))
+		{
+			AutoLoginClickLoginButton();
 		}
-		bool mc = AutoLoginGetManualCapture();
-		ImGui::PushStyleColor(ImGuiCol_Text, mc ? ImVec4(1.0f, 0.9f, 0.3f, 1) : ImVec4(1, 1, 1, 1));
-		if (ImGui::Checkbox("MANUAL LOGIN CAPTURE (pauses auto-login)", &mc))
-			AutoLoginSetManualCapture(mc);
 		ImGui::PopStyleColor();
-		if (mc) {
-			ImGui::TextDisabled("Auto frozen. Do the login by hand - everything");
-			ImGui::TextDisabled("(realm row, GetServerInfo, packets) is recorded.");
-		}
+		if (!dlgUp)
+			ImGui::EndDisabled();
+		if (!dlgUp)
+			ImGui::TextDisabled("Login dialog not up - button disabled");
 		ImGui::Separator();
 	}
 	
