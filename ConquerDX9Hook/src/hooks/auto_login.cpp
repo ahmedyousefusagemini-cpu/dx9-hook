@@ -414,22 +414,12 @@ namespace AutoLogin
 		SendInput(1, &in, sizeof(INPUT));
 	}
 
-	// Types the account name into the account edit without moving the cursor:
-	// SetFocus (Win32 focus) + a suppressed synchronous WM_LBUTTONDOWN/UP
-	// (activates the fgui edit's input mode), then real keystrokes type
-	// Ctrl+A / Delete / the name. On success, focus moves to the password
-	// field (fires the EN_KILLFOCUS sync). Returns true when the field text
-	// matches afterwards. The account edit is the pinned one (g_accountEditIndex)
-	// or, by default, the topmost visible Edit child.
-	static bool TypeAccountName(HWND dialog)
+	// Resolves the account edit (pinned via g_accountEditIndex, else the topmost
+	// visible Edit child) and its password sibling, for the current dialog.
+	static bool ResolveAccountEdit(HWND dialog, HWND& accountEdit, HWND& passwordEdit)
 	{
-		if (!IsDialogUsable(dialog))
-			return false;
-		if (g_activeAccount[0] == 0)
-			return false;
-
-		HWND accountEdit = NULL;
-		HWND passwordEdit = NULL;
+		accountEdit = NULL;
+		passwordEdit = NULL;
 
 		if (g_accountEditIndex >= 0 && g_accountEditIndex < g_editListCount)
 		{
@@ -455,24 +445,35 @@ namespace AutoLogin
 			accountEdit = scan.top;
 			passwordEdit = scan.second;
 		}
-		if (!accountEdit || !IsWindow(accountEdit))
-			return false;
+		return accountEdit != NULL && IsWindow(accountEdit);
+	}
 
-		// 1) Give the edit Win32 focus, then deliver a synchronous click
-		//    straight to its WndProc (ImGui suppressed) to activate the fgui
-		//    edit - no OS cursor movement at all.
-		SetFocus(accountEdit);
+	// Attempt 1: WM_SETTEXT straight to the edit. Sets the edit's own text
+	// buffer - works when the fgui edit draws its window text.
+	static bool FillViaSetText(HWND edit)
+	{
+		SendMessage(edit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
+		char t[128] = "";
+		GetWindowTextA(edit, t, sizeof(t));
+		return lstrcmpA(t, g_activeAccount) == 0;
+	}
+
+	// Attempt 2: activate the edit (SetFocus + suppressed synchronous click,
+	// no cursor movement) then type via real SendInput keystrokes.
+	static bool FillViaTyping(HWND edit)
+	{
+		SetFocus(edit);
 		RECT rc;
 		LPARAM pos = 0;
-		if (GetClientRect(accountEdit, &rc))
+		if (GetClientRect(edit, &rc))
 			pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
 		g_suppressImGuiWndProc = true;
-		SendMessage(accountEdit, WM_LBUTTONDOWN, MK_LBUTTON, pos);
-		SendMessage(accountEdit, WM_LBUTTONUP, 0, pos);
+		SendMessage(edit, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+		SendMessage(edit, WM_LBUTTONUP, MK_LBUTTON, pos);
 		g_suppressImGuiWndProc = false;
 		Sleep(50);
 
-		// 2) Select all + delete any pre-filled text, then type the account.
+		// Select all + delete any pre-filled text, then type the account.
 		SendKey(VK_CONTROL, 0, 0);                 // Ctrl down
 		SendKey('A', 0, 0);                        // A down (Ctrl+A = select all)
 		SendKey('A', 0, KEYEVENTF_KEYUP);
@@ -487,15 +488,53 @@ namespace AutoLogin
 		}
 		Sleep(30);
 
-		// 3) Verify the text landed, then move to the password field (only on
-		//    success - that syncs the member and puts the cursor where the
-		//    password goes).
-		char after[128] = "";
-		GetWindowTextA(accountEdit, after, sizeof(after));
-		bool ok = lstrcmpA(after, g_activeAccount) == 0;
-		if (ok && passwordEdit && IsWindow(passwordEdit))
+		char t[128] = "";
+		GetWindowTextA(edit, t, sizeof(t));
+		return lstrcmpA(t, g_activeAccount) == 0;
+	}
+
+	// Attempt 3: direct WM_CHAR messages to the edit (synchronous, suppressed).
+	// Works when the edit's own WndProc inserts text on WM_CHAR.
+	static bool FillViaChar(HWND edit)
+	{
+		g_suppressImGuiWndProc = true;
+		for (const char* p = g_activeAccount; *p; p++)
+			SendMessage(edit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
+		g_suppressImGuiWndProc = false;
+
+		char t[128] = "";
+		GetWindowTextA(edit, t, sizeof(t));
+		return lstrcmpA(t, g_activeAccount) == 0;
+	}
+
+	// Types the account name into the account edit without moving the cursor.
+	// Tries WM_SETTEXT, then click+real-keys, then direct WM_CHAR - the first
+	// one that verifies wins. On success, focus moves to the password field
+	// (fires the EN_KILLFOCUS sync and leaves the cursor ready for the
+	// password). Returns which method worked (0 = WM_SETTEXT, 1 = typing,
+	// 2 = WM_CHAR, -1 = failed).
+	static int FillAccountEdit(HWND dialog)
+	{
+		if (!IsDialogUsable(dialog))
+			return -1;
+		if (g_activeAccount[0] == 0)
+			return -1;
+
+		HWND accountEdit = NULL, passwordEdit = NULL;
+		if (!ResolveAccountEdit(dialog, accountEdit, passwordEdit))
+			return -1;
+
+		int result = -1;
+		if (FillViaSetText(accountEdit))
+			result = 0;
+		else if (FillViaTyping(accountEdit))
+			result = 1;
+		else if (FillViaChar(accountEdit))
+			result = 2;
+
+		if (result >= 0 && passwordEdit && IsWindow(passwordEdit))
 			SetFocus(passwordEdit);
-		return ok;
+		return result;
 	}
 
 	// ------------------------------------------------------------------
@@ -580,8 +619,8 @@ namespace AutoLogin
 		g_clickInProgress = false;
 	}
 
-	// Manual one-shot: reload accountinfo.ini, find the login dialog and TYPE
-	// the account name into the account field right away.
+	// Manual one-shot: reload accountinfo.ini, find the login dialog and fill
+	// the account field (tries WM_SETTEXT, then click+real-keys, then WM_CHAR).
 	void FillAccountNow()
 	{
 		LoadActiveAccount();
@@ -594,8 +633,16 @@ namespace AutoLogin
 			return;
 		}
 		g_cachedDialog = dialog;
-		bool ok = TypeAccountName(dialog);
-		strcpy_s(g_fillStatus, ok ? "account typed OK" : "FAILED - see Edit fields below");
+		int r = FillAccountEdit(dialog);
+		const char* msg = "";
+		switch (r)
+		{
+		case 0:  msg = "account set (WM_SETTEXT)"; break;
+		case 1:  msg = "account typed (click+keys)"; break;
+		case 2:  msg = "account set (WM_CHAR)"; break;
+		default: msg = "FAILED - see Edit fields below"; break;
+		}
+		strcpy_s(g_fillStatus, msg);
 	}
 
 	// ------------------------------------------------------------------
