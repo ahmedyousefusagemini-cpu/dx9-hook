@@ -134,23 +134,23 @@ bool InstallCeHideHooks()
 
     LPVOID dummy = nullptr;
     if (MH_CreateHookApiEx(L"psapi.dll", "EnumProcesses",
-                           &Hooked_EnumProcesses, &Real_EnumProcesses, &dummy) != MH_OK)
+                           &Hooked_EnumProcesses, (LPVOID*)&Real_EnumProcesses, &dummy) != MH_OK)
         ok = false;
     if (MH_CreateHookApiEx(L"kernel32.dll", "CreateToolhelp32Snapshot",
                            &Hooked_CreateToolhelp32Snapshot,
-                           &Real_CreateToolhelp32Snapshot, &dummy) != MH_OK)
+                           (LPVOID*)&Real_CreateToolhelp32Snapshot, &dummy) != MH_OK)
         ok = false;
     if (MH_CreateHookApiEx(L"kernel32.dll", "Process32FirstW",
-                           &Hooked_Process32FirstW, &Real_Process32FirstW, &dummy) != MH_OK)
+                           &Hooked_Process32FirstW, (LPVOID*)&Real_Process32FirstW, &dummy) != MH_OK)
         ok = false;
     if (MH_CreateHookApiEx(L"kernel32.dll", "Process32NextW",
-                           &Hooked_Process32NextW, &Real_Process32NextW, &dummy) != MH_OK)
+                           &Hooked_Process32NextW, (LPVOID*)&Real_Process32NextW, &dummy) != MH_OK)
         ok = false;
     if (MH_CreateHookApiEx(L"user32.dll", "FindWindowA",
-                           &Hooked_FindWindowA, &Real_FindWindowA, &dummy) != MH_OK)
+                           &Hooked_FindWindowA, (LPVOID*)&Real_FindWindowA, &dummy) != MH_OK)
         ok = false;
     if (MH_CreateHookApiEx(L"user32.dll", "FindWindowExA",
-                           &Hooked_FindWindowExA, &Real_FindWindowExA, &dummy) != MH_OK)
+                           &Hooked_FindWindowExA, (LPVOID*)&Real_FindWindowExA, &dummy) != MH_OK)
         ok = false;
 
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK)
