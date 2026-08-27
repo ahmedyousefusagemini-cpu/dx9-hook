@@ -52,6 +52,80 @@ Doc-only follow-ups still open: CMsgHangUp ctor confirmation
 
 ---
 
+## 2026-08-27 — client recompiled again (version 7950); all hooks re-pointed
+
+Third recompile. Everything the overlay hooks was re-located and verified in
+Ghidra (AOB scan → disassemble → decompile). Full old→new table + the durable
+**AOB re-find map** live at the top of `OFFSETS.md`. What worked this time,
+per anchor:
+
+- **Globals (`DAT_01a549a0` client/hero, `DAT_01a55220` mgr, `DAT_01a58fe0`
+  CUserAttribMgr)**: the `83 3D ?? ?? ?? ?? 00 75 05 E8 ?? ?? ?? ?? A1 ?? ?? ?? ??
+  C3` lazy-accessor pattern still matches — but ~150 times. Disambiguate by
+  disassembling the accessor and reading the global dword right after `83 3D`
+  / `A1`. The accessors are `FUN_0043e581` (client), `FUN_00482805` (mgr —
+  unchanged address this round), `FUN_00832a5d` (CUserAttribMgr).
+- **Toggle handler**: the `6A 00 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? C3` pattern
+  matched 40+ times; the real one is the candidate whose `CALL` target
+  (`0x00F31335`) is the toggle impl (prologue `68 14 04 00 00`, `CMP byte
+  [EBP+8],0`). New toggle handler `0x00BD8035`, impl `0x00F31335`.
+- **Hunt brain**: the generic `6A 2C B8` prologue has ~40 hits. Picked by
+  structure: entry near the old region (`0x00F556FC`), calls is-hunting right
+  after the client accessor, then the `MOV EDX,[g]; ADD EDX,0x3E8; CMP EAX,EDX`
+  tick gate. The tick global it reads/writes is the NEW brain tick global
+  `DAT_01a5ee04` (old `0x01A5DDE4` — the exclusivity test re-verified: only the
+  brain touches it).
+- **Walk / find-target**: the OLD addresses now sit inside unrelated functions
+  (`0x00F48B93` → inside a status-check fn; `0x00F43828` → inside another) —
+  they moved entirely. Re-found as the brain's callees: the brain pushes
+  `&outPair` then `ECX=mgr` and calls `0x00F4412C` (find-target, RET 4, writes
+  `{id,dist}` to the out param), and pushes `(4, y, x)` with `ECX=mgr` into
+  `0x00F49497` (walk, radius 4 — exactly how `auto_hunt.cpp` calls it).
+- **Is-hunting check**: the brain's `CALL` right after `FUN_0043e581` =
+  `0x01117C44`; the old 18-byte AOB (`E8 ?? ?? ?? ?? 84 C0 74 13 E8 ... B0 01 C3
+  32 C0 C3`) still matches byte-for-byte.
+- **Interval virtual / master interval**: both old AOBs matched unchanged:
+  `55 8B EC 56 8B F1 83 BE ?? ?? ?? ?? 00 74 ?? FF 75 08` → `0x010B148B`;
+  `6A 18 B8 ... 8B 8B 70 07 00 00 33 FF 85 C9` → `0x00DE93F2`. The decompiled
+  master-interval still ends in the `role+0x44/+0x48` divisor and the
+  `role+0xc0` (nSpeedPercent) path — field offsets unchanged.
+- **Speed cap table**: the old address is now a string blob. Found by scanning
+  for the exact 52-byte data array `{100,105,110,115,120,130,140,150,165,185,
+  190,195,200}` → **`0x016F9E84`** (unique match).
+- **XP gates**: all three found via the `STR_CANNOT_USE_XP_WHEN_HANGUP` string
+  (now `0x01744044`) — its two code xrefs are the use-skill functions
+  `0x011B39C9` (target) / `0x011B502C` (position), and the JNZ gate is the
+  instruction IMMEDIATELY before the `PUSH <string>`:
+  `75 4B` @ `0x011B3CE6`, `75 3C` @ `0x011B5658`. The XP-fill gate was found via
+  the callers of the is-hunting check: `FUN_01116f1a` (charges `client+0xaec`)
+  with the `75 49` JNZ @ `0x01116F39` right after `TEST AL,AL` of the hunting
+  check and before `PUSH 0x96` (a status-150 gate).
+- **Status machinery**: `ADD ECX,0x138` (`81 C1 38 01 00 00`) still finds
+  AddStatus/ClearStatus/ChkStatus → `0x00EEE64D` / `0x00EF2E91` / `0x00F1B838`,
+  and AddStatus's `CALL 0x00a73b8e` reveals the new bitfield core
+  **`0x00A73B8E`** (same `BTS`/`SHR EDI,6` shape; the old `0x00A73B7E` is now a
+  thunk to unrelated code — the bitfield core MOVED). The status apply
+  chokepoint's `6A 1C B8` prologue is now useless (hundreds of matches, the
+  old address hosts a different 3-arg icon-vector fn). Re-found behaviorally:
+  the `msguserattrib.cpp` string xrefs lead to the MsgUserAttrib processor
+  `FUN_01040f3c`, which calls
+  `FUN_00e49bd7(statusId, displayType, seconds, flag, extra)` — the 6-arg
+  apply, prologue still `6A 1C B8`, RET 0x14 → **`0x00E49BD7`**.
+- **Gear swap**: `68 4C 09 00 00 ... 8B F1 8B 86 3C 19 00 00` still matches →
+  `0x00FF2B8E` (verified: reads `hero+0x193C`, sends 0x2C/0x2D/0x198). The XP
+  panel setter's OLD 13-byte signature FAILED (the new build adds `5D` POP EBP
+  before `C2 04 00`) — the short `88 81 C8 0A 00 00` (`MOV [ECX+0xAC8],AL`)
+  matched → `0x00AE6208`. Lesson: keep signatures short past the instruction
+  that matters; prologue-only AOBs survive refactors of the epilogue.
+- **My-role match**: re-found as the brain's call right after the role-list
+  owner accessor (`FUN_0041f86c`) → `0x00D3313A` (thunk `ADD ECX,0x78; JMP`).
+
+Same gate polarities as 2026-08-20 (`JNZ` gates), same client-side field
+offsets (`+0x5385`, `+0xaec`, `+0x268`, `+0x138`, `mgr+0x11`, `role+0x44/
++0x48/+0xc0`, `hero+0x193C`) — only addresses moved.
+
+---
+
 ## ✅ WORKING STATE (2026-08-10, late PM) — auto-hunt fully working
 
 The breakthrough was realizing the hunting is **client-driven** and the 0x855 packet is

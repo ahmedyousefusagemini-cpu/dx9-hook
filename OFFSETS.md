@@ -64,6 +64,54 @@ Client-side field offsets unchanged and still verified: `client+0x5385`
 
 ---
 
+## 7950 AOB signatures — the re-find map
+
+Scan the NEW binary for these byte signatures (`??` = wildcard byte) to
+re-locate every anchor after the next recompile. Addresses are the 7950 build.
+Ordered by reliability (unique first); a "disambiguate" note explains how to
+pick the right match when a signature is not unique.
+
+| # | What | 7950 address | AOB signature (bytes) |
+|---|---|---|---|
+| 1 | auto-battle byte getter (`MOV AL,[ECX+0x5385]; RET`) | `0x01116C70` | `8A 81 85 53 00 00 C3` — **unique** |
+| 2 | magic-info getter (`LEA EAX,[ECX+0x70]; RET`) | `0x00D96E6C` | `8D 41 70 C3` — **unique** |
+| 3 | XP-pop panel show/hide setter (`MOV [ECX+0xAC8],AL; RET 4`) | `0x00AE6208` | `55 8B EC 8A 45 08 88 81 C8 0A 00 00 5D C2 04 00` — **unique** |
+| 4 | use-skill-at-position gate (JNZ over the XP-block; pushes `STR_CANNOT_USE_XP_WHEN_HANGUP` @ the address below) | `0x011B5658` | `75 3C 68 44 40 74 01` — **unique** (string address embedded) |
+| 5 | use-skill-on-target gate (same block) | `0x011B3CE6` | `75 4B 68 44 40 74 01` — **unique** (string address embedded) |
+| 6 | status apply chokepoint prologue + icon-vector init | `0x00E49BD7` | `6A 1C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 8D 45 08 8D 73 D0` |
+| 7 | status bitset core (BTS/AND 64-bit word, `CMP EDI,0x240`) | `0x00A73B8E` | `55 8B EC 53 56 57 8B 7D 08 8B F1 81 FF 40 02 00 00 73 48 33 C9 8B C7 83 E0 3F` |
+| 8 | `C3DUser::AddStatus` (`CMP [EBP+8],0x23F; PUSH 1`) | `0x00EEE64D` | `55 8B EC 81 7D 08 3F 02 00 00 77 10 6A 01 FF 75 08 83 C1 38` |
+| 9 | `C3DUser::ClearStatus` (same, `PUSH 0`) | `0x00EF2E91` | `55 8B EC 81 7D 08 3F 02 00 00 77 10 6A 00 FF 75 08 83 C1 38` |
+| 10 | `C3DUser::ChkStatus` (`ADD ECX,0x138; JMP bit-tester`) | `0x00F1B838` | `55 8B EC 81 7D 08 3F 02 00 00 77 0C 81 C1 38 01 00 00 5D E9` |
+| 11 | toggle handler (auto-hunt notify) | `0x00BD8035` | `6A 00 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? C3` — matches many; disambiguate: the CALL target reads the manager global (see #14) |
+| 12 | toggle impl `Toggle(mgr, flag)` (`PUSH 0x414` prologue) | `0x00F31335` | `68 14 04 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F1 80 7D 08 00 75 08` |
+| 13 | per-frame hunt brain | `0x00F556FC` | `6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 ?? E8` — the 3rd call is the is-hunting check (see #16); disambiguate from the dozens of `6A 2C B8` prologues by it |
+| 14 | client accessor (reads `DAT_01a549a0`) | `0x0043E581` | `83 3D ?? ?? ?? ?? 00 75 05 E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? C3` — **hundreds of matches**; disambiguate: only the CLIENT accessor's 2nd dword (after `83 3D`) equals the global that `auto_hunt`/`xp_skill`/`buffs` read at runtime; it is the one at `FUN_0043e581` in this build |
+| 15 | manager accessor (reads `DAT_01a55220`) | `0x00482805` | `83 3D ?? ?? ?? ?? 00 75 05 E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? C3` — same shape as #14; disambiguate by the global dword = `0x01A55220` |
+| 16 | is-hunting check (`client+0x5385 && mgr+0x11`) | `0x01117C44` | `E8 ?? ?? ?? ?? 84 C0 74 13 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 03 B0 01 C3 32 C0 C3` |
+| 17 | XP-fill gate (`JNZ` skipping the XP-bar charge) | `0x01116F39` | `75 49 68 96 00 00 00 8B` — unique: JNZ + `PUSH 0x96` (status 150 check right after the hunting gate) |
+| 18 | use skill on target (`PUSH 0x18C` prologue) | `0x011B39C9` | `68 8C 01 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F9 89 7D AC` |
+| 19 | action-interval virtual (`CMP [ESI+0x8F8],0`) | `0x010B148B` | `55 8B EC 56 8B F1 83 BE F8 08 00 00 00 74 1C FF 75 08 E8 ?? ?? ?? ?? 85 C0` |
+| 20 | master interval computation (`MOV ECX,[EBX+0x770]`) | `0x00DE93F2` | `6A 18 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 8B 8B 70 07 00 00 33 FF 85 C9` — the `8B 8B 70 07 00 00` anchor; many `8B 8B 70 07` hits — disambiguate: entry prologue `6A 18` + this is the one with the `+0x44/+0x48` final divisor (decompile) |
+| 21 | walk-to-coord (brain helper) | `0x00F49497` | `68 3C 01 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 68 0F 02 00 00 E8 ?? ?? ?? ?? 8B C8` — verify: called by the brain (#13) with `(x, y, 4)` |
+| 22 | find-target (brain helper, writes `{id,dist}`) | `0x00F4412C` | `6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 33 C9 89 4D F0` — verify: called by the brain (#13) with `&outPair` |
+| 23 | my-role list match (thunk: `ADD ECX,0x78; JMP`) | `0x00D3313A` | `55 8B EC 83 C1 78 5D E9 ?? ?? ?? ??` — unique |
+| 24 | `CMyHero::SwapEquipMode` (`PUSH 0x94C`; reads `[ESI+0x193C]`) | `0x00FF2B8E` | `68 4C 09 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F1 8B 86 3C 19 00 00` |
+| 25 | `STR_CANNOT_USE_XP_WHEN_HANGUP` string | `0x01744044` | string search; its code xrefs land in #4/#5's functions |
+| 26 | speed cap table (13 dwords `{100..200}`) | `0x016F9E84` | data scan: `64 00 00 00 69 00 00 00 6E 00 00 00 73 00 00 00 78 00 00 00 82 00 00 00 8C 00 00 00 96 00 00 00 A5 00 00 00 B9 00 00 00 BE 00 00 00 C3 00 00 00 C8 00 00 00` — **unique** |
+| 27 | brain tick global (`DAT_01a5ee04`) | `0x01A5EE04` | no AOB (data global); re-find from the hunt brain (#13): the `MOV EDX,[<g>]; ADD EDX,0x3E8; CMP EAX,EDX` sequence right after its is-hunting call |
+| 28 | client / hero global (`DAT_01a549a0`) | `0x01A549A0` | no AOB; re-find from #14 (client accessor `A1` dword) |
+| 29 | manager global (`DAT_01a55220`) | `0x01A55220` | no AOB; re-find from #15 (manager accessor `A1` dword) |
+| 30 | CUserAttribMgr global (`DAT_01a58fe0`) | `0x01A58FE0` | no AOB; re-find from its accessor (same `83 3D` shape as #14/#15, disambiguate by the `0x01A58FE0` dword; accessor @ `0x00832A5D` in this build) |
+
+Verification workflow after every pattern hit: disassemble the candidate,
+confirm the semantic (e.g. the toggle handler's `CALL` targets the manager
+accessor; the XP gates' JNZ is immediately followed by the `PUSH <string>` of
+`STR_CANNOT_USE_XP_WHEN_HANGUP`; the cap table is data, not code), then update
+the `*_ADDRESS` constants in the hook modules and the tables above.
+
+---
+
 ## 2026-08-20 rebuild — verified old → new address table
 
 The update is a real recompile (not a uniform rebase). Per-region shifts:
