@@ -6,12 +6,13 @@
 #include "hooks/config.h"
 #include "hooks/anticheat.h"
 #include "hooks/ce_hide.h"
+#include "hooks/nt_hide.h"
 #include "MinHook.h"
 
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "libMinHook.x86.lib")
 
-static void HookLog(const char* fmt, ...)
+void HookLog(const char* fmt, ...)
 {
 	char exePath[MAX_PATH]={0};
 	if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) return;
@@ -55,6 +56,10 @@ void ModuleLogThread()
 		HookLog("CE-hide hooks installed");
 	else
 		HookLog("CE-hide hooks FAILED");
+	if (InstallNtHideHooks())
+		HookLog("NT-hide hooks installed");
+	else
+		HookLog("NT-hide hooks FAILED");
 }
 
 extern GameWindowInfo g_gameWindow;
