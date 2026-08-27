@@ -51,6 +51,12 @@ namespace AutoLogin
 	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 
+	// Auto-fill the account edit from accountinfo.ini ([AccountN] Use=1 -> User).
+	bool g_autoFillAccount = true;
+	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
+	char g_accountSection[32] = "";  // the section name, e.g. "Account2"
+	HWND g_filledAccountDialog = NULL; // dialog instance we already filled
+
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
 	HWND g_cachedButton = NULL;
@@ -275,6 +281,128 @@ namespace AutoLogin
 	}
 
 	// ------------------------------------------------------------------
+	// Account auto-fill (accountinfo.ini)
+	// ------------------------------------------------------------------
+
+	// Path of accountinfo.ini, next to the game exe (same folder as
+	// coinfo.ini / overlay.ini).
+	static const char* GetAccountIniPath()
+	{
+		static char path[MAX_PATH] = { 0 };
+		if (path[0])
+			return path;
+		if (GetModuleFileNameA(NULL, path, MAX_PATH))
+		{
+			char* slash = strrchr(path, '\\');
+			if (slash)
+				*(slash + 1) = '\0';
+			strcat_s(path, "accountinfo.ini");
+		}
+		return path;
+	}
+
+	// Scans accountinfo.ini for the first [AccountN] section whose Use=1 and
+	// stores its User value into g_activeAccount. Format:
+	//   [Account1]  User=myusername  Use=1
+	//   [Account2]  User=otheruser   Use=0
+	static bool LoadActiveAccount()
+	{
+		g_activeAccount[0] = 0;
+		g_accountSection[0] = 0;
+
+		const char* path = GetAccountIniPath();
+		if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+			return false;
+
+		char sections[1024] = { 0 };
+		if (GetPrivateProfileStringA(NULL, NULL, NULL, sections, sizeof(sections), path) == 0)
+			return false;
+
+		for (char* s = sections; *s; s += lstrlenA(s) + 1)
+		{
+			char use[8] = { 0 };
+			GetPrivateProfileStringA(s, "Use", "0", use, sizeof(use), path);
+			if (lstrcmpA(use, "1") != 0)
+				continue;
+			char user[64] = { 0 };
+			GetPrivateProfileStringA(s, "User", "", user, sizeof(user), path);
+			if (user[0] == 0)
+				continue;
+			strcpy_s(g_activeAccount, user);
+			strcpy_s(g_accountSection, s);
+			return true;
+		}
+		return false;
+	}
+
+	struct EditScan
+	{
+		HWND top;      // edit with the smallest Y (account field)
+		HWND second;   // edit with the second smallest Y (password field)
+		int  topY;
+		int  secondY;
+	};
+
+	static BOOL CALLBACK FindEditFields(HWND hwnd, LPARAM lParam)
+	{
+		EditScan* scan = (EditScan*)lParam;
+		char cls[32];
+		if (GetClassNameA(hwnd, cls, sizeof(cls)) <= 0)
+			return TRUE;
+		if (lstrcmpiA(cls, "Edit") != 0)
+			return TRUE;
+		RECT rc;
+		if (!GetWindowRect(hwnd, &rc))
+			return TRUE;
+		int y = rc.top;
+		if (scan->top == NULL || y < scan->topY)
+		{
+			scan->second = scan->top;
+			scan->secondY = scan->topY;
+			scan->top = hwnd;
+			scan->topY = y;
+		}
+		else if (scan->second == NULL || y < scan->secondY)
+		{
+			scan->second = hwnd;
+			scan->secondY = y;
+		}
+		return TRUE;
+	}
+
+	// Fills the account edit (the topmost Edit child of the dialog) with the
+	// active account. WM_SETTEXT updates only the visible text; the CDlgLogin
+	// member the login handler reads (dlg+0x13B88) is synced by the edit's
+	// EN_KILLFOCUS handler, so focus is moved to the account field and then to
+	// the password field - that runs the game's own sync path and leaves the
+	// cursor ready for the password. Never overwrites a non-empty field.
+	static bool FillAccountField(HWND dialog)
+	{
+		if (!IsDialogUsable(dialog))
+			return false;
+		if (g_activeAccount[0] == 0)
+			return false;
+
+		EditScan scan = { NULL, NULL, 0, 0 };
+		EnumChildWindows(dialog, FindEditFields, (LPARAM)&scan);
+		if (!scan.top)
+			return false;
+
+		// Respect what the user already typed.
+		if (GetWindowTextLengthA(scan.top) > 0)
+			return false;
+
+		SendMessage(scan.top, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
+
+		if (scan.second && IsWindow(scan.second))
+		{
+			SetFocus(scan.top);
+			SetFocus(scan.second);
+		}
+		return true;
+	}
+
+	// ------------------------------------------------------------------
 	// Clicking
 	// ------------------------------------------------------------------
 
@@ -400,7 +528,7 @@ namespace AutoLogin
 			}
 		}
 
-		if (!g_autoClickLogin)
+		if (!g_autoClickLogin && !g_autoFillAccount)
 			return;
 
 		// Nothing to click (not at the login screen any more).
@@ -414,6 +542,18 @@ namespace AutoLogin
 				g_autoClickLogin = false;  // disarm the auto loop
 			return;
 		}
+
+		// Auto-fill the account edit from accountinfo.ini, once per dialog
+		// instance (before the click, so the click's focus move syncs it).
+		if (g_autoFillAccount && g_filledAccountDialog != g_cachedDialog)
+		{
+			g_filledAccountDialog = g_cachedDialog;
+			LoadActiveAccount();
+			FillAccountField(g_cachedDialog);
+		}
+
+		if (!g_autoClickLogin)
+			return;
 
 		if (!IsWindow(g_cachedButton))
 			return;
@@ -466,6 +606,21 @@ void RenderAutoLoginInterface()
 	ImGui::Combo("Click method", &AutoLogin::g_clickMethod,
 		"Message (no cursor)\0Mouse (real click)\0BM_CLICK\0");
 
+	ImGui::Spacing();
+	ImGui::Checkbox("Auto-fill account (accountinfo.ini)", &AutoLogin::g_autoFillAccount);
+	if (AutoLogin::g_activeAccount[0])
+	{
+		ImGui::SameLine();
+		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[%s]", AutoLogin::g_activeAccount);
+	}
+	if (AutoLogin::g_autoFillAccount)
+	{
+		if (AutoLogin::g_activeAccount[0])
+			ImGui::TextDisabled("from %s (Use=1) - fills the account field once", AutoLogin::g_accountSection);
+		else
+			ImGui::TextDisabled("no Use=1 account in accountinfo.ini");
+	}
+
 	if (AutoLogin::g_loginCompleted)
 	{
 		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Login button clicked - dialog closed");
@@ -479,6 +634,9 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Button text: \"%s\"  CtrlID: %u", AutoLogin::g_buttonText, AutoLogin::g_buttonId);
 		ImGui::Text("Dialog children: %u edits, %u buttons", AutoLogin::g_editCount, AutoLogin::g_buttonCount);
 		ImGui::Text("Clicks sent: %d", AutoLogin::g_clickCount);
+		ImGui::Text("Account: \"%s\" (%s)", AutoLogin::g_activeAccount,
+			AutoLogin::g_accountSection[0] ? AutoLogin::g_accountSection : "none");
+		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
 
 		ImGui::InputInt("Button ID override (0=auto)", &AutoLogin::g_buttonIdOverride);

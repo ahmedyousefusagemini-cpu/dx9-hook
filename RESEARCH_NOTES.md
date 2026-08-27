@@ -79,6 +79,16 @@ Also confirmed the alternative direct-call path for future use: the app object a
 `LEA ECX,[EBX+0x39B948]; CALL FUN_LoginButtonHandler`). Not used — the window-shape +
 message-click route needs no addresses and survives recompiles.
 
+**Account auto-fill (added):** `auto_login.cpp` now reads `accountinfo.ini` (next to the
+exe) — `[AccountN]` sections with `User=<name>` and `Use=1/0` — picks the first `Use=1`
+entry and fills its `User` into the account edit (the topmost Edit child of the login
+dialog, found by smallest Y) via `WM_SETTEXT`, once per dialog instance, never
+overwriting a non-empty field. To get the name into the login member (`dlg+0x13B88`)
+the game syncs on EN_KILLFOCUS, so the fill ends with `SetFocus(accountEdit)` →
+`SetFocus(passwordEdit)` — that fires the game's own sync handler and leaves the cursor
+in the password field. The `CDlgLogin::OnEnKillfocusEditAccount` handler string is
+`0x016042E4` (its Catch stub at `0x0088CDF8`).
+
 ---
 
 > **2026-08-27: client recompiled again (version 7950).** All hook modules
