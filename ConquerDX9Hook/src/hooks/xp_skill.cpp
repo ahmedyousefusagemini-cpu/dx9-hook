@@ -119,11 +119,11 @@ namespace XpSkill
 	bool g_autoXpOnlyWhileHunting = true;   // default: pop during auto-hunt only
 
 	// Forced XP skill id - when enabled, the auto-pop ALWAYS fires this magic
-	// id (default 1110 = Fatal Strike, the ninja XP skill) instead of the
+	// id (default 6011 = Fatal Strike, the ninja XP skill) instead of the
 	// detected XP-skill list, so a character with multiple learned XP skills
 	// still pops the desired one.
 	bool g_forceXpSkillId = true;
-	int  g_forcedXpSkillId = 1110;
+	int  g_forcedXpSkillId = 6011;
 
 	const DWORD RETRY_INTERVAL_MS     = 5000;  // re-fire if the icon/bar never cleared
 	const DWORD LIST_SCAN_INTERVAL_MS = 5000;  // re-enumerate learned magics slowly
@@ -420,7 +420,7 @@ namespace XpSkill
 		if (!iconVisible && bar < 100)
 			return;
 
-		// Forced skill id (default 1110 = Fatal Strike, the ninja XP skill)
+		// Forced skill id (default 6011 = Fatal Strike, the ninja XP skill)
 		// takes precedence over the detected XP-skill list - always fire this
 		// id even when another XP skill was learned.
 		unsigned int id = 0;
@@ -519,10 +519,10 @@ void RenderXpSkillInterface()
 	{
 		ImGui::Checkbox("Only while auto-hunting", &XpSkill::g_autoXpOnlyWhileHunting);
 
-		// Forced skill id (default 1110 = Fatal Strike, ninja XP skill): when
+		// Forced skill id (default 6011 = Fatal Strike, ninja XP skill): when
 		// enabled, the auto-pop always fires this id, even if another XP
 		// skill is learned.
-		ImGui::Checkbox("Force XP skill id (1110 = Fatal Strike)", &XpSkill::g_forceXpSkillId);
+		ImGui::Checkbox("Force XP skill id (6011 = Fatal Strike)", &XpSkill::g_forceXpSkillId);
 		if (XpSkill::g_forceXpSkillId)
 		{
 			ImGui::InputInt("XP skill id", &XpSkill::g_forcedXpSkillId);
