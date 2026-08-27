@@ -56,6 +56,7 @@ namespace AutoLogin
 	bool g_loginCompleted = false;   // a click made the login dialog disappear
 	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
+	int  g_accountEditIndex = -1;    // -1 = auto (topmost visible Edit), else index into g_edits
 
 	// Active account loaded from accountinfo.ini ([AccountN] Use=1 -> User).
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
@@ -413,13 +414,13 @@ namespace AutoLogin
 		SendInput(1, &in, sizeof(INPUT));
 	}
 
-	// Types the account name into the account edit (the topmost VISIBLE Edit
-	// child) without moving the cursor: the suppressed synchronous
-	// WM_LBUTTONDOWN/WM_LBUTTONUP delivers the click that activates the fgui
-	// edit's input mode (SetFocus alone is ignored by the framework), then
-	// real keystrokes type Ctrl+A / Delete / the name. On success, focus moves
-	// to the password field (fires the EN_KILLFOCUS sync and leaves the cursor
-	// ready for the password). Returns true when the field text matches.
+	// Types the account name into the account edit without moving the cursor:
+	// SetFocus (Win32 focus) + a suppressed synchronous WM_LBUTTONDOWN/UP
+	// (activates the fgui edit's input mode), then real keystrokes type
+	// Ctrl+A / Delete / the name. On success, focus moves to the password
+	// field (fires the EN_KILLFOCUS sync). Returns true when the field text
+	// matches afterwards. The account edit is the pinned one (g_accountEditIndex)
+	// or, by default, the topmost visible Edit child.
 	static bool TypeAccountName(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
@@ -427,20 +428,47 @@ namespace AutoLogin
 		if (g_activeAccount[0] == 0)
 			return false;
 
-		EditScan scan = { NULL, NULL, 0, 0 };
-		EnumChildWindows(dialog, FindEditFields, (LPARAM)&scan);
-		if (!scan.top)
+		HWND accountEdit = NULL;
+		HWND passwordEdit = NULL;
+
+		if (g_accountEditIndex >= 0 && g_accountEditIndex < g_editListCount)
+		{
+			accountEdit = g_edits[g_accountEditIndex].hwnd;
+			// Password = the next visible edit below the account.
+			int ay = g_edits[g_accountEditIndex].y;
+			int bestY = 0;
+			for (int i = 0; i < g_editListCount; i++)
+			{
+				if (i == g_accountEditIndex || g_edits[i].y <= ay)
+					continue;
+				if (passwordEdit == NULL || g_edits[i].y < bestY)
+				{
+					passwordEdit = g_edits[i].hwnd;
+					bestY = g_edits[i].y;
+				}
+			}
+		}
+		else
+		{
+			EditScan scan = { NULL, NULL, 0, 0 };
+			EnumChildWindows(dialog, FindEditFields, (LPARAM)&scan);
+			accountEdit = scan.top;
+			passwordEdit = scan.second;
+		}
+		if (!accountEdit || !IsWindow(accountEdit))
 			return false;
 
-		// 1) Activate the edit with a synchronous click delivered straight to
-		//    its WndProc (ImGui suppressed - no OS cursor movement at all).
+		// 1) Give the edit Win32 focus, then deliver a synchronous click
+		//    straight to its WndProc (ImGui suppressed) to activate the fgui
+		//    edit - no OS cursor movement at all.
+		SetFocus(accountEdit);
 		RECT rc;
 		LPARAM pos = 0;
-		if (GetClientRect(scan.top, &rc))
+		if (GetClientRect(accountEdit, &rc))
 			pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
 		g_suppressImGuiWndProc = true;
-		SendMessage(scan.top, WM_LBUTTONDOWN, MK_LBUTTON, pos);
-		SendMessage(scan.top, WM_LBUTTONUP, 0, pos);
+		SendMessage(accountEdit, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+		SendMessage(accountEdit, WM_LBUTTONUP, 0, pos);
 		g_suppressImGuiWndProc = false;
 		Sleep(50);
 
@@ -463,10 +491,10 @@ namespace AutoLogin
 		//    success - that syncs the member and puts the cursor where the
 		//    password goes).
 		char after[128] = "";
-		GetWindowTextA(scan.top, after, sizeof(after));
+		GetWindowTextA(accountEdit, after, sizeof(after));
 		bool ok = lstrcmpA(after, g_activeAccount) == 0;
-		if (ok && scan.second && IsWindow(scan.second))
-			SetFocus(scan.second);
+		if (ok && passwordEdit && IsWindow(passwordEdit))
+			SetFocus(passwordEdit);
 		return ok;
 	}
 
@@ -733,12 +761,26 @@ void RenderAutoLoginInterface()
 
 		if (AutoLogin::g_editListCount > 0)
 		{
-			ImGui::Text("Edit fields (top = account):");
+			ImGui::Text("Edit fields (click 'use' to pick the account field):");
 			for (int i = 0; i < AutoLogin::g_editListCount; i++)
 			{
 				const AutoLogin::EditInfo& ei = AutoLogin::g_edits[i];
-				ImGui::Text("  #%02d y=%-5d 0x%08X \"%s\"",
-					i, ei.y, (unsigned int)ei.hwnd, ei.text[0] ? ei.text : "(empty)");
+				ImGui::PushID(1000 + i);
+				ImGui::Text("  #%02d y=%-5d 0x%08X \"%s\"%s",
+					i, ei.y, (unsigned int)ei.hwnd,
+					ei.text[0] ? ei.text : "(empty)",
+					i == AutoLogin::g_accountEditIndex ? "  <== ACCOUNT" : "");
+				ImGui::SameLine();
+				if (ImGui::SmallButton("use"))
+				{
+					AutoLogin::g_accountEditIndex = i;
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton("auto"))
+				{
+					AutoLogin::g_accountEditIndex = -1;
+				}
+				ImGui::PopID();
 			}
 		}
 
