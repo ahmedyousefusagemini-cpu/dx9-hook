@@ -268,14 +268,32 @@ which is why the game kept crashing on CE despite the "applied" log line.
 
 v2 fixes:
 - All constants are now true RVAs (`VA - 0x00400000`): EXE patches
-  `0x00622CB8…0x00622D01`, TQNDP slots `0x01654448/4C/50`, ndac IAT
-  `0x01654474`, Assist IAT `0x01654378`.
+  `0x00622CB8…0x00622D01`, TQNDP slots `0x01654448/4C/50`.
 - Stubs are no longer static `BYTE[]` arrays (non-executable `.data` → DEP
   crash on `JMP`): they are copied into a `VirtualAlloc`ed
   `PAGE_EXECUTE_READWRITE` page at runtime.
 - `LogLoadedModules()` moved out of `DllMain` into a delayed thread
   (`CreateToolhelp32Snapshot` in `DllMain` can deadlock under the loader lock).
-- `bypass_aa.ct` (CE fallback) extended: ndac + Assist IATs redirected to an
-  `alloc()`ed stub; DeviceIoControl slot corrected to `TqNDProtect.dll+386C4`.
+
+### 8.6 v3 — the real CE detector is ndac.dll, not TqNDProtect
+
+Module logging proved TqNDProtect.dll is **not loaded** while **ndac.dll and
+Assist.dll are loaded** in the game process. ndac.dll (18.7MB, VMProtect) is a
+full anti-cheat importing: `EnumProcesses`/`EnumProcessModules`,
+`CreateToolhelp32Snapshot`/`Thread32*`, `GetThreadContext`/`SetThreadContext`,
+`SuspendThread`/`ResumeThread`, `FindWindowA`/`FindWindowExA`/`GetClassNameA`,
+`DeviceIoControl`/`QueryDosDeviceW`, `FindFirstFile*`, `IsDebuggerPresent`,
+`SetWindowsHookExW`, `OpenProcess`/`ReadProcessMemory` — i.e. it detects CE by
+process, window, thread (DR-register), kernel driver, and file scanning.
+
+Stubbing ndac's delay-load IAT crashed the game at startup (its functions are
+called during init), so the correct approach is to leave ndac loaded and hook
+its detection surface instead:
+
+- `EnumProcesses`, `Process32FirstW/NextW`, `CreateToolhelp32Snapshot` →
+  CE process (`cheatengine*.exe`, name containing "cheat") filtered out
+- `FindWindowA`/`FindWindowExA` → CE window (`TfrmCheatEngine*`, "Cheat Engine")
+  returns NULL
+- All installed via MinHook (`ce_hide.cpp`), memory-only, after init.
 
 
