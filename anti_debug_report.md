@@ -257,4 +257,25 @@ process** — i.e. Kaspersky (its `klhkum` hook is injected into Conquer.exe and
 Kaspersky HIPS reacts to CE's kernel driver / known-cheat process), which must be
 handled via Kaspersky exclusions rather than game patching.
 
+### 8.5 Address-correctness fix (v2 of anticheat.cpp)
+
+The first hook build shipped with an off-by-image-base bug: the patch constants
+were absolute VAs (`0x00A22CB8`, `0x01A54448`, …) but the code added the image
+base again (`imageBase + rva`), so every write landed `0x00400000` bytes too far
+(e.g. the IsDebuggerPresent JNZ was written to `0x00E22CB8` instead of
+`0x00A22CB8`). The writes "succeeded" but never touched the real check sites —
+which is why the game kept crashing on CE despite the "applied" log line.
+
+v2 fixes:
+- All constants are now true RVAs (`VA - 0x00400000`): EXE patches
+  `0x00622CB8…0x00622D01`, TQNDP slots `0x01654448/4C/50`, ndac IAT
+  `0x01654474`, Assist IAT `0x01654378`.
+- Stubs are no longer static `BYTE[]` arrays (non-executable `.data` → DEP
+  crash on `JMP`): they are copied into a `VirtualAlloc`ed
+  `PAGE_EXECUTE_READWRITE` page at runtime.
+- `LogLoadedModules()` moved out of `DllMain` into a delayed thread
+  (`CreateToolhelp32Snapshot` in `DllMain` can deadlock under the loader lock).
+- `bypass_aa.ct` (CE fallback) extended: ndac + Assist IATs redirected to an
+  `alloc()`ed stub; DeviceIoControl slot corrected to `TqNDProtect.dll+386C4`.
+
 

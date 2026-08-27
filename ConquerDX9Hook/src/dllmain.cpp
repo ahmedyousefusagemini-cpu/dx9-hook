@@ -37,6 +37,14 @@ static void LogLoadedModules()
 	HookLog("Loaded modules: %s", buf);
 }
 
+// Runs LogLoadedModules() safely OUTSIDE DllMain (CreateToolhelp32Snapshot in
+// DllMain can deadlock under the loader lock). Called once from the hook thread.
+void ModuleLogThread()
+{
+	Sleep(2000); // give the game's own imports time to resolve
+	LogLoadedModules();
+}
+
 extern GameWindowInfo g_gameWindow;
 extern EndSceneFunc g_originalEndSceneFunction;
 extern ResetFunc g_originalResetFunction;
@@ -177,16 +185,16 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 		DisableThreadLibraryCalls(moduleHandle);
 
 		// Neutralize the game's anti-debug / anti-CE (IsDebuggerPresent +
-		// SoftICE probes in the login dialog init, and TqNDProtect.dll's
-		// delay-load watchdog) before the game's own init runs. Memory-only.
+		// SoftICE probes in the login dialog init, and TqNDProtect/ndac/
+		// Assist delay-load watchdogs) before the game's own init runs.
+		// Memory-only.
 		if (InstallAntiCheatBypass())
 			HookLog("AntiCheat bypass: applied (debugger/SoftICE/TQNDP/ndac/Assist blocked)");
 		else
 			HookLog("AntiCheat bypass: FAILED");
 
-		LogLoadedModules();
-
 		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)HookInitializationThread, NULL, 0, NULL);
+		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ModuleLogThread, NULL, 0, NULL);
 		break;
 		
 	case DLL_PROCESS_DETACH:
