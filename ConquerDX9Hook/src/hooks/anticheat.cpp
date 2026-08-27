@@ -34,23 +34,41 @@ const Patch kExePatches[] = {
     { 0x00A22D01, { 0x90,0x90,0x90,0x90,0x90,0x90 } },
 };
 
-// ---- TqNDProtect.dll delay-load IAT slots (Conquer.exe .data) ------------
-// These three slots are pre-initialized to the per-function delay-load helper
-// (00D1ADAC / 00D1ADCD / 013112EE). The thunks do `JMP [slot]`, so the moment
-// we overwrite the slot with our stub address the anti-cheat DLL is never
-// mapped and its self-decrypting CE detector never runs.
+// ---- Delay-load IAT slots for every anti-cheat DLL ------------------------
+// Conquer.exe delay-loads several DLLs through IAT slot tables in .data. Each
+// slot is pre-filled with the per-import delay-load helper stub; overwriting
+// the slot with the address of one of our no-op stubs makes the import resolve
+// to a harmless function and the target DLL is NEVER mapped.
 //
-// Slot values must be POINTERS to the stubs (below), not the stub bytes.
+// Descriptor map (from the PE delay-load directory at 0x019DD4F0):
+//   ndac.dll       IAT @ 0x01A54474  (26 ordinal imports)
+//   Assist.dll     IAT @ 0x01A54378
+//   TqNDProtect.dll IAT @ 0x01A54448 (3 imports)  -- patched below
+//   (unnamed)      IAT @ 0x01A54384
+//   RecordGame.dll IAT @ 0x01A54340
+//
+// We neutralize ndac.dll + Assist.dll too: they are the anti-cheat family
+// (ndac.dll = 18MB VMProtect "ND" anti-cheat). Slot values are POINTERS to
+// the stubs below, not stub bytes.
 
 const DWORD kInitSlotRva    = 0x01A54448;   // TQNDP_Initialize
 const DWORD kDestroySlotRva = 0x01A5444C;   // TQNDP_Destroy
 const DWORD kTokenSlotRva   = 0x01A54450;   // TQNDP_GetPlayerToken
+
+// ndac.dll / Assist.dll slot tables (RVA base + index*4). We blanket the whole
+// range; every slot gets the same generic stub (xor eax,eax; ret) because the
+// imports are by-ordinal and callers tolerate a NULL/0 result.
+const DWORD kNdacIatRva   = 0x01A54474;
+const DWORD kNdacSlots    = 26;
+const DWORD kAssistIatRva = 0x01A54378;
+const DWORD kAssistSlots  = 10;
 
 // __cdecl stubs (machine code) living in our DLL's .text. Each returns a
 // benign value and does NOT clean the stack (callers pop their own args).
 __declspec(align(16)) BYTE stub_TQNDP_Initialize[]     = { 0xB0, 0x01, 0xC3, 0x90, 0x90, 0x90 }; // mov al,1; ret
 __declspec(align(16)) BYTE stub_TQNDP_Destroy[]        = { 0x33, 0xC0, 0xC3, 0x90, 0x90, 0x90 }; // xor eax,eax; ret
 __declspec(align(16)) BYTE stub_TQNDP_GetPlayerToken[] = { 0x33, 0xC0, 0xC3, 0x90, 0x90, 0x90 }; // xor eax,eax; ret
+__declspec(align(16)) BYTE stub_GenericNoop[]          = { 0x33, 0xC0, 0xC3, 0x90, 0x90, 0x90 }; // xor eax,eax; ret
 
 bool WriteMemory(void* address, const void* data, size_t length)
 {
@@ -94,6 +112,19 @@ bool InstallAntiCheatBypass()
         ok = false;
     if (!WritePointer(kTokenSlotRva,   imageBase, stub_TQNDP_GetPlayerToken))
         ok = false;
+
+    // 3) Block ndac.dll (VMProtect anti-cheat) + Assist.dll by filling their
+    //    whole delay-load IAT with a generic no-op stub.
+    for (DWORD i = 0; i < kNdacSlots; ++i)
+    {
+        if (!WritePointer(kNdacIatRva + i * 4, imageBase, stub_GenericNoop))
+            ok = false;
+    }
+    for (DWORD i = 0; i < kAssistSlots; ++i)
+    {
+        if (!WritePointer(kAssistIatRva + i * 4, imageBase, stub_GenericNoop))
+            ok = false;
+    }
 
     return ok;
 }

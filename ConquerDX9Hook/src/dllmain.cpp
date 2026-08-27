@@ -20,6 +20,23 @@ static void HookLog(const char* fmt, ...)
 	fprintf(f,"\n"); fclose(f);
 }
 
+static void LogLoadedModules()
+{
+	char buf[4096]; buf[0]=0;
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+	if (snap == INVALID_HANDLE_VALUE) { HookLog("ModuleSnap failed"); return; }
+	MODULEENTRY32 me; me.dwSize = sizeof(me);
+	if (Module32First(snap, &me)) {
+		do {
+			if (strlen(buf) + strlen(me.szModule) + 2 < sizeof(buf)) {
+				strcat_s(buf, me.szModule); strcat_s(buf, " ");
+			}
+		} while (Module32Next(snap, &me));
+	}
+	CloseHandle(snap);
+	HookLog("Loaded modules: %s", buf);
+}
+
 extern GameWindowInfo g_gameWindow;
 extern EndSceneFunc g_originalEndSceneFunction;
 extern ResetFunc g_originalResetFunction;
@@ -163,9 +180,11 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 		// SoftICE probes in the login dialog init, and TqNDProtect.dll's
 		// delay-load watchdog) before the game's own init runs. Memory-only.
 		if (InstallAntiCheatBypass())
-			HookLog("AntiCheat bypass: applied (debugger/SoftICE/TQNDP blocked)");
+			HookLog("AntiCheat bypass: applied (debugger/SoftICE/TQNDP/ndac/Assist blocked)");
 		else
 			HookLog("AntiCheat bypass: FAILED");
+
+		LogLoadedModules();
 
 		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)HookInitializationThread, NULL, 0, NULL);
 		break;
