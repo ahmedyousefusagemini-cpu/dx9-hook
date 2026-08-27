@@ -118,6 +118,13 @@ namespace XpSkill
 	bool g_autoXpSkill = false;
 	bool g_autoXpOnlyWhileHunting = true;   // default: pop during auto-hunt only
 
+	// Forced XP skill id - when enabled, the auto-pop ALWAYS fires this magic
+	// id (default 47 = the ninja XP skill) instead of the detected XP-skill
+	// list, so a character with multiple learned XP skills still pops the
+	// desired one.
+	bool g_forceXpSkillId = true;
+	int  g_forcedXpSkillId = 47;
+
 	const DWORD RETRY_INTERVAL_MS     = 5000;  // re-fire if the icon/bar never cleared
 	const DWORD LIST_SCAN_INTERVAL_MS = 5000;  // re-enumerate learned magics slowly
 
@@ -412,17 +419,28 @@ namespace XpSkill
 		// ever captured.
 		if (!iconVisible && bar < 100)
 			return;
-		if (g_xpIdCount == 0)
-			return;
 
-		unsigned int id = g_xpIds[g_rotateIdx % g_xpIdCount];
+		// Forced skill id (default: ninja XP skill 47) takes precedence over
+		// the detected XP-skill list - always fire this id even when another
+		// XP skill was learned.
+		unsigned int id = 0;
+		if (g_forceXpSkillId && g_forcedXpSkillId > 0)
+		{
+			id = (unsigned int)g_forcedXpSkillId;
+		}
+		else
+		{
+			if (g_xpIdCount == 0)
+				return;
+			id = g_xpIds[g_rotateIdx % g_xpIdCount];
+			g_rotateIdx++;
+		}
 		g_lastFireAttempt = now;
 
 		FireMagic(client, id);
 
 		g_lastFiredId = id;
 		g_fireCount++;
-		g_rotateIdx++;
 		g_waitingReset = true;
 	}
 }
@@ -500,6 +518,19 @@ void RenderXpSkillInterface()
 	if (XpSkill::g_autoXpSkill)
 	{
 		ImGui::Checkbox("Only while auto-hunting", &XpSkill::g_autoXpOnlyWhileHunting);
+
+		// Forced skill id (default 47 = ninja XP skill): when enabled, the
+		// auto-pop always fires this id, even if another XP skill is learned.
+		ImGui::Checkbox("Force XP skill id (ninja: 47)", &XpSkill::g_forceXpSkillId);
+		if (XpSkill::g_forceXpSkillId)
+		{
+			ImGui::InputInt("XP skill id", &XpSkill::g_forcedXpSkillId);
+			if (XpSkill::g_forcedXpSkillId < 0)
+				XpSkill::g_forcedXpSkillId = 0;
+			if (XpSkill::g_forcedXpSkillId > 0xFFFF)
+				XpSkill::g_forcedXpSkillId = 0xFFFF;
+			ImGui::TextDisabled("Always fires this skill id, ignoring detected XP skills.");
+		}
 
 		int client = XpSkill::GetClientObject();
 		if (XpSkill::IsClientValid(client))

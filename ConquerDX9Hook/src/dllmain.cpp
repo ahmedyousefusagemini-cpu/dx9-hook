@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include "hooks/common.h"
+#include "hooks/config.h"
 #include "MinHook.h"
 
 #pragma comment(lib, "d3d9.lib")
@@ -31,6 +32,10 @@ extern HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETER
 
 void HookInitializationThread() 
 {
+	// Restore the settings saved by the last session's "Save Config" button.
+	// Runs before any frame is rendered, so the overlay comes up configured.
+	LoadConfig();
+
 	HMODULE direct3D9ModuleHandle = nullptr;
 
 	while (!(direct3D9ModuleHandle = GetModuleHandleA("d3d9.dll"))) 

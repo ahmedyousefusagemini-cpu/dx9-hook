@@ -189,6 +189,7 @@
     <ClInclude Include="libs\imgui\imstb_truetype.h" />
     <ClInclude Include="libs\minhook\include\MinHook.h" />
     <ClInclude Include="src\hooks\common.h" />
+    <ClInclude Include="src\hooks\config.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\dllmain.cpp" />
@@ -203,6 +204,7 @@
     <ClCompile Include="src\hooks\chams.cpp" />
     <ClCompile Include="src\hooks\buffs.cpp" />
     <ClCompile Include="src\hooks\gear_swap.cpp" />
+    <ClCompile Include="src\hooks\config.cpp" />
     <ClCompile Include="libs\imgui\imgui.cpp" />
     <ClCompile Include="libs\imgui\imgui_draw.cpp" />
     <ClCompile Include="libs\imgui\imgui_impl_dx9.cpp" />
