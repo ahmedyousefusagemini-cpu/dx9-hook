@@ -44,6 +44,15 @@ unsigned long g_debugMouseMessageCount = 0;
 unsigned long g_debugKeyboardMessageCount = 0;
 unsigned long g_debugSubclassedWindowCount = 0;
 
+// When set, HookedWindowProcedure skips the ImGui WndProc handling for
+// in-flight messages. The ImGui handler calls SetCapture()/AddMouseButtonEvent()
+// on every WM_LBUTTONDOWN, which corrupts the fgui controls' click handling
+// when the overlay is open (the auto-login button click fails with the overlay
+// up but works with it closed). The auto-login module sets this around its
+// synchronous synthetic clicks so the game's own WndProc sees the raw
+// messages exactly like a real click.
+volatile bool g_suppressImGuiWndProc = false;
+
 // Reads the flag tolerating ANSI, UTF-8 and UTF-16 files (Notepad defaults
 // to UTF-16, which GetPrivateProfileIntA silently fails on -> flag stuck off).
 // Returns true if key found, false otherwise. Out param `found` indicates
@@ -360,7 +369,7 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 		break;
 	}
 
-	if (g_isImGuiInitialized && g_gameWindow.isGuiWindowOpen) 
+	if (g_isImGuiInitialized && g_gameWindow.isGuiWindowOpen && !g_suppressImGuiWndProc) 
 	{
 		ImGuiIO& io = ImGui::GetIO();
 

@@ -234,8 +234,11 @@ void LoadConfig()
 	AutoLogin::g_clickIntervalMs = GetPrivateProfileIntA("AutoLogin", "ClickIntervalMs", 1000, path);
 	if (AutoLogin::g_clickIntervalMs < 250) AutoLogin::g_clickIntervalMs = 250;
 	if (AutoLogin::g_clickIntervalMs > 5000) AutoLogin::g_clickIntervalMs = 5000;
-	AutoLogin::g_clickMethod = GetPrivateProfileIntA("AutoLogin", "ClickMethod", 0, path);
-	if (AutoLogin::g_clickMethod < 0 || AutoLogin::g_clickMethod > 1) AutoLogin::g_clickMethod = 0;
+		AutoLogin::g_clickMethod = GetPrivateProfileIntA("AutoLogin", "ClickMethod", 0, path);
+	// Old builds numbered 0 = real mouse, 1 = BM_CLICK. New: 0 = SendMessage
+	// (default), 1 = real mouse, 2 = BM_CLICK - remap the legacy 1 (BM_CLICK).
+	if (AutoLogin::g_clickMethod == 1) AutoLogin::g_clickMethod = 2;
+	if (AutoLogin::g_clickMethod < 0 || AutoLogin::g_clickMethod > 2) AutoLogin::g_clickMethod = 0;
 	AutoLogin::g_buttonIdOverride = GetPrivateProfileIntA("AutoLogin", "ButtonIdOverride", 0, path);
 	if (AutoLogin::g_buttonIdOverride < 0) AutoLogin::g_buttonIdOverride = 0;
 

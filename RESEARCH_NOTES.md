@@ -54,23 +54,30 @@ Live test on the 7950 client: `SendMessage(btn, BM_CLICK)` × 784 with the login
 up → zero effect (dialog never closed, no login attempt). The found button's Win32 text
 was `"EnterGame"` (CtrlID 5680) while the visible label reads `"Log In"` — the text is
 set at runtime (neither literal exists in the binary, not even in the dialog template
-resource), and the fgui UI layer ignores BM_CLICK entirely. **The working click is a
-REAL mouse click: `SetCursorPos` to the button's screen center + `SendInput`
-`MOUSEEVENTF_LEFTDOWN`/`LEFTUP`.** Bonus: a real click moves focus away from the last
-Edit, so the killfocus handlers sync the account/password into the dialog members
-(`dlg+0x13B88`/`+0x13BD0`) BEFORE `FUN_LoginButtonHandler` runs — a direct function
-call would have raced that sync.
+resource), and the fgui UI layer ignores BM_CLICK entirely.
+
+**Second fix (same day): SendInput real clicks only worked with the ImGui overlay
+CLOSED.** Live observation: with the overlay open, the auto-click did nothing; closing
+the overlay (Insert) made the same button click succeed immediately. Root cause: the
+overlay's subclassed WndProc (`HookedWindowProcedure` in `directx_hooks.cpp`) calls
+`ImGui_ImplWin32_WndProcHandler` on EVERY message, and that handler runs
+`::SetCapture(hwnd)` + `io.AddMouseButtonEvent()` on every `WM_LBUTTONDOWN`
+(`imgui_impl_win32.cpp` ~line 697) — corrupting the fgui control's click handling.
+
+**Final click mechanism (current build):** `SendMessage(btn, WM_LBUTTONDOWN,
+MK_LBUTTON, center)` + `SendMessage(btn, WM_LBUTTONUP, 0, center)` — a purely
+programmatic press, **no cursor movement**, wrapped in the new
+`g_suppressImGuiWndProc` flag (`directx_hooks.cpp`) so `HookedWindowProcedure` skips
+the ImGui WndProc handler for those two messages and the game's fgui WndProc sees them
+raw (exactly as when the overlay is closed). Click methods now: 0 = Message (default),
+1 = SendInput real mouse (moves cursor), 2 = BM_CLICK (proven dead). Config key
+`ClickMethod` was renumbered (legacy 1 = BM_CLICK remapped to 2 on load).
 
 Also confirmed the alternative direct-call path for future use: the app object accessor
 `FUN_0041f880` (same `83 3D` lazy-accessor shape, reads `DAT_01a546f4`) and the
 `CDlgLogin` instance = `appObj + 0x39B948` (the dispatcher at `0x00A5B90E` does
 `LEA ECX,[EBX+0x39B948]; CALL FUN_LoginButtonHandler`). Not used — the window-shape +
-real-click route needs no addresses and survives recompiles.
-
-`auto_login.cpp` now: default method = real mouse click (BM_CLICK selectable fallback),
-a Button-ID override (`GetDlgItem(dialog, id)`), and the debug tree lists EVERY Button
-child (index/HWND/CtrlID/text) with per-row "use" (pin the override) and "click" (test
-that exact button) actions, so the correct control can be pinned live on any build.
+message-click route needs no addresses and survives recompiles.
 
 ---
 

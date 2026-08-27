@@ -663,20 +663,28 @@ themed chrome (`Login_xOrangeBtn`/`Login_xRedBtn` @ `0x015598F8`/`0x01559940`).
 `SendMessage(btn, BM_CLICK)` × 784 did NOTHING (dialog stayed up). The button's Win32
 text is e.g. `"EnterGame"` (CtrlID 5680, set at runtime — the literal is not in the
 binary) while the displayed label is e.g. `"Log In"` (drawn by the fgui engine). The
-fgui UI layer only responds to real mouse input. **The working click is a real mouse
-click (SetCursorPos + SendInput LBDOWN/UP) at the button's screen center** — it also
-triggers the normal focus→killfocus→member-sync (`dlg+0x13B88`/`+0x13BD0`) the handler
-needs before reading the credentials.
+fgui UI layer only responds to mouse input.
+
+**⚠️ ImGui overlay corrupts the click (root cause of "works only with overlay
+closed"):** `ImGui_ImplWin32_WndProcHandler` (called from the overlay's subclassed
+WndProc for every message) calls `::SetCapture(hwnd)` + `io.AddMouseButtonEvent()` on
+every `WM_LBUTTONDOWN` — this breaks the fgui control's click processing while the
+overlay is open (a SendInput real click logged in fine the moment the overlay was
+closed). Fix: `auto_login.cpp` sets the new `g_suppressImGuiWndProc` flag
+(`directx_hooks.cpp`) around its synthetic click so the game's WndProc sees the raw
+messages. The flag also covers real SendInput clicks.
 
 Re-find anchors: the `dlglogin.cpp` path string `0x016035F8` — its code xrefs land in
 every `CDlgLogin` method (Ghidra auto-names the handler `FUN_LoginButtonHandler`);
 the `"CDlgLogin"` RTTI string `0x016036A0` → type-info at `0x015FD208`.
 
-**Implementation (`auto_login.cpp`): window-shape discovery (no game addresses) + real
-mouse click.** Finds the login dialog by child-window shape (process-owned window with
-≥1 Edit + ≥1 Button child), finds the Login button (pinned CtrlID override → text match
-"Login"/"log in"/"enter game" … → longest enabled+visible non-close Button), then
-performs a REAL mouse click at the button's screen center (default) — BM_CLICK kept as
-a selectable fallback. Auto mode re-clicks every `g_clickIntervalMs` (1 s default) until
-the dialog disappears, then disarms. The debug tree lists every Button child with its
-CtrlID + a per-button "use"/"click" tester to pin the exact control on any build.
+**Implementation (`auto_login.cpp`): window-shape discovery (no game addresses) +
+programmatic press.** Finds the login dialog by child-window shape (process-owned
+window with ≥1 Edit + ≥1 Button child), finds the Login button (pinned CtrlID override
+→ text match → longest enabled+visible non-close Button), then — default method —
+sends `WM_LBUTTONDOWN` + `WM_LBUTTONUP` straight to the button HWND via `SendMessage`
+(**no cursor movement**), with `g_suppressImGuiWndProc` held so the fgui WndProc gets
+them clean. Auto mode re-clicks every `g_clickIntervalMs` (1 s default) until the dialog
+disappears, then disarms. Selectable methods: 0 = Message (default), 1 = SendInput real
+mouse (moves cursor), 2 = BM_CLICK (proven dead on this build). The debug tree lists
+every Button child with its CtrlID + per-button "use"/"click" testers.

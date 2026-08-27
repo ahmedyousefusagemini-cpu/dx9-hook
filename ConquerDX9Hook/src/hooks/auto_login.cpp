@@ -24,13 +24,22 @@
 //
 // CLICK MECHANISM (why not BM_CLICK): these are fgui-drawn controls, not
 // standard MFC buttons - BM_CLICK does nothing (784 clicks observed, zero
-// effect). The default method therefore performs a REAL mouse click
-// (SetCursorPos + SendInput LBDOWN/UP) at the button's screen center, which
-// also triggers the normal focus->killfocus->member-sync the handler needs.
-// A BM_CLICK method is kept as a selectable fallback, plus a button-ID
-// override and a full button list in the debug tree for pinning the exact
-// control on a given build.
+// effect). SendInput (real mouse) works but moves the cursor and interacts
+// badly with the ImGui overlay (the click fails when the overlay is visible
+// because the ImGui WndProc handler processes the synthetic mouse messages
+// before the fgui handler sees them).
+//
+// The default method therefore sends WM_LBUTTONDOWN + WM_LBUTTONUP directly
+// to the button HWND via SendMessage — purely programmatic, no cursor
+// movement, no OS hit-testing. The ImGui WndProc handler (which calls
+// SetCapture()/AddMouseButtonEvent() on every LBDOWN and corrupts the fgui
+// click when the overlay is open) is suppressed for the duration via the
+// g_suppressImGuiWndProc flag, so the game's own WndProc sees the raw
+// messages exactly like a real click.
+// SendInput (real mouse) is kept as option 1, BM_CLICK as option 2.
 // ============================================================================
+
+extern volatile bool g_suppressImGuiWndProc;
 
 namespace AutoLogin
 {
@@ -39,7 +48,7 @@ namespace AutoLogin
 	int  g_clickIntervalMs = 1000;   // min ms between automatic clicks
 	int  g_clickCount = 0;           // total clicks sent this session
 	bool g_loginCompleted = false;   // a click made the login dialog disappear
-	int  g_clickMethod = 0;          // 0 = real mouse click, 1 = BM_CLICK
+	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 
 	// Runtime discovery (cached, re-validated per frame).
@@ -269,11 +278,28 @@ namespace AutoLogin
 	// Clicking
 	// ------------------------------------------------------------------
 
+	// Synthetic press: WM_LBUTTONDOWN + WM_LBUTTONUP delivered straight to
+	// the button HWND. Synchronous (SendMessage), so the ImGui WndProc
+	// handler is suppressed for exactly these two messages - the game's own
+	// fgui WndProc sees them as a clean real click, no cursor movement.
+	static bool MessageClickButton(HWND button)
+	{
+		RECT rc;
+		if (!GetClientRect(button, &rc))
+			return false;
+		LPARAM pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
+
+		g_suppressImGuiWndProc = true;
+		SendMessage(button, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+		SendMessage(button, WM_LBUTTONUP, 0, pos);
+		g_suppressImGuiWndProc = false;
+		return true;
+	}
+
 	// Real mouse click at the button's screen center. Identical to a human
-	// click: moves the cursor over the control, presses and releases the left
-	// button. This is what the fgui UI layer actually responds to (BM_CLICK is
-	// ignored by these controls) and it naturally performs the focus switch
-	// that syncs the account/password fields before the handler runs.
+	// click (moves the cursor). Works, but the cursor jumps and the ImGui
+	// WndProc handler can corrupt the click while the overlay is open - use
+	// only when the message click proves insufficient.
 	static bool RealClickButton(HWND button)
 	{
 		RECT rc;
@@ -295,6 +321,21 @@ namespace AutoLogin
 		return true;
 	}
 
+	// Applies the user-selected click method to an arbitrary button HWND.
+	static bool ClickButtonMethod(HWND button)
+	{
+		if (!button || !IsWindow(button))
+			return false;
+		if (g_clickMethod == 1)
+			return RealClickButton(button);
+		if (g_clickMethod == 2)
+		{
+			SendMessage(button, BM_CLICK, 0, 0);
+			return true;
+		}
+		return MessageClickButton(button);
+	}
+
 	void ClickLoginOnce()
 	{
 		if (g_clickInProgress)
@@ -304,23 +345,10 @@ namespace AutoLogin
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
-		if (button)
+		if (button && ClickButtonMethod(button))
 		{
-			bool ok = false;
-			if (g_clickMethod == 1)
-			{
-				SendMessage(button, BM_CLICK, 0, 0);
-				ok = true;
-			}
-			else
-			{
-				ok = RealClickButton(button);
-			}
-			if (ok)
-			{
-				g_clickCount++;
-				g_lastClickTick = GetTickCount();
-			}
+			g_clickCount++;
+			g_lastClickTick = GetTickCount();
 		}
 
 		g_cachedDialog = dialog;
@@ -422,7 +450,7 @@ void RenderAutoLoginInterface()
 		AutoLogin::ClickLoginOnce();
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("(real mouse click on the Login button)");
+	ImGui::TextDisabled("(programmatic press, no cursor movement)");
 
 	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
 		AutoLogin::g_autoClickLogin)
@@ -436,7 +464,7 @@ void RenderAutoLoginInterface()
 	}
 
 	ImGui::Combo("Click method", &AutoLogin::g_clickMethod,
-		"Mouse (real click)\0BM_CLICK (fallback)\0");
+		"Message (no cursor)\0Mouse (real click)\0BM_CLICK\0");
 
 	if (AutoLogin::g_loginCompleted)
 	{
@@ -477,7 +505,7 @@ void RenderAutoLoginInterface()
 					AutoLogin::g_loginCompleted = false;
 					AutoLogin::g_cachedButton = bi.hwnd;
 					AutoLogin::g_clickInProgress = true;
-					AutoLogin::RealClickButton(bi.hwnd);
+					AutoLogin::ClickButtonMethod(bi.hwnd);
 					AutoLogin::g_clickInProgress = false;
 					AutoLogin::g_clickCount++;
 				}
