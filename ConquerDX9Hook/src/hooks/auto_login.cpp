@@ -87,9 +87,10 @@ namespace AutoLogin
 	const uintptr_t DLG_ACCOUNT_SSO      = 0x13B88;
 
 	// Client object + login dialog (see header comment).
-	// 2026-08-27 build: global moved 0x01A594F0 -> 0x01A549A0 (read by the
-	// client accessor FUN_0043e581, verified in Ghidra).
-	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A549A0; // CMyShellDlg main window (runtime-set, ~37MB)
+	// 2026-08-27 build: shell main-window global moved 0x01A594F0 -> 0x01A5A510
+	// (verified: dispatcher at 0x0089cf3f does MOV ECX,[0x01a5a510];
+	//  ADD ECX,0x39B948; CALL FUN_00bfee8b - the login-dialog gate).
+	const uintptr_t MAIN_CLIENT_GLOBAL  = 0x01A5A510; // CMyShellDlg main window (runtime-set, ~37MB)
 	const uintptr_t LOGIN_DIALOG_OFFSET = 0x39B948;   // dialog = client + 0x39B948
 	const uintptr_t DLG_HWND_OFFSET     = 0x20;       // dialog+0x20 = HWND
 	const uintptr_t DLG_PAIR_FLAG       = 0x13620;    // byte != 0 -> pair B (poker-only)
