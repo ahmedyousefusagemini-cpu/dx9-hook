@@ -205,7 +205,7 @@ void LoadConfig()
 	XpSkill::g_autoXpSkill = GetPrivateProfileIntA("XpSkill", "AutoXpSkill", 0, path) != 0;
 	XpSkill::g_autoXpOnlyWhileHunting = GetPrivateProfileIntA("XpSkill", "AutoXpOnlyWhileHunting", 1, path) != 0;
 	XpSkill::g_forceXpSkillId = GetPrivateProfileIntA("XpSkill", "ForceXpSkillId", 1, path) != 0;
-	XpSkill::g_forcedXpSkillId = GetPrivateProfileIntA("XpSkill", "ForcedXpSkillId", 47, path);
+	XpSkill::g_forcedXpSkillId = GetPrivateProfileIntA("XpSkill", "ForcedXpSkillId", 1110, path);
 
 	// --- Buffs ---
 	Buffs::g_buffsEnabled = GetPrivateProfileIntA("Buffs", "BuffsEnabled", 1, path) != 0;
