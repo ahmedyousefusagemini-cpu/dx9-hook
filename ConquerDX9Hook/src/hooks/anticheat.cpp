@@ -38,27 +38,20 @@ const Patch kExePatches[] = {
     { 0x00622D01, { 0x90,0x90,0x90,0x90,0x90,0x90 } },
 };
 
-// ---- Delay-load IAT slots for every anti-cheat DLL ------------------------
-// Conquer.exe delay-loads several DLLs through IAT slot tables in .data. Each
-// slot is pre-filled with the per-import delay-load helper stub; overwriting
-// the slot with the address of one of our no-op stubs makes the import resolve
-// to a harmless function and the target DLL is NEVER mapped.
+// ---- Delay-load IAT slots for TqNDProtect.dll only ------------------------
+// ndac.dll and Assist.dll are also in the delay-load table, but their thunks
+// are called at startup via vtables/indirect calls. Stubbing them to return 0
+// crashes the game on launch. Only TqNDProtect.dll (the self-decrypting CE
+// detector) is blocked — the game starts fine without it.
 //
 // Slot addresses verified against the PE delay-load directory @ VA 0x019DD4F0:
-//   ndac.dll        IAT VA 0x01A54474  -> RVA 0x01654474 (26 ordinal imports)
-//   Assist.dll      IAT VA 0x01A54378  -> RVA 0x01654378 (15 slots)
-//   TqNDProtect.dll IAT VA 0x01A54448  -> RVA 0x01654448 (3 imports)
+//   TqNDProtect.dll IAT VA 0x01A54448 -> RVA 0x01654448 (3 imports)
 //
 // Slot values must be POINTERS to executable stub code (below).
 
 const DWORD kInitSlotRva    = 0x01654448;   // TQNDP_Initialize
 const DWORD kDestroySlotRva = 0x0165444C;   // TQNDP_Destroy
 const DWORD kTokenSlotRva   = 0x01654450;   // TQNDP_GetPlayerToken
-
-const DWORD kNdacIatRva   = 0x01654474;
-const DWORD kNdacSlots    = 26;
-const DWORD kAssistIatRva = 0x01654378;
-const DWORD kAssistSlots  = 15;
 
 // Stub machine code. The thunks do `JMP [slot]`, so the stub address stored in
 // the slot must point to EXECUTABLE memory. We allocate one RWX page at init
@@ -128,18 +121,10 @@ bool InstallAntiCheatBypass()
     if (!WritePointer(kTokenSlotRva,   imageBase, g_stubNoop))
         ok = false;
 
-    // 3) Block ndac.dll (VMProtect anti-cheat) + Assist.dll by filling their
-    //    whole delay-load IAT with a generic no-op stub.
-    for (DWORD i = 0; i < kNdacSlots; ++i)
-    {
-        if (!WritePointer(kNdacIatRva + i * 4, imageBase, g_stubNoop))
-            ok = false;
-    }
-    for (DWORD i = 0; i < kAssistSlots; ++i)
-    {
-        if (!WritePointer(kAssistIatRva + i * 4, imageBase, g_stubNoop))
-            ok = false;
-    }
+    // NOTE: ndac.dll and Assist.dll IATs are deliberately NOT touched — the
+    // game calls into them at startup via indirect/vtable calls and stubbing
+    // them to return 0 crashes the process on launch. TqNDProtect.dll is the
+    // self-decrypting CE detector and the game starts cleanly without it.
 
     return ok;
 }

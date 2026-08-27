@@ -8,9 +8,8 @@
       <VariableType>Auto Assembler Script</VariableType>
       <AssemblerScript>
 // ============================================================
-// Conquer.exe + TqNDProtect.dll + ndac.dll + Assist.dll
-// — disable anti-debugging and anti-Cheat-Engine detection.
-// Memory-only, reversible.
+// Conquer.exe + TqNDProtect.dll — disable anti-debugging and
+// anti-Cheat-Engine detection. Memory-only, reversible.
 //
 // PART 1 — EXE (Conquer.exe, base 0x00400000, no ASLR):
 //   Login-dialog init checks (4x SoftICE device probes +
@@ -22,9 +21,10 @@
 //   Pre-poison detection-API slots so try_get_function() returns
 //   NULL for every detector call. (slot = DLLbase+0x38350+id*4)
 //
-// PART 3 — ndac.dll + Assist.dll delay-load IAT:
-//   Redirect all delay-load IAT slots to no-op stubs so the
-//   VMProtect anti-cheat DLLs never load.
+// NOTE: ndac.dll and Assist.dll delay-load IATs are NOT touched —
+// the game calls into them at startup; stubbing them crashes the
+// game on launch. TqNDProtect.dll is the CE detector and the game
+// runs fine without it.
 // ============================================================
 
 [ENABLE]
@@ -66,222 +66,7 @@ TqNDProtect.dll+3885C:
 TqNDProtect.dll+38544:
   dd 44BF19B1        // id 0x0DD DeviceIoControl
 
-// ---------------- PART 3: ndac.dll + Assist.dll delay-load IAT ----------------
-// Conquer.exe .data IAT slot tables (absolute VAs, EXE base 0x400000, no ASLR).
-// Redirect every slot to a no-op stub so these anti-cheat DLLs never load.
-// ndac.dll:    IAT 0x01A54474, 26 ordinal imports
-// Assist.dll:  IAT 0x01A54378, 15 slots
-
-// Allocate an executable stub (xor eax,eax; ret) that all the above slots
-// point at.
-alloc(cestubs, 64)
-cestubs:
-  db 33 C0 C3 90 90 90 90 90
-registersymbol(cestubs)
-
-// Point every slot at the allocated stub.
-01A54474:
-  dd cestubs
-01A54478:
-  dd cestubs
-01A5447C:
-  dd cestubs
-01A54480:
-  dd cestubs
-01A54484:
-  dd cestubs
-01A54488:
-  dd cestubs
-01A5448C:
-  dd cestubs
-01A54490:
-  dd cestubs
-01A54494:
-  dd cestubs
-01A54498:
-  dd cestubs
-01A5449C:
-  dd cestubs
-01A544A0:
-  dd cestubs
-01A544A4:
-  dd cestubs
-01A544A8:
-  dd cestubs
-01A544AC:
-  dd cestubs
-01A544B0:
-  dd cestubs
-01A544B4:
-  dd cestubs
-01A544B8:
-  dd cestubs
-01A544BC:
-  dd cestubs
-01A544C0:
-  dd cestubs
-01A544C4:
-  dd cestubs
-01A544C8:
-  dd cestubs
-01A544CC:
-  dd cestubs
-01A544D0:
-  dd cestubs
-01A544D4:
-  dd cestubs
-01A544D8:
-  dd cestubs
-01A54378:
-  dd cestubs
-01A5437C:
-  dd cestubs
-01A54380:
-  dd cestubs
-01A54384:
-  dd cestubs
-01A54388:
-  dd cestubs
-01A5438C:
-  dd cestubs
-01A54390:
-  dd cestubs
-01A54394:
-  dd cestubs
-01A54398:
-  dd cestubs
-01A5439C:
-  dd cestubs
-01A543A0:
-  dd cestubs
-01A543A4:
-  dd cestubs
-01A543A8:
-  dd cestubs
-01A543AC:
-  dd cestubs
-01A543B0:
-  dd cestubs
-
 [DISABLE]
-
-// ---------------- PART 1: Conquer.exe ----------------
-00A22CB8:
-  db 0F 85 B4 02 00 00
-00A22CCB:
-  db 0F 85 A1 02 00 00
-00A22CDE:
-  db 0F 85 8E 02 00 00
-00A22CF1:
-  db 0F 85 7B 02 00 00
-00A22CF7:
-  db FF 15 2C 52 4F 01
-00A22D01:
-  db 0F 85 6D 02 00 00
-
-// ---------------- PART 2: TqNDProtect.dll ----------------
-// Restore slots to 0 (empty = "resolve on demand"). The DLL
-// will lazily re-resolve these APIs via GetProcAddress.
-TqNDProtect.dll+3835C:
-  dd 00000000
-TqNDProtect.dll+38390:
-  dd 00000000
-TqNDProtect.dll+38808:
-  dd 00000000
-TqNDProtect.dll+3881C:
-  dd 00000000
-TqNDProtect.dll+3885C:
-  dd 00000000
-TqNDProtect.dll+38544:
-  dd 00000000
-
-// ---------------- PART 3: restore ndac.dll + Assist.dll IAT ----------------
-// Restore slots to 0 (empty = "resolve on demand" delay-load helper).
-01A54474:
-  dd 0
-01A54478:
-  dd 0
-01A5447C:
-  dd 0
-01A54480:
-  dd 0
-01A54484:
-  dd 0
-01A54488:
-  dd 0
-01A5448C:
-  dd 0
-01A54490:
-  dd 0
-01A54494:
-  dd 0
-01A54498:
-  dd 0
-01A5449C:
-  dd 0
-01A544A0:
-  dd 0
-01A544A4:
-  dd 0
-01A544A8:
-  dd 0
-01A544AC:
-  dd 0
-01A544B0:
-  dd 0
-01A544B4:
-  dd 0
-01A544B8:
-  dd 0
-01A544BC:
-  dd 0
-01A544C0:
-  dd 0
-01A544C4:
-  dd 0
-01A544C8:
-  dd 0
-01A544CC:
-  dd 0
-01A544D0:
-  dd 0
-01A544D4:
-  dd 0
-01A544D8:
-  dd 0
-01A54378:
-  dd 0
-01A5437C:
-  dd 0
-01A54380:
-  dd 0
-01A54384:
-  dd 0
-01A54388:
-  dd 0
-01A5438C:
-  dd 0
-01A54390:
-  dd 0
-01A54394:
-  dd 0
-01A54398:
-  dd 0
-01A5439C:
-  dd 0
-01A543A0:
-  dd 0
-01A543A4:
-  dd 0
-01A543A8:
-  dd 0
-01A543AC:
-  dd 0
-01A543B0:
-  dd 0
-
-dealloc(cestubs)
-unregistersymbol(cestubs)
 
 // ============================================================
 // Notes:
