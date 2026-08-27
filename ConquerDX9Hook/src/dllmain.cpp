@@ -5,8 +5,6 @@
 #include "hooks/common.h"
 #include "hooks/config.h"
 #include "hooks/anticheat.h"
-#include "hooks/ce_hide.h"
-#include "hooks/nt_hide.h"
 #include "MinHook.h"
 
 #pragma comment(lib, "d3d9.lib")
@@ -49,17 +47,6 @@ void ModuleLogThread()
 {
 	Sleep(2000); // give the game's own imports time to resolve
 	LogLoadedModules();
-	// Hook the anti-cheat's detection APIs now that everything is loaded.
-	// MinHook is initialized inside HookInitializationThread, but that thread
-	// waits on d3d9.dll; do it here so the hooks are up even if D3D is slow.
-	if (InstallCeHideHooks())
-		HookLog("CE-hide hooks installed");
-	else
-		HookLog("CE-hide hooks FAILED");
-	if (InstallNtHideHooks())
-		HookLog("NT-hide hooks installed");
-	else
-		HookLog("NT-hide hooks FAILED");
 }
 
 extern GameWindowInfo g_gameWindow;
