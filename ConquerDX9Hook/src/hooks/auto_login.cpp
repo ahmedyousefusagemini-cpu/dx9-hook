@@ -401,7 +401,7 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-	// Sends one real (SendInput) key event. vk-based events carry the virtual
+		// Sends one real (SendInput) key event. vk-based events carry the virtual
 	// key in wVk; text input uses KEYEVENTF_UNICODE with the char in wScan.
 	static void SendKey(WORD vk, WORD scan, DWORD flags)
 	{
@@ -413,31 +413,13 @@ namespace AutoLogin
 		SendInput(1, &in, sizeof(INPUT));
 	}
 
-	// Real mouse click at the screen center of a window (activates the fgui
-	// edit control for input - SetFocus alone is ignored by the framework).
-	static void RealClickAt(HWND hwnd)
-	{
-		RECT rc;
-		if (!GetWindowRect(hwnd, &rc))
-			return;
-		int cx = (rc.left + rc.right) / 2;
-		int cy = (rc.top + rc.bottom) / 2;
-		SetCursorPos(cx, cy);
-
-		INPUT mi = { 0 };
-		mi.type = INPUT_MOUSE;
-		mi.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-		SendInput(1, &mi, sizeof(mi));
-		mi.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-		SendInput(1, &mi, sizeof(mi));
-	}
-
 	// Types the account name into the account edit (the topmost VISIBLE Edit
-	// child) exactly like a human: real click on the field (activates the fgui
-	// edit - WM_SETTEXT and SetFocus alone are ignored), Ctrl+A, Delete, then
-	// real keystrokes for each character. On success, focus moves to the
-	// password field (fires the EN_KILLFOCUS sync and leaves the cursor ready
-	// for the password). Returns true when the field text matches afterwards.
+	// child) without moving the cursor: the suppressed synchronous
+	// WM_LBUTTONDOWN/WM_LBUTTONUP delivers the click that activates the fgui
+	// edit's input mode (SetFocus alone is ignored by the framework), then
+	// real keystrokes type Ctrl+A / Delete / the name. On success, focus moves
+	// to the password field (fires the EN_KILLFOCUS sync and leaves the cursor
+	// ready for the password). Returns true when the field text matches.
 	static bool TypeAccountName(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
@@ -450,9 +432,8 @@ namespace AutoLogin
 		if (!scan.top)
 			return false;
 
-		// 1) Activate the edit. Synchronous suppressed click first (immune to
-		//    the ImGui SetCapture corruption), then a real SendInput click as
-		//    the framework may require real input state.
+		// 1) Activate the edit with a synchronous click delivered straight to
+		//    its WndProc (ImGui suppressed - no OS cursor movement at all).
 		RECT rc;
 		LPARAM pos = 0;
 		if (GetClientRect(scan.top, &rc))
@@ -461,7 +442,6 @@ namespace AutoLogin
 		SendMessage(scan.top, WM_LBUTTONDOWN, MK_LBUTTON, pos);
 		SendMessage(scan.top, WM_LBUTTONUP, 0, pos);
 		g_suppressImGuiWndProc = false;
-		RealClickAt(scan.top);
 		Sleep(50);
 
 		// 2) Select all + delete any pre-filled text, then type the account.
