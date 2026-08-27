@@ -8,6 +8,49 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
+> **2026-08-27 (2): Auto-login — ImGui auto-click for the MFC Login button.**
+
+The login screen is a real MFC dialog (`CDlgLogin`, `myshell/dlglogin.cpp`) hosting
+a WS_CHILD window with real Edit (account/password) + Button (Login) HWND controls
+(live-confirmed earlier by the directx_hooks.cpp subclassing work). It also hosts an
+fgui canvas window named `login_xzk` (`0x01603D80`) for the themed background/buttons
+(`Login_xOrangeBtn`/`Login_xRedBtn` @ `0x015598F8`/`0x01559940`).
+
+RE-verified click chain (all on the 7950 build):
+- Login button BN_CLICKED → **`FUN_LoginButtonHandler` @ `0x008A8FCA`** — `__fastcall
+  (CDlgLogin*)`. Reads account (`dlg+0x13B88` std::string), password (`dlg+0x13BD0`
+  buffer), group/server ints (`dlg+0x135F8`/`+0x135FC`), server-name config, then calls
+  `FUN_0101C9D8`.
+- **`FUN_0101C9D8` @ `0x0101C9D8`** — `login(account, password, serverName, mode, extra)`:
+  mode 0 = `CMsgAccountEx` (`FUN_00F7F7E8`), mode 1 = QR code (`CMsgAccountByQRCode`,
+  `FUN_00DE30E0`), mode 2 = poker (`CMsgAccountPoker`, `FUN_00F7F9E3`). The actual
+  login-packet sender.
+- The handler is dispatched from the big UI event dispatcher (`FUN_00A5B653` area,
+  bodies run through `0x00A69E14`) with `ECX = appObj + 0x39B948` (the CDlgLogin
+  instance is a member of the main app object), gated by `FUN_00BFEE8B` =
+  `IsWindow(dlg+0x20) && IsWindowVisible(dlg+0x20)`.
+- `FUN_LoginButtonHandler` has NO static callers (function-pointer dispatch only —
+  MFC/fgui), so a byte-pattern search for its address `CA 8F 8A 00` finds nothing.
+  Found via the `dlglogin.cpp` path-string xref (`0x016035F8`), which Ghidra had named
+  `FUN_LoginButtonHandler`; the single `UNCONDITIONAL_CALL` xref to it is the
+  dispatcher at `0x00A5B90E`.
+
+Implementation (`auto_login.cpp`): **pure Win32, zero game addresses.** The overlay
+finds the login dialog by child-window shape (≥1 Edit + ≥1 Button, process-owned),
+finds the Login button (exact-text match on "Login"/"log in"/"enter game" etc. →
+fallback: longest-text enabled+visible non-close button), and sends
+`SendMessage(btn, BM_CLICK, 0, 0)` — the game's own code path, so
+server-select/config-save/packet-send all run exactly like a human click. Auto mode
+re-clicks every 1 s (configurable) until the dialog disappears (= login went through),
+then self-disables; a manual "Click Login Now" button is also exposed. This needs NO
+re-finding after a recompile (window-enumeration based).
+
+Gotcha: `FUN_008827D2` (the server-info reader the handler calls) is NOT the login
+sender — it just loads `ServerIP`/`ServerPort` etc. from ini. The one-and-only login
+packet builder is `FUN_0101C9D8`.
+
+---
+
 > **2026-08-27: client recompiled again (version 7950).** All hook modules
 > re-pointed at the new build via Ghidra MCP. Full migration table in OFFSETS.md.
 > Key AOB signatures from the 2026-08-20 work still matched; the re-find workflow

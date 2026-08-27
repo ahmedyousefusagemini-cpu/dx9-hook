@@ -637,3 +637,34 @@ and the status-gate path (status 10/5) were verified NOT live in this build
 status ids remain in the UI as an optional OR-fallback for other servers.
 Waits for hero+0x193C to flip (5s timeout) before re-arming; 1.5s send
 cooldown; auto-stops after 2 consecutive unconfirmed sends.
+
+---
+
+## Login flow / Auto Login (VERIFIED on client 7950)
+
+The login screen is a real MFC dialog `CDlgLogin` (source `myshell/dlglogin.cpp`,
+RTTI string `CDlgLogin` @ `0x016036A0`) with real Edit (account/password/token) +
+Button (Login) HWND controls, plus an fgui canvas `login_xzk` (`0x01603D80`) for the
+themed chrome (`Login_xOrangeBtn`/`Login_xRedBtn` @ `0x015598F8`/`0x01559940`).
+
+| Function | Address | Meaning |
+|---|---|---|
+| `FUN_LoginButtonHandler` | `0x008A8FCA` | `__fastcall(CDlgLogin*)` — the Login button handler. Reads account (`dlg+0x13B88` std::string), password (`dlg+0x13BD0` buffer), group/server (`dlg+0x135F8`/`+0x135FC`), server name; then calls `FUN_0101C9D8` |
+| `FUN_0101C9D8` | `0x0101C9D8` | **the login-packet sender**: `login(account, password, serverName, mode, extra)`. mode 0 → `CMsgAccountEx` (`FUN_00F7F7E8`), 1 → QR `CMsgAccountByQRCode` (`FUN_00DE30E0`), 2 → poker `CMsgAccountPoker` (`FUN_00F7F9E3`) |
+| `FUN_00BFEE8B` | `0x00BFEE8B` | visibility gate used by the dispatcher: `IsWindow(dlg+0x20) && IsWindowVisible(dlg+0x20)` |
+| dispatcher call site | `0x00A5B90E` | `LEA ECX,[EBX+0x39B948]; CALL FUN_LoginButtonHandler` — CDlgLogin instance = `appObj+0x39B948` |
+| `FUN_008A965F` | `0x008A965F` | the server-select-first variant (called instead when the client must pick a server before login) |
+| `FUN_0089C013` | `0x0089C013` | `CDlgLogin::Process` (per-frame input/focus handling; identifies the edits via `dlg+0xCD0`/`+0xFE8`/`+0x1300` CWnd members) |
+| `login_xzk` fgui window | `0x01603D80` | shown via `FUN_00875E43`, hidden via `FUN_008A79AE` |
+
+Re-find anchors: the `dlglogin.cpp` path string `0x016035F8` — its code xrefs land in
+every `CDlgLogin` method (Ghidra auto-names the handler `FUN_LoginButtonHandler`);
+the `"CDlgLogin"` RTTI string `0x016036A0` → type-info at `0x015FD208`.
+
+**Implementation (`auto_login.cpp`): pure Win32 — no game addresses.** Finds the login
+dialog by window shape (process-owned window with ≥1 Edit + ≥1 Button child), finds the
+Login button (ASCII text match "Login"/"log in"/"enter game" …, else the longest-text
+enabled+visible non-close Button), then `SendMessage(btn, BM_CLICK, 0, 0)` → the game's
+own BN_CLICKED → `FUN_LoginButtonHandler` chain. Auto mode re-clicks every `g_clickIntervalMs`
+(1 s default) until the dialog disappears, then disarms. Survives recompiles untouched —
+nothing to re-find.

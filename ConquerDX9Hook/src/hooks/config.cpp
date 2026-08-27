@@ -69,6 +69,12 @@ namespace GearSwap
 	extern int  g_iconStatusIdB;
 }
 
+namespace AutoLogin
+{
+	extern bool g_autoClickLogin;
+	extern int  g_clickIntervalMs;
+}
+
 extern bool g_isWireframeEnabled;
 
 static const char* GetConfigPath()
@@ -145,6 +151,10 @@ void SaveConfig()
 	WritePrivateProfileStringA("GearSwap", "AutoSwap", GearSwap::g_autoSwap ? "1" : "0", path);
 	WriteInt("GearSwap", "IconStatusIdA", GearSwap::g_iconStatusIdA);
 	WriteInt("GearSwap", "IconStatusIdB", GearSwap::g_iconStatusIdB);
+
+	// --- Auto Login ---
+	WritePrivateProfileStringA("AutoLogin", "AutoClick", AutoLogin::g_autoClickLogin ? "1" : "0", path);
+	WriteInt("AutoLogin", "ClickIntervalMs", AutoLogin::g_clickIntervalMs);
 }
 
 void LoadConfig()
@@ -214,6 +224,12 @@ void LoadConfig()
 	GearSwap::g_autoSwap = GetPrivateProfileIntA("GearSwap", "AutoSwap", 0, path) != 0;
 	GearSwap::g_iconStatusIdA = GetPrivateProfileIntA("GearSwap", "IconStatusIdA", 10, path);
 	GearSwap::g_iconStatusIdB = GetPrivateProfileIntA("GearSwap", "IconStatusIdB", 5, path);
+
+	// --- Auto Login ---
+	AutoLogin::g_autoClickLogin = GetPrivateProfileIntA("AutoLogin", "AutoClick", 0, path) != 0;
+	AutoLogin::g_clickIntervalMs = GetPrivateProfileIntA("AutoLogin", "ClickIntervalMs", 1000, path);
+	if (AutoLogin::g_clickIntervalMs < 250) AutoLogin::g_clickIntervalMs = 250;
+	if (AutoLogin::g_clickIntervalMs > 5000) AutoLogin::g_clickIntervalMs = 5000;
 
 	// --- Apply side effects ---
 	// The enable paths kick off the my-role scan / raise the speed cap table

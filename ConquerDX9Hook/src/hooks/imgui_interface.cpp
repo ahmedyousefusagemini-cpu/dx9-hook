@@ -14,6 +14,8 @@ extern void RenderBuffsInterface();
 extern void ApplyBuffsClientState();
 extern void RenderGearSwapInterface();
 extern void ApplyGearSwapClientState();
+extern void RenderAutoLoginInterface();
+extern void ApplyAutoLoginState();
 
 // Diagnostics from directx_hooks.cpp
 extern unsigned long g_debugMouseMessageCount;
@@ -38,6 +40,9 @@ void RenderImGuiInterface()
 
 	// Auto gear swap ticks every frame too (XP buff edge detection).
 	ApplyGearSwapClientState();
+
+	// Auto login re-checks the MFC login dialog and clicks when armed.
+	ApplyAutoLoginState();
 
 	if (!g_gameWindow.isGuiWindowOpen) 
 		return;
@@ -78,6 +83,10 @@ void RenderImGuiInterface()
 	ImGui::Spacing();
 
 	RenderGearSwapInterface();
+	
+	ImGui::Spacing();
+
+	RenderAutoLoginInterface();
 	
 	ImGui::Spacing();
 	ImGui::Separator();
