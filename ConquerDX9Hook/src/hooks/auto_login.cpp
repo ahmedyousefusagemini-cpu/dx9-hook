@@ -60,6 +60,7 @@ namespace AutoLogin
 	// Active account loaded from accountinfo.ini ([AccountN] Use=1 -> User).
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
 	char g_accountSection[32] = "";  // the section name, e.g. "Account2"
+	char g_fillStatus[96] = "";      // last "Fill Account" result
 
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
@@ -400,21 +401,43 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-	// Sends one real (SendInput) key event.
-	static void SendKey(WORD scan, DWORD flags)
+	// Sends one real (SendInput) key event. vk-based events carry the virtual
+	// key in wVk; text input uses KEYEVENTF_UNICODE with the char in wScan.
+	static void SendKey(WORD vk, WORD scan, DWORD flags)
 	{
 		INPUT in = { 0 };
 		in.type = INPUT_KEYBOARD;
+		in.ki.wVk = vk;
 		in.ki.wScan = scan;
 		in.ki.dwFlags = flags;
 		SendInput(1, &in, sizeof(INPUT));
 	}
 
+	// Real mouse click at the screen center of a window (activates the fgui
+	// edit control for input - SetFocus alone is ignored by the framework).
+	static void RealClickAt(HWND hwnd)
+	{
+		RECT rc;
+		if (!GetWindowRect(hwnd, &rc))
+			return;
+		int cx = (rc.left + rc.right) / 2;
+		int cy = (rc.top + rc.bottom) / 2;
+		SetCursorPos(cx, cy);
+
+		INPUT mi = { 0 };
+		mi.type = INPUT_MOUSE;
+		mi.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+		SendInput(1, &mi, sizeof(mi));
+		mi.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+		SendInput(1, &mi, sizeof(mi));
+	}
+
 	// Types the account name into the account edit (the topmost VISIBLE Edit
-	// child) with REAL keystrokes - the fgui edit controls ignore WM_SETTEXT,
-	// but they accept normal input exactly like a human typing. Selects and
-	// clears any existing text first (Ctrl+A, Delete). Returns true when the
-	// field text matches the account afterwards.
+	// child) exactly like a human: real click on the field (activates the fgui
+	// edit - WM_SETTEXT and SetFocus alone are ignored), Ctrl+A, Delete, then
+	// real keystrokes for each character. On success, focus moves to the
+	// password field (fires the EN_KILLFOCUS sync and leaves the cursor ready
+	// for the password). Returns true when the field text matches afterwards.
 	static bool TypeAccountName(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
@@ -427,29 +450,44 @@ namespace AutoLogin
 		if (!scan.top)
 			return false;
 
-		SetFocus(scan.top);
+		// 1) Activate the edit. Synchronous suppressed click first (immune to
+		//    the ImGui SetCapture corruption), then a real SendInput click as
+		//    the framework may require real input state.
+		RECT rc;
+		LPARAM pos = 0;
+		if (GetClientRect(scan.top, &rc))
+			pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
+		g_suppressImGuiWndProc = true;
+		SendMessage(scan.top, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+		SendMessage(scan.top, WM_LBUTTONUP, 0, pos);
+		g_suppressImGuiWndProc = false;
+		RealClickAt(scan.top);
+		Sleep(50);
 
-		// Select all + delete any pre-filled text, then type the account.
-		SendKey(VK_CONTROL, 0);           // Ctrl down
-		SendKey('A', 0);                  // A down (Ctrl+A = select all)
-		SendKey('A', KEYEVENTF_KEYUP);
-		SendKey(VK_CONTROL, KEYEVENTF_KEYUP);
-		SendKey(VK_DELETE, 0);            // delete selection
-		SendKey(VK_DELETE, KEYEVENTF_KEYUP);
+		// 2) Select all + delete any pre-filled text, then type the account.
+		SendKey(VK_CONTROL, 0, 0);                 // Ctrl down
+		SendKey('A', 0, 0);                        // A down (Ctrl+A = select all)
+		SendKey('A', 0, KEYEVENTF_KEYUP);
+		SendKey(VK_CONTROL, 0, KEYEVENTF_KEYUP);
+		SendKey(VK_DELETE, 0, 0);                  // delete selection
+		SendKey(VK_DELETE, 0, KEYEVENTF_KEYUP);
 
 		for (const char* p = g_activeAccount; *p; p++)
 		{
-			SendKey((WORD)(unsigned char)*p, KEYEVENTF_UNICODE);
-			SendKey((WORD)(unsigned char)*p, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+			SendKey(0, (WORD)(unsigned char)*p, KEYEVENTF_UNICODE);
+			SendKey(0, (WORD)(unsigned char)*p, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
 		}
+		Sleep(30);
 
-		// Move focus to the password field (syncs the member + ready for input).
-		if (scan.second && IsWindow(scan.second))
-			SetFocus(scan.second);
-
+		// 3) Verify the text landed, then move to the password field (only on
+		//    success - that syncs the member and puts the cursor where the
+		//    password goes).
 		char after[128] = "";
 		GetWindowTextA(scan.top, after, sizeof(after));
-		return lstrcmpA(after, g_activeAccount) == 0;
+		bool ok = lstrcmpA(after, g_activeAccount) == 0;
+		if (ok && scan.second && IsWindow(scan.second))
+			SetFocus(scan.second);
+		return ok;
 	}
 
 	// ------------------------------------------------------------------
@@ -543,9 +581,13 @@ namespace AutoLogin
 		if (!IsDialogUsable(dialog))
 			dialog = g_cachedDialog;
 		if (!IsDialogUsable(dialog))
+		{
+			strcpy_s(g_fillStatus, "no login dialog found");
 			return;
+		}
 		g_cachedDialog = dialog;
-		TypeAccountName(dialog);
+		bool ok = TypeAccountName(dialog);
+		strcpy_s(g_fillStatus, ok ? "account typed OK" : "FAILED - see Edit fields below");
 	}
 
 	// ------------------------------------------------------------------
@@ -649,6 +691,14 @@ void RenderAutoLoginInterface()
 		AutoLogin::FillAccountNow();
 	}
 	ImGui::TextDisabled("(programmatic press / types the account, no cursor movement)");
+	if (AutoLogin::g_fillStatus[0])
+	{
+		bool ok = strstr(AutoLogin::g_fillStatus, "OK") != NULL;
+		if (ok)
+			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", AutoLogin::g_fillStatus);
+		else
+			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", AutoLogin::g_fillStatus);
+	}
 
 	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
 		AutoLogin::g_autoClickLogin)
