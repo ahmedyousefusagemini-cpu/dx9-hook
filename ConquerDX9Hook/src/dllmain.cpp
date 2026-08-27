@@ -23,19 +23,22 @@ static void HookLog(const char* fmt, ...)
 
 static void LogLoadedModules()
 {
-	char buf[4096]; buf[0]=0;
+	wchar_t buf[4096]; buf[0]=0;
 	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
 	if (snap == INVALID_HANDLE_VALUE) { HookLog("ModuleSnap failed"); return; }
-	MODULEENTRY32 me; me.dwSize = sizeof(me);
-	if (Module32First(snap, &me)) {
+	MODULEENTRY32W me; me.dwSize = sizeof(me);
+	if (Module32FirstW(snap, &me)) {
 		do {
-			if (strlen(buf) + strlen(me.szModule) + 2 < sizeof(buf)) {
-				strcat_s(buf, me.szModule); strcat_s(buf, " ");
+			size_t n = wcslen(me.szModule);
+			if (wcslen(buf) + n + 2 < 4096) {
+				wcscat_s(buf, me.szModule); wcscat_s(buf, L" ");
 			}
-		} while (Module32Next(snap, &me));
+		} while (Module32NextW(snap, &me));
 	}
 	CloseHandle(snap);
-	HookLog("Loaded modules: %s", buf);
+	char ascii[8192]; ascii[0]=0;
+	WideCharToMultiByte(CP_ACP, 0, buf, -1, ascii, (int)sizeof(ascii), NULL, NULL);
+	HookLog("Loaded modules: %s", ascii);
 }
 
 // Runs LogLoadedModules() safely OUTSIDE DllMain (CreateToolhelp32Snapshot in
