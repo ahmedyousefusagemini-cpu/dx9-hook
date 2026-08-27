@@ -206,3 +206,55 @@ Writing `0x44BF19B1` into a slot makes `try_get_function` decode it to `0xFFFFFF
   `TQNDPCAnaly.dll` (packet telemetry, loaded by the EXE) — next step is dynamic
   observation with the live debugger once attach works.
 
+---
+
+## 8. Full anti-cheat module review (H:\client + H:\client\Env_DX9)
+
+All anti-cheat/auxiliary DLLs were imported into Ghidra and reviewed.
+Columns: how the game reaches it, what it does, and whether it can detect CE.
+
+### 8.1 Loaded by Conquer.exe (delay-load descriptors @ 0x019DD4F0)
+
+| DLL | Descriptor | IAT (RVA) | Slots | Purpose | CE detection? | Blocked? |
+|---|---|---|---|---|---|---|
+| `TqNDProtect.dll` | 0x019DD584 | 0x01654448 | 3 | self-decrypting anti-cheat; API-cache `try_get_function` | **YES** (watchdog in decrypted blob) | ✅ in hook |
+| `ndac.dll` | 0x019DD534 | 0x01654474 | 26 (ordinals) | 18.7MB **VMProtect** `.gfids`; `.rc00`/`.rc02` packed exec | likely (obfuscated) | ✅ in hook |
+| `Assist.dll` | 0x019DD55C | 0x01654378 | 10 | `CMonitorManager` process/window monitor (`monitor.ini`) | partial (enumerates processes) | ✅ in hook |
+| `C3Browser.dll` | 0x019DD5D4 | 0x01654340 | — | embedded browser (web views) | no | ❌ (harmless) |
+| `RecordGame.dll` | 0x019DD5AC | 0x01654384 | — | game recorder | no | ❌ (harmless) |
+
+Key detail: `Assist.dll` imports `Process32First/Next` + `CreateToolhelp32Snapshot`
+(process enumeration) and `GetForegroundWindow`/`EnumChildWindows`/`GetClassNameA`
+(window scanning) — a process/watchdog monitor. `StartMonitor` had no statically
+visible caller (started via vtable/register), so it may be armed at runtime.
+`ndac.dll`'s 26 delay-load thunks had no direct code callers either — both were
+never invoked through statically-tracked paths, but the crash proves one of them
+(or TqNDProtect) runs at CE-open time; blocking all three IATs covers it.
+
+### 8.2 Not statically referenced by Conquer.exe (launcher-side / auxiliary)
+
+| DLL | Size | Purpose | CE detection? |
+|---|---|---|---|
+| `AntiRobotClient.dll` | 2.9MB | `AntiRobo` export; obfuscated (EFLAGS reconstruction); Winsock + registry + `GetVolumeInformationW` (machine bind) | possible but not referenced by game |
+| `TQAnp.dll` | 5.3MB | `TQANP_PackVerifyData`; IPHLPAPI (MAC) + WININET | no (packet verify) |
+| `TQPlat.dll` | 7.5MB | 129 stripped `EXT_` exports; `IsDebuggerPresent` string | unknown (protected) |
+| `license.dll` | 3.3MB | `Inject` export; licensing + `regkey.dat` machine binding | no |
+| `nd_lanucher.exe` | 2.7MB | bootstrap: `CreateProcess("Conquer")`, no injection APIs | no |
+
+### 8.3 Checked and cleared
+
+| DLL | Verdict |
+|---|---|
+| `TQNDPCAnaly.dll` | analytics SDK only (`CTQNDPCAnalyApp` event logger; `IsDebuggerPresent` is a bare name string, no callers) — not a CE detector |
+| `ndCompress.dll`, `ndist.dll`, `NDSound.dll`, `TqPackage*.dll`, `tqpdata.dll` | compression/distribution/audio/package utils — not anti-cheat |
+
+### 8.4 Bottom line
+
+The only modules that can crash the game on CE open are the three now blocked in
+`anticheat.cpp`: `TqNDProtect.dll`, `ndac.dll`, `Assist.dll`. If the crash persists
+after the build with all three IATs redirected, the detector is **outside the game
+process** — i.e. Kaspersky (its `klhkum` hook is injected into Conquer.exe and
+Kaspersky HIPS reacts to CE's kernel driver / known-cheat process), which must be
+handled via Kaspersky exclusions rather than game patching.
+
+
