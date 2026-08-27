@@ -44,26 +44,26 @@ void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
 
 // ============================================================================
 // WM_AUTOLOGIN_CLICK handler: the overlay's "Click Login" button posted this
-// to the dialog's HWND.  Replicates the REAL Login button dispatch EXACTLY -
-// this is what the shell window's WM_COMMAND case at 0x00a5b8dd does and
-// nothing more:
+// to the dialog's HWND.  It reproduces a REAL button click by posting the
+// same WM_COMMAND the MFC Login button sends - so the game's OWN message
+// dispatch runs the login at the top of its message loop, exactly like a
+// human click:
 //
-//   1. FUN_00bfee7b(dialog,1)  - IsWindow + IsWindowVisible gate (0x00a5b8eb)
-//   2. FUN_008a8fba(dialog)    - the Login handler (GetServerInfo + credential
-//                                send) at 0x00a5b8fe
+//   PostMessage(dialog, WM_COMMAND, MAKEWPARAM(0xCDF, BN_CLICKED), btnHwnd)
 //
-// The account-server connection is ALREADY up whenever the user can see and
-// click Login (the realm-row handler / dialog init dials it).  Do NOT add the
-// realm-row handler (FUN_008a9348) here - it re-resolves the realm and RESETS
-// the login form state (FUN_0113fd9f), wiping the account/password the user
-// just typed, which produces "Failed to login: Invalid Account ID or
-// Password" even with correct credentials.  A real MFC Login click never runs
-// it.  (VERIFIED 2026-08-27: manual creds + real button logged in; the same
-// creds + this handler's former prime step were rejected.)
+//   -> MFC routes to the shell window's WM_COMMAND case at 0x00a5b8dd
+//      -> FUN_00bfee7b(dialog,1)   visibility gate (0x00a5b8eb)
+//      -> FUN_008a8fba(dialog)     Login handler (0x00a5b8fe)
 //
-// Do NOT SendMessage(BM_CLICK): that re-enters MFC and blocks ~2.1s (socket
-// already connected) and then the handler never sends (log evidence
-// 2026-08-27) - it also made the whole UI unresponsive.
+// Control id 0xCDF is the Login button (Ghidra-verified: the shell switch at
+// 0x00a5b60b maps 0xCDF -> case 9 -> 0x00a5b8dd).
+//
+// WHY a posted WM_COMMAND and NOT a direct call: the direct call runs NESTED
+// inside this WndProc - FUN_008a8fba does GetServerInfo + socket work that
+// needs the game's message loop to advance, and a nested call can't (the
+// login silently does nothing).  A real click is queued through the message
+// loop, which is why it works.  PostMessage is async, so no re-entrancy, no
+// ~2.1s BM_CLICK block, no dead UI.
 // ============================================================================
 static HANDLE g_alClickMap = nullptr;
 static unsigned long* g_alClickTick = nullptr;
@@ -82,9 +82,9 @@ static unsigned long* AlClickSharedTick()
 	return g_alClickTick;
 }
 
-// Native anchors (client 7937).
-#define AL_LOGIN_HANDLER  0x008A8FBA   // FUN_008a8fba - Login button handler
-#define AL_VISIBLE_GATE   0x00BFEE7B   // FUN_00bfee7b - IsWindow+IsWindowVisible gate
+// The MFC Login button's control id inside the account-login dialog
+// (Ghidra-verified, see comment above).
+#define AL_LOGIN_BUTTON_ID 0xCDF
 
 void HandleAutoLoginClick(void* dialog)
 {
@@ -108,23 +108,34 @@ void HandleAutoLoginClick(void* dialog)
 		return;
 	}
 
+	// The game only processes the Login command while the dialog is visible
+	// (IsWindowVisible gate at 0x00a5b8eb).  Skip posting if hidden.
 	__try {
-		// 1. Visibility gate - the exact check the shell window does at
-		//    0x00a5b8eb before CALL FUN_008a8fba.  Skip if hidden.
 		typedef int (__fastcall* GateFn)(void* dlg, int one);
-		if (((GateFn)AL_VISIBLE_GATE)(dialog, 1) == 0) {
+		if (((GateFn)0x00BFEE7B)(dialog, 1) == 0) {
 			AutoLoginLogFromHook("CLICK dialog not visible, skipping", dialog, dlgHwnd);
 			return;
 		}
-
-		// 2. The Login handler - GetServerInfo + credential send.  This is the
-		//    ONLY call the real MFC Login button makes (0x00a5b8fe).  It reads
-		//    the account/password the user typed into the dialog's own fields.
-		typedef void (__fastcall* LoginBtnFn)(void* dialog);
-		((LoginBtnFn)AL_LOGIN_HANDLER)(dialog);
-		AutoLoginLogFromHook("CLICK dispatched FUN_008a8fba (login send)", dialog, dlgHwnd);
 	} __except(EXCEPTION_EXECUTE_HANDLER) {
-		AutoLoginLogFromHook("CLICK EXCEPTION", dialog, dlgHwnd);
+		AutoLoginLogFromHook("CLICK visibility gate exception", dialog, dlgHwnd);
+	}
+
+	// Find the real Login button's HWND for the WM_COMMAND lParam (optional -
+	// MFC routes on the control id, but passing the real hwnd is faithful).
+	HWND loginBtn = GetDlgItem(dlgHwnd, AL_LOGIN_BUTTON_ID);
+
+	// Post (async) - the game's message loop will dispatch it as a genuine
+	// Login-button command.  No direct call, no BM_CLICK.
+	if (PostMessageA(dlgHwnd, WM_COMMAND,
+		MAKEWPARAM(AL_LOGIN_BUTTON_ID, BN_CLICKED),
+		loginBtn ? (LPARAM)loginBtn : 0))
+	{
+		AutoLoginLogFromHook("CLICK posted WM_COMMAND(0xCDF, BN_CLICKED) - login will dispatch via game loop",
+			dialog, dlgHwnd);
+	}
+	else
+	{
+		AutoLoginLogFromHook("CLICK PostMessage(WM_COMMAND) FAILED", dialog, dlgHwnd);
 	}
 }
 
