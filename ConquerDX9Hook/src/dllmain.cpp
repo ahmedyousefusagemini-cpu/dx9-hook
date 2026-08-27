@@ -1,16 +1,14 @@
 #include <windows.h>
-#include <tlhelp32.h>
 #include <cstdio>
 #include <cstdarg>
 #include "hooks/common.h"
 #include "hooks/config.h"
-#include "hooks/anticheat.h"
 #include "MinHook.h"
 
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "libMinHook.x86.lib")
 
-void HookLog(const char* fmt, ...)
+static void HookLog(const char* fmt, ...)
 {
 	char exePath[MAX_PATH]={0};
 	if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) return;
@@ -19,34 +17,6 @@ void HookLog(const char* fmt, ...)
 	FILE* f=nullptr; if(fopen_s(&f,logPath,"a")!=0||!f) return;
 	va_list ap; va_start(ap,fmt); vfprintf(f,fmt,ap); va_end(ap);
 	fprintf(f,"\n"); fclose(f);
-}
-
-static void LogLoadedModules()
-{
-	wchar_t buf[4096]; buf[0]=0;
-	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-	if (snap == INVALID_HANDLE_VALUE) { HookLog("ModuleSnap failed"); return; }
-	MODULEENTRY32W me; me.dwSize = sizeof(me);
-	if (Module32FirstW(snap, &me)) {
-		do {
-			size_t n = wcslen(me.szModule);
-			if (wcslen(buf) + n + 2 < 4096) {
-				wcscat_s(buf, me.szModule); wcscat_s(buf, L" ");
-			}
-		} while (Module32NextW(snap, &me));
-	}
-	CloseHandle(snap);
-	char ascii[8192]; ascii[0]=0;
-	WideCharToMultiByte(CP_ACP, 0, buf, -1, ascii, (int)sizeof(ascii), NULL, NULL);
-	HookLog("Loaded modules: %s", ascii);
-}
-
-// Runs LogLoadedModules() safely OUTSIDE DllMain (CreateToolhelp32Snapshot in
-// DllMain can deadlock under the loader lock). Called once from the hook thread.
-void ModuleLogThread()
-{
-	Sleep(2000); // give the game's own imports time to resolve
-	LogLoadedModules();
 }
 
 extern GameWindowInfo g_gameWindow;
@@ -188,17 +158,7 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 	
 		DisableThreadLibraryCalls(moduleHandle);
 
-		// Neutralize the game's anti-debug / anti-CE (IsDebuggerPresent +
-		// SoftICE probes in the login dialog init, and TqNDProtect/ndac/
-		// Assist delay-load watchdogs) before the game's own init runs.
-		// Memory-only.
-		if (InstallAntiCheatBypass())
-			HookLog("AntiCheat bypass: applied (debugger/SoftICE/TQNDP/ndac/Assist blocked)");
-		else
-			HookLog("AntiCheat bypass: FAILED");
-
 		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)HookInitializationThread, NULL, 0, NULL);
-		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ModuleLogThread, NULL, 0, NULL);
 		break;
 		
 	case DLL_PROCESS_DETACH:
