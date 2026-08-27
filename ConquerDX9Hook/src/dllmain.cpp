@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include "hooks/common.h"
 #include "hooks/config.h"
+#include "hooks/anticheat.h"
 #include "MinHook.h"
 
 #pragma comment(lib, "d3d9.lib")
@@ -157,6 +158,14 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 	case DLL_PROCESS_ATTACH:
 	
 		DisableThreadLibraryCalls(moduleHandle);
+
+		// Neutralize the game's anti-debug / anti-CE (IsDebuggerPresent +
+		// SoftICE probes in the login dialog init, and TqNDProtect.dll's
+		// delay-load watchdog) before the game's own init runs. Memory-only.
+		if (InstallAntiCheatBypass())
+			HookLog("AntiCheat bypass: applied (debugger/SoftICE/TQNDP blocked)");
+		else
+			HookLog("AntiCheat bypass: FAILED");
 
 		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)HookInitializationThread, NULL, 0, NULL);
 		break;
