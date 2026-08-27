@@ -82,7 +82,7 @@ void RenderImGuiInterface()
 	ImGui::Spacing();
 	ImGui::Separator();
 
-	// Persist the current settings to ConquerHook.ini (next to the game exe).
+	// Persist the current settings to coinfo.ini (next to the game exe).
 	// They are restored automatically on the next launch (LoadConfig in
 	// dllmain.cpp).
 	static char g_configStatus[64] = "";
@@ -90,14 +90,14 @@ void RenderImGuiInterface()
 	if (ImGui::Button("Save Config"))
 	{
 		SaveConfig();
-		strcpy_s(g_configStatus, "saved to ConquerHook.ini");
+		strcpy_s(g_configStatus, "saved to coinfo.ini");
 		g_configStatusTick = GetTickCount();
 	}
 	ImGui::SameLine();
 	if (ImGui::Button("Load Config"))
 	{
 		LoadConfig();
-		strcpy_s(g_configStatus, "loaded from ConquerHook.ini");
+		strcpy_s(g_configStatus, "loaded from coinfo.ini");
 		g_configStatusTick = GetTickCount();
 	}
 	if (GetTickCount() - g_configStatusTick < 3000)

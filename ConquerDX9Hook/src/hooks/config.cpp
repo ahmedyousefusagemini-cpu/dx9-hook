@@ -4,9 +4,9 @@
 #include "config.h"
 
 // ============================================================================
-// Config persistence (ConquerHook.ini)
+// Config persistence (coinfo.ini)
 // ----------------------------------------------------------------------------
-// Saves the overlay's feature settings into ConquerHook.ini next to the game
+// Saves the overlay's feature settings into coinfo.ini next to the game
 // exe (same folder as overlay.ini). LoadConfig() runs at startup so the last
 // session's settings are restored automatically; SaveConfig() is wired to the
 // "Save Config" button in the ImGui menu.
@@ -81,7 +81,7 @@ static const char* GetConfigPath()
 		char* slash = strrchr(path, '\\');
 		if (slash)
 			*(slash + 1) = '\0';
-		strcat_s(path, "ConquerHook.ini");
+		strcat_s(path, "coinfo.ini");
 	}
 	return path;
 }
