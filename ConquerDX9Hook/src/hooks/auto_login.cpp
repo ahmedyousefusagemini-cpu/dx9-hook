@@ -1219,6 +1219,7 @@ static void LoadConfig()
 // Support check: the two anchor prologues must match this build.
 // ============================================================================
 #endif  // ================= END OLD AUTO-LOGIN: ini config =================
+#if 0  // ================= OLD AUTO-LOGIN: support check =================
 static bool IsSupported()
 {
 	if (IsBadReadPtr((const void*)AutoLogin::LOGIN_SEND_ADDRESS, 12)) {
@@ -1248,6 +1249,7 @@ static bool IsSupported()
 
 	return true;
 }
+#endif  // ================= END OLD AUTO-LOGIN: support check =================
 
 // ============================================================================
 // Hooks
@@ -1571,6 +1573,7 @@ bool  InstallHooks()
 
 // Hot-reload helper - checks mtime every 1500ms
 #endif  // ================= END OLD AUTO-LOGIN: hooks =================
+#if 0  // ================= OLD AUTO-LOGIN: config hot-reload =================
 static unsigned long g_lastConfigCheckTick = 0;
 static FILETIME g_lastConfigWriteTime = {0};
 static unsigned long g_lastDiagTick = 0;
@@ -1603,6 +1606,7 @@ static void MaybeReloadConfig(unsigned long now)
 		}
 	}
 }
+#endif  // ================= END OLD AUTO-LOGIN: config hot-reload =================
 
 // ============================================================================
 // Auto-submit tick - call every frame (even with the overlay closed).

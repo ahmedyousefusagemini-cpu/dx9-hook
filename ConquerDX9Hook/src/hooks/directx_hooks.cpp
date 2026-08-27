@@ -46,6 +46,9 @@ namespace AutoLogin {
 	extern const uintptr_t LOGIN_BUTTON_CONTROL_ID; // 0xCDF - the real Login button's control id
 }
 
+// Cross-thread logger defined in auto_login.cpp (writes auto_login.log).
+void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
+
 // ============================================================================
 // WM_AUTOLOGIN_CLICK handler: the overlay's "Click Login" button posted this
 // to the dialog's HWND.  We find the real Login button (control id 0xCDF) and
@@ -76,7 +79,6 @@ void HandleAutoLoginClick(void* dialog)
 	unsigned long* shTick = AlClickSharedTick();
 	unsigned long nowMs = GetTickCount();
 	if (shTick && nowMs - *shTick < 3000) {
-		extern void AutoLoginLogFromHook(const char* msg, void* dialog, HWND hwnd);
 		AutoLoginLogFromHook("CLICK duplicate suppressed", dialog,
 			dialog ? *(HWND*)((unsigned char*)dialog + 0x20) : NULL);
 		return;
