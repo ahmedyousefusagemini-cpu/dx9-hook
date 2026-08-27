@@ -1,51 +1,73 @@
 #include <windows.h>
 #include "imgui.h"
+#include "MinHook.h"
 
 // ============================================================================
 // Auto Login (MFC CDlgLogin) - Conquer.exe client 7950 (image base 0x400000)
 // ----------------------------------------------------------------------------
 // The login screen is an MFC dialog (CDlgLogin, source myshell/dlglogin.cpp,
 // RTTI string "CDlgLogin" @ 0x016036A0). It is a WS_CHILD dialog of the game's
-// root window hosting the fgui login UI (`login_xzk`): a real account/password
-// Edit pair plus a real Login Button HWND (window text e.g. "EnterGame",
-// displayed label e.g. "Log In").
+// root window hosting the fgui login UI (`login_xzk`).
 //
 // RE-verified click chain (Ghidra, 7950 build):
 //   Login button click
 //     -> FUN_LoginButtonHandler @ 0x008A8FCA (__fastcall(CDlgLogin*))
 //          reads account (dlg+0x13B88), password (dlg+0x13BD0), server fields
-//     -> FUN_0101C9D8 @ 0x0101C9D8
-//          login(account, password, serverName, mode, extra) - sends the
-//          CMsgAccountEx login packet (mode 0; 1 = QR code, 2 = poker)
-//   Dispatched from the big UI event dispatcher (FUN_00a5b653 area) with
-//   ECX = appObj + 0x39B948 (CDlgLogin is a member of the main app object,
-//   returned by the accessor FUN_0041f880 -> DAT_01a546f4), gated on
-//   FUN_00BFEE8B (IsWindow + IsWindowVisible of dlg+0x20 = the dialog HWND).
+//     -> FUN_0101C9D8 @ 0x0101C9D8 (cdecl) - sends the login packet:
+//          login(account, password, serverName, mode, extra)
+//          mode 0 = CMsgAccountEx, 1 = QR, 2 = poker
 //
-// CLICK MECHANISM (why not BM_CLICK): these are fgui-drawn controls, not
-// standard MFC buttons - BM_CLICK does nothing (784 clicks observed, zero
-// effect). SendInput (real mouse) works but moves the cursor and interacts
-// badly with the ImGui overlay (the click fails when the overlay is visible
-// because the ImGui WndProc handler processes the synthetic mouse messages
-// before the fgui handler sees them).
-//
-// The default method therefore sends WM_LBUTTONDOWN + WM_LBUTTONUP directly
-// to the button HWND via SendMessage — purely programmatic, no cursor
-// movement, no OS hit-testing. The ImGui WndProc handler (which calls
-// SetCapture()/AddMouseButtonEvent() on every LBDOWN and corrupts the fgui
-// click when the overlay is open) is suppressed for the duration via the
-// g_suppressImGuiWndProc flag, so the game's own WndProc sees the raw
-// messages exactly like a real click.
-// SendInput (real mouse) is kept as option 1, BM_CLICK as option 2.
-//
-// ACCOUNT TYPING ("Fill Account" button): reads accountinfo.ini ([AccountN]
-// sections, first Use=1 wins, User=) and TYPES the name into the account edit
-// (topmost VISIBLE Edit child) with real SendInput keystrokes — the fgui edit
-// controls ignore WM_SETTEXT, but accept normal keyboard input like a human
-// typing (Ctrl+A, Delete, then the name). Manual only; no auto-fill loop.
+// ACCOUNT FILLING: reads accountinfo.ini (next to the exe) — [AccountN]
+// sections, first Use=1 wins, User= — and fills the account edit via
+// WM_SETTEXT (cosmetic display only). The actual login packet's account
+// is guaranteed by a MinHook on FUN_0101C9D8 that replaces the account
+// pointer with the ini account when it's empty (or matches), so the server
+// always receives the right name regardless of the fgui edit-sync state.
+// No game-function-address-based member writes needed — the hook lives in
+// the DLL, survives recompiles, and works even if the CDlgLogin offset moves.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
+namespace AutoLogin { extern char g_activeAccount[64]; }
+
+// MinHook target: FUN_0101C9D8 (cdecl) - the login packet sender.
+// Replaces the account argument with the ini account when the game passes
+// an empty (or matching) one, so the server always receives the right name.
+typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* serverName, int mode, int extra);
+static LoginSendFunc g_originalLoginSend = NULL;
+static bool g_loginHookInstalled = false;
+
+const uintptr_t LOGIN_SEND_ADDR = 0x0101C9D8;
+
+static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
+{
+	if (AutoLogin::g_activeAccount[0] && mode == 0)
+	{
+		if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
+			account = AutoLogin::g_activeAccount;
+	}
+	return g_originalLoginSend(account, password, serverName, mode, extra);
+}
+
+static bool InstallLoginHook()
+{
+	if (g_loginHookInstalled)
+		return true;
+	if (IsBadReadPtr((const void*)LOGIN_SEND_ADDR, 5))
+		return false;
+	const unsigned char* code = (const unsigned char*)LOGIN_SEND_ADDR;
+	if (!(code[0] == 0x68 && code[2] == 0x04 && code[3] == 0x00 && code[4] == 0x00))
+		return false;  // prologue: PUSH 0x408 (the EH frame)
+	MH_STATUS st = MH_Initialize();
+	if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED)
+		return false;
+	if (MH_CreateHook((LPVOID)LOGIN_SEND_ADDR, (LPVOID)HookedLoginSend, (LPVOID*)&g_originalLoginSend) != MH_OK)
+		return false;
+	if (MH_EnableHook((LPVOID)LOGIN_SEND_ADDR) != MH_OK)
+		return false;
+	g_loginHookInstalled = true;
+	return true;
+}
 
 namespace AutoLogin
 {
@@ -62,10 +84,6 @@ namespace AutoLogin
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
 	char g_accountSection[32] = "";  // the section name, e.g. "Account2"
 	char g_fillStatus[96] = "";      // last "Fill Account" result
-	char g_memberAccount[64] = "";   // read-back of dlg+0x13B88 after the fill
-	unsigned int g_debugAppPtr = 0;  // app object pointer from accessor (for diagnostics)
-	unsigned int g_debugDlgPtr = 0;  // CDlgLogin pointer (app + 0x39B948)
-	unsigned int g_debugDlgHwnd = 0; // *(HWND*)(dlg + 0x20) - should equal the Dialog HWND
 
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
@@ -315,121 +333,6 @@ namespace AutoLogin
 	}
 
 	// ------------------------------------------------------------------
-	// Direct member set (bypasses the fgui edit-sync that was failing)
-	// ------------------------------------------------------------------
-
-	// App accessor: FUN_0041f880 -> DAT_01a546f4 (the main app object).
-	// CDlgLogin = app + 0x39B948 (verified from the dispatcher at 0x00A5B90E).
-	// Account setter: FUN_008acefa(this, account) -> dlg+0x13B88 = account.
-	// All three addresses are guarded with byte checks.
-
-	const uintptr_t APP_ACCESSOR_ADDR = 0x0041F880;
-	const uintptr_t ACCOUNT_SETTER_ADDR = 0x008ACEFA;
-	const size_t DLG_OFFSET = 0x39B948;
-
-	// Verifies the app accessor hasn't been moved by a recompile.
-	static bool IsAppAccessorValid()
-	{
-		if (IsBadReadPtr((const void*)APP_ACCESSOR_ADDR, 3))
-			return false;
-		const unsigned char* code = (const unsigned char*)APP_ACCESSOR_ADDR;
-		// "83 3D ?? ?? ?? ?? 00" - the lazy accessor pattern
-		return code[0] == 0x83 && code[1] == 0x3D;
-	}
-
-	// Verifies the account setter hasn't been moved by a recompile.
-	static bool IsAccountSetterValid()
-	{
-		if (IsBadReadPtr((const void*)ACCOUNT_SETTER_ADDR, 3))
-			return false;
-		const unsigned char* code = (const unsigned char*)ACCOUNT_SETTER_ADDR;
-		// "55 8B EC 83 7D 08 00" - PUSH EBP; MOV EBP,ESP; CMP [EBP+8],0
-		return code[0] == 0x55 && code[1] == 0x8B && code[2] == 0xEC &&
-			code[3] == 0x83 && code[4] == 0x7D && code[5] == 0x08 && code[6] == 0x00;
-	}
-
-	// Reads the account string from the member (dlg+0x13B88 std::string)
-	// back into the given buffer. Uses MSVC std::string layout:
-	//   [0] = SSO buffer or heap pointer, [0x10] = size, [0x14] = capacity.
-	//   If capacity >= 0x10, deref the pointer; else read inline.
-	// expectedDialog: if non-NULL, only read when dlg+0x20 (m_hWnd) equals it.
-	static bool ReadBackAccountMember(char* out, size_t outSize, HWND expectedDialog)
-	{
-		if (!out || outSize < 1)
-			return false;
-		out[0] = 0;
-		if (!IsAppAccessorValid())
-			return false;
-
-		int app = 0;
-		__try {
-			typedef int (__fastcall* AppAccessorFunc)();
-			app = ((AppAccessorFunc)APP_ACCESSOR_ADDR)();
-		} __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-		g_debugAppPtr = (unsigned int)app;
-
-		__try {
-			intptr_t dlg = (intptr_t)app + DLG_OFFSET;
-			g_debugDlgPtr = (unsigned int)dlg;
-			HWND hwnd = *(HWND*)(dlg + 0x20);
-			g_debugDlgHwnd = (unsigned int)hwnd;
-			if (expectedDialog && hwnd != expectedDialog)
-				return false;  // wrong base - don't trust these offsets
-			intptr_t raw = dlg + 0x13B88;
-			const char* src = (const char*)*(intptr_t*)raw;
-			unsigned int cap = *(unsigned int*)(raw + 0x14);
-			unsigned int len = *(unsigned int*)(raw + 0x10);
-			if (len >= outSize) len = (unsigned int)(outSize - 1);
-			if (cap < 0x10)
-				src = (const char*)raw;
-			if (src && len > 0)
-				CopyMemory(out, src, len);
-			out[len] = 0;
-		} __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-		return true;
-	}
-
-	// Calls the game's own account setter (FUN_008acefa) to write the
-	// account string directly into dlg+0x13B88 - the field the login
-	// handler actually reads. This bypasses the fragile fgui edit-sync.
-	// expectedDialog: the login dialog HWND found by enumeration; the write
-	// only happens when dlg+0x20 (m_hWnd) equals it, so a wrong base can
-	// never corrupt another object.
-	static bool SetAccountMemberDirectly(const char* account, HWND expectedDialog)
-	{
-		if (!account || !account[0])
-			return false;
-		if (!IsAppAccessorValid() || !IsAccountSetterValid())
-			return false;
-
-		int app = 0;
-		__try {
-			typedef int (__fastcall* AppAccessorFunc)();
-			app = ((AppAccessorFunc)APP_ACCESSOR_ADDR)();
-		} __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-		g_debugAppPtr = (unsigned int)app;
-
-		intptr_t dlg = (intptr_t)app + DLG_OFFSET;
-		g_debugDlgPtr = (unsigned int)dlg;
-
-		// Verify the dialog's m_hWnd is valid AND is our login dialog.
-		HWND hwnd = NULL;
-		__try { hwnd = *(HWND*)(dlg + 0x20); }
-		__except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-		g_debugDlgHwnd = (unsigned int)hwnd;
-		if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
-			return false;
-		if (expectedDialog && hwnd != expectedDialog)
-			return false;  // wrong base - offsets do not point at CDlgLogin
-
-		__try {
-			typedef void (__fastcall* AccountSetter)(void* dlg, void* /*unused edx*/, const char* acct);
-			((AccountSetter)ACCOUNT_SETTER_ADDR)((void*)dlg, NULL, account);
-		} __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-		return true;
-	}
-
-	// ------------------------------------------------------------------
 	// Account loading (accountinfo.ini)
 	// ------------------------------------------------------------------
 
@@ -555,10 +458,9 @@ namespace AutoLogin
 		return accountEdit != NULL && IsWindow(accountEdit);
 	}
 
-	// Tries to fill the account into the edit (WM_SETTEXT for display) AND
-	// always sets the account member directly via the game's setter
-	// (FUN_008ACEFA -> dlg+0x13B88). The display is cosmetic; the member
-	// is what the login handler sends.
+	// Fills the account edit (WM_SETTEXT for display) and logs the status.
+	// The actual login packet's account is guaranteed by the MinHook on
+	// FUN_0101C9D8 — no member write needed.
 	static int FillAccountEdit(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
@@ -571,29 +473,19 @@ namespace AutoLogin
 			return -1;
 
 		int result = -1;
-		// Display the account in the edit (cosmetic — the fgui framework's
-		// own buffer may override this on user click, but the member set
-		// below is what login actually reads).
 		if (accountEdit && IsWindow(accountEdit))
-			SendMessage(accountEdit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
-
-		// CRITICAL: set the member the login handler reads directly,
-		// bypassing the fgui edit-sync entirely.
-		g_memberAccount[0] = 0;
-		bool memberSet = SetAccountMemberDirectly(g_activeAccount, dialog);
-		ReadBackAccountMember(g_memberAccount, sizeof(g_memberAccount), dialog);
-		if (memberSet)
 		{
-			result = 3;  // member set directly
-			if (accountEdit && IsWindow(accountEdit))
-			{
-				char t[128] = "";
-				GetWindowTextA(accountEdit, t, sizeof(t));
-				if (lstrcmpA(t, g_activeAccount) == 0)
-					result = 0;  // display also shows it
-			}
+			SendMessage(accountEdit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
+			char t[128] = "";
+			GetWindowTextA(accountEdit, t, sizeof(t));
+			if (lstrcmpA(t, g_activeAccount) == 0)
+				result = 0;  // display shows it
 		}
 
+		// Install the MinHook on FUN_0101C9D8 if not done yet.
+		InstallLoginHook();
+
+		// Move focus to the password field (user can type there).
 		if (result >= 0 && passwordEdit && IsWindow(passwordEdit))
 			SetFocus(passwordEdit);
 		return result;
@@ -667,24 +559,13 @@ namespace AutoLogin
 			return;
 		g_clickInProgress = true;
 
+		// The account packet is patched by the FUN_0101C9D8 hook — no member
+		// writes needed here.
+		if (g_activeAccount[0])
+			InstallLoginHook();
+
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
-
-		// Ensure the account member matches the ini account before sending.
-		// The fgui edit-sync may have clobbered it, but the login handler
-		// reads the member (dlg+0x13B88) — re-assert it here.
-		if (g_activeAccount[0] && dialog)
-		{
-			HWND ae = NULL, pe = NULL;
-			ResolveAccountEdit(dialog, ae, pe);
-			if (ae)
-			{
-				char box[128] = "";
-				GetWindowTextA(ae, box, sizeof(box));
-				if (box[0] == 0 || lstrcmpA(box, g_activeAccount) == 0)
-					SetAccountMemberDirectly(g_activeAccount, dialog);
-			}
-		}
 
 		if (button && ClickButtonMethod(button))
 		{
@@ -715,8 +596,7 @@ namespace AutoLogin
 		const char* msg = "";
 		switch (r)
 		{
-		case 0:  msg = "account shown + member set (OK)"; break;
-		case 3:  msg = "member set directly (OK - field may stay blank)"; break;
+		case 0:  msg = "account shown in box (hook active)"; break;
 		default: msg = "FAILED - see Edit fields below"; break;
 		}
 		strcpy_s(g_fillStatus, msg);
@@ -728,6 +608,10 @@ namespace AutoLogin
 
 	void ApplyClientSideState()
 	{
+		// Install the login-send hook once if we have an account configured.
+		if (g_activeAccount[0])
+			InstallLoginHook();
+
 		// Re-discover the dialog at most every 500 ms (it is created at
 		// startup and destroyed on login; cheap to re-scan that rarely).
 		DWORD now = GetTickCount();
@@ -880,11 +764,7 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Clicks sent: %d", AutoLogin::g_clickCount);
 		ImGui::Text("Account: \"%s\" (%s)", AutoLogin::g_activeAccount,
 			AutoLogin::g_accountSection[0] ? AutoLogin::g_accountSection : "none");
-		ImGui::Text("Member (dlg+0x13B88): \"%s\"", AutoLogin::g_memberAccount[0] ? AutoLogin::g_memberAccount : "(empty)");
-		ImGui::Text("App: 0x%08X  Dlg: 0x%08X", AutoLogin::g_debugAppPtr, AutoLogin::g_debugDlgPtr);
-		ImGui::Text("Dlg m_hWnd (dlg+0x20): 0x%08X  %s", AutoLogin::g_debugDlgHwnd,
-			(AutoLogin::g_debugDlgHwnd == (unsigned int)AutoLogin::g_cachedDialog)
-				? "(== found Dialog, base OK)" : "(!= found Dialog, base WRONG)");
+		ImGui::Text("Login-send hook: %s", g_loginHookInstalled ? "INSTALLED" : "not installed");
 		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
 
