@@ -689,13 +689,13 @@ disappears, then disarms. Selectable methods: 0 = Message (default), 1 = SendInp
 mouse (moves cursor), 2 = BM_CLICK (proven dead on this build). The debug tree lists
 every Button child with its CtrlID + per-button "use"/"click" testers.
 
-**Account auto-fill (`accountinfo.ini`, next to the exe):** when enabled, the overlay
-reads `[AccountN]` sections, picks the first with `Use=1`, and fills its `User` into the
-account edit (the topmost Edit child of the login dialog) via `WM_SETTEXT` — once per
-dialog instance, never overwriting a non-empty field. Then it moves focus account→
-password (SetFocus), which runs the edit's own EN_KILLFOCUS sync so the CDlgLogin
-member the login handler reads (`dlg+0x13B88`) carries the name, and leaves the cursor
-on the password field. Format:
+**Account fill (`accountinfo.ini`, next to the exe):** the "Fill Account" button reads
+`[AccountN]` sections, picks the first with `Use=1`, and TYPES its `User` into the
+account edit (the topmost **visible** Edit child of the login dialog) with real
+`SendInput` keystrokes — the fgui edits ignore `WM_SETTEXT` but accept real key input
+(Ctrl+A, Delete, then the name), and the focus move account→password runs the edit's
+EN_KILLFOCUS sync so the CDlgLogin member the login handler reads (`dlg+0x13B88`)
+carries the name. Format:
 
 ```ini
 [Account1]

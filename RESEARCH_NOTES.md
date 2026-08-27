@@ -89,16 +89,19 @@ the game syncs on EN_KILLFOCUS, so the fill ends with `SetFocus(accountEdit)` �
 in the password field. The `CDlgLogin::OnEnKillfocusEditAccount` handler string is
 `0x016042E4` (its Catch stub at `0x0088CDF8`).
 
-**Account auto-fill fix (user report "not working"):** two flaws in the first version:
-(1) `g_filledAccountDialog` was stamped BEFORE the fill attempt, so a first-frame
-failure (edit not yet created / ini not readable yet) never retried; (2) a stale
-pre-filled account (the client remembers the last login) was never overwritten. Fixed:
-the stamp only happens on SUCCESS (retry every 500 ms otherwise), and the fill now
-overwrites whenever the field text differs from the active account (left alone only
-when already equal). Added diagnostics: debug tree lists ALL Edit children (index, Y,
-text) so the account field pick can be verified, plus "Reload"/"Fill now" buttons. The
-client's `accountinfo.ini` (ANSI, `[Account1] User=halms Use=1 ...`) was confirmed to
-parse with GetPrivateProfileStringA.
+**Account typing (reworked):** the auto-fill (WM_SETTEXT + per-frame loop) was REMOVED
+after the user reported it did not fill — the fgui edit controls ignore WM_SETTEXT.
+The "Fill Account" button now loads `accountinfo.ini` (`[AccountN]` sections,
+first `Use=1` wins, `User=` value) and TYPES the name into the account edit (the
+topmost **visible** Edit child, found by smallest Y among visible edits) with real
+`SendInput` `KEYEVENTF_UNICODE` keystrokes: `SetFocus(edit)` → Ctrl+A → Delete →
+type the name → `SetFocus(passwordEdit)`. Real key input is exactly what a human
+typing produces, so the fgui edit accepts it; the EN_KILLFOCUS sync into
+`dlg+0x13B88` fires when focus moves to the password field. The debug tree lists
+all Edit children (Y + text) to verify the pick. `CDlgLogin::OnEnKillfocusEditAccount`
+handler string is `0x016042E4` (Catch stub at `0x0088CDF8`). The client's
+`accountinfo.ini` (ANSI, `[Account1] User=halms Use=1 ...`) parses fine with
+GetPrivateProfileStringA.
 
 ---
 

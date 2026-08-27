@@ -37,6 +37,12 @@
 // g_suppressImGuiWndProc flag, so the game's own WndProc sees the raw
 // messages exactly like a real click.
 // SendInput (real mouse) is kept as option 1, BM_CLICK as option 2.
+//
+// ACCOUNT TYPING ("Fill Account" button): reads accountinfo.ini ([AccountN]
+// sections, first Use=1 wins, User=) and TYPES the name into the account edit
+// (topmost VISIBLE Edit child) with real SendInput keystrokes — the fgui edit
+// controls ignore WM_SETTEXT, but accept normal keyboard input like a human
+// typing (Ctrl+A, Delete, then the name). Manual only; no auto-fill loop.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
@@ -51,11 +57,9 @@ namespace AutoLogin
 	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 
-	// Auto-fill the account edit from accountinfo.ini ([AccountN] Use=1 -> User).
-	bool g_autoFillAccount = true;
+	// Active account loaded from accountinfo.ini ([AccountN] Use=1 -> User).
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
 	char g_accountSection[32] = "";  // the section name, e.g. "Account2"
-	HWND g_filledAccountDialog = NULL; // dialog instance we already filled
 
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
@@ -375,6 +379,8 @@ namespace AutoLogin
 			return TRUE;
 		if (lstrcmpiA(cls, "Edit") != 0)
 			return TRUE;
+		if (!IsWindowVisible(hwnd))
+			return TRUE;  // hidden config edits are not the account field
 		RECT rc;
 		if (!GetWindowRect(hwnd, &rc))
 			return TRUE;
@@ -394,16 +400,22 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-	// Fills the account edit (the topmost Edit child of the dialog) with the
-	// active account. WM_SETTEXT updates only the visible text; the CDlgLogin
-	// member the login handler reads (dlg+0x13B88) is synced by the edit's
-	// EN_KILLFOCUS handler, so focus is moved to the account field and then to
-	// the password field - that runs the game's own sync path and leaves the
-	// cursor ready for the password. Returns true when the field now carries
-	// the account (already matching or just written). A stale pre-filled name
-	// (the client remembers the last account) IS overwritten - the field is
-	// only left alone when it already equals the active account.
-	static bool FillAccountField(HWND dialog)
+	// Sends one real (SendInput) key event.
+	static void SendKey(WORD scan, DWORD flags)
+	{
+		INPUT in = { 0 };
+		in.type = INPUT_KEYBOARD;
+		in.ki.wScan = scan;
+		in.ki.dwFlags = flags;
+		SendInput(1, &in, sizeof(INPUT));
+	}
+
+	// Types the account name into the account edit (the topmost VISIBLE Edit
+	// child) with REAL keystrokes - the fgui edit controls ignore WM_SETTEXT,
+	// but they accept normal input exactly like a human typing. Selects and
+	// clears any existing text first (Ctrl+A, Delete). Returns true when the
+	// field text matches the account afterwards.
+	static bool TypeAccountName(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
 			return false;
@@ -415,20 +427,26 @@ namespace AutoLogin
 		if (!scan.top)
 			return false;
 
-		char current[128] = "";
-		GetWindowTextA(scan.top, current, sizeof(current));
-		if (lstrcmpA(current, g_activeAccount) == 0)
-			return true;  // already filled with the right account
+		SetFocus(scan.top);
 
-		SendMessage(scan.top, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
+		// Select all + delete any pre-filled text, then type the account.
+		SendKey(VK_CONTROL, 0);           // Ctrl down
+		SendKey('A', 0);                  // A down (Ctrl+A = select all)
+		SendKey('A', KEYEVENTF_KEYUP);
+		SendKey(VK_CONTROL, KEYEVENTF_KEYUP);
+		SendKey(VK_DELETE, 0);            // delete selection
+		SendKey(VK_DELETE, KEYEVENTF_KEYUP);
 
-		if (scan.second && IsWindow(scan.second))
+		for (const char* p = g_activeAccount; *p; p++)
 		{
-			SetFocus(scan.top);
-			SetFocus(scan.second);
+			SendKey((WORD)(unsigned char)*p, KEYEVENTF_UNICODE);
+			SendKey((WORD)(unsigned char)*p, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
 		}
 
-		// Verify the write actually landed (fgui edits can ignore WM_SETTEXT).
+		// Move focus to the password field (syncs the member + ready for input).
+		if (scan.second && IsWindow(scan.second))
+			SetFocus(scan.second);
+
 		char after[128] = "";
 		GetWindowTextA(scan.top, after, sizeof(after));
 		return lstrcmpA(after, g_activeAccount) == 0;
@@ -516,8 +534,8 @@ namespace AutoLogin
 		g_clickInProgress = false;
 	}
 
-	// Manual one-shot: reload accountinfo.ini, find the login dialog and fill
-	// the account field right away (independent of the auto-fill toggle).
+	// Manual one-shot: reload accountinfo.ini, find the login dialog and TYPE
+	// the account name into the account field right away.
 	void FillAccountNow()
 	{
 		LoadActiveAccount();
@@ -527,8 +545,7 @@ namespace AutoLogin
 		if (!IsDialogUsable(dialog))
 			return;
 		g_cachedDialog = dialog;
-		g_filledAccountDialog = NULL;  // let the auto loop also see it as done
-		FillAccountField(dialog);
+		TypeAccountName(dialog);
 	}
 
 	// ------------------------------------------------------------------
@@ -577,7 +594,7 @@ namespace AutoLogin
 			}
 		}
 
-		if (!g_autoClickLogin && !g_autoFillAccount)
+		if (!g_autoClickLogin)
 			return;
 
 		// Nothing to click (not at the login screen any more).
@@ -591,19 +608,6 @@ namespace AutoLogin
 				g_autoClickLogin = false;  // disarm the auto loop
 			return;
 		}
-
-		// Auto-fill the account edit from accountinfo.ini. Retried until it
-		// succeeds (the edit/ini may not be ready on the first frame; the
-		// client may pre-fill a stale account that needs overwriting).
-		if (g_autoFillAccount && g_filledAccountDialog != g_cachedDialog)
-		{
-			LoadActiveAccount();
-			if (FillAccountField(g_cachedDialog))
-				g_filledAccountDialog = g_cachedDialog;  // done - stop retrying
-		}
-
-		if (!g_autoClickLogin)
-			return;
 
 		if (!IsWindow(g_cachedButton))
 			return;
@@ -644,7 +648,7 @@ void RenderAutoLoginInterface()
 	{
 		AutoLogin::FillAccountNow();
 	}
-	ImGui::TextDisabled("(programmatic press / account fill, no cursor movement)");
+	ImGui::TextDisabled("(programmatic press / types the account, no cursor movement)");
 
 	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
 		AutoLogin::g_autoClickLogin)
@@ -661,31 +665,22 @@ void RenderAutoLoginInterface()
 		"Message (no cursor)\0Mouse (real click)\0BM_CLICK\0");
 
 	ImGui::Spacing();
-	ImGui::Checkbox("Auto-fill account (accountinfo.ini)", &AutoLogin::g_autoFillAccount);
+	ImGui::Text("Account from accountinfo.ini:");
 	if (AutoLogin::g_activeAccount[0])
 	{
 		ImGui::SameLine();
-		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[%s]", AutoLogin::g_activeAccount);
+		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s (%s, Use=1)",
+			AutoLogin::g_activeAccount, AutoLogin::g_accountSection);
 	}
-	if (AutoLogin::g_autoFillAccount)
+	else
 	{
-		if (AutoLogin::g_activeAccount[0])
-			ImGui::TextDisabled("from %s (Use=1) - fills the account field once", AutoLogin::g_accountSection);
-		else
-			ImGui::TextDisabled("no Use=1 account in accountinfo.ini");
-		ImGui::SameLine(0, 8);
-		if (ImGui::SmallButton("Reload"))
-		{
-			AutoLogin::g_filledAccountDialog = NULL;  // force re-fill
-			AutoLogin::LoadActiveAccount();
-		}
-		ImGui::SameLine(0, 2);
-		if (ImGui::SmallButton("Fill now"))
-		{
-			AutoLogin::g_filledAccountDialog = NULL;
-			AutoLogin::LoadActiveAccount();
-			AutoLogin::FillAccountField(AutoLogin::g_cachedDialog);
-		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("no Use=1 account found");
+	}
+	ImGui::SameLine(0, 8);
+	if (ImGui::SmallButton("Reload"))
+	{
+		AutoLogin::LoadActiveAccount();
 	}
 
 	if (AutoLogin::g_loginCompleted)
