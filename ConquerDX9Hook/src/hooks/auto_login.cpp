@@ -462,18 +462,6 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-		// Sends one real (SendInput) key event. vk-based events carry the virtual
-	// key in wVk; text input uses KEYEVENTF_UNICODE with the char in wScan.
-	static void SendKey(WORD vk, WORD scan, DWORD flags)
-	{
-		INPUT in = { 0 };
-		in.type = INPUT_KEYBOARD;
-		in.ki.wVk = vk;
-		in.ki.wScan = scan;
-		in.ki.dwFlags = flags;
-		SendInput(1, &in, sizeof(INPUT));
-	}
-
 	// Resolves the account edit (pinned via g_accountEditIndex, else the topmost
 	// visible Edit child) and its password sibling, for the current dialog.
 	static bool ResolveAccountEdit(HWND dialog, HWND& accountEdit, HWND& passwordEdit)
@@ -508,71 +496,10 @@ namespace AutoLogin
 		return accountEdit != NULL && IsWindow(accountEdit);
 	}
 
-	// Attempt 1: WM_SETTEXT straight to the edit. Sets the edit's own text
-	// buffer - works when the fgui edit draws its window text.
-	static bool FillViaSetText(HWND edit)
-	{
-		SendMessage(edit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
-		char t[128] = "";
-		GetWindowTextA(edit, t, sizeof(t));
-		return lstrcmpA(t, g_activeAccount) == 0;
-	}
-
-	// Attempt 2: activate the edit (SetFocus + suppressed synchronous click,
-	// no cursor movement) then type via real SendInput keystrokes.
-	static bool FillViaTyping(HWND edit)
-	{
-		SetFocus(edit);
-		RECT rc;
-		LPARAM pos = 0;
-		if (GetClientRect(edit, &rc))
-			pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
-		g_suppressImGuiWndProc = true;
-		SendMessage(edit, WM_LBUTTONDOWN, MK_LBUTTON, pos);
-		SendMessage(edit, WM_LBUTTONUP, MK_LBUTTON, pos);
-		g_suppressImGuiWndProc = false;
-		Sleep(50);
-
-		// Select all + delete any pre-filled text, then type the account.
-		SendKey(VK_CONTROL, 0, 0);                 // Ctrl down
-		SendKey('A', 0, 0);                        // A down (Ctrl+A = select all)
-		SendKey('A', 0, KEYEVENTF_KEYUP);
-		SendKey(VK_CONTROL, 0, KEYEVENTF_KEYUP);
-		SendKey(VK_DELETE, 0, 0);                  // delete selection
-		SendKey(VK_DELETE, 0, KEYEVENTF_KEYUP);
-
-		for (const char* p = g_activeAccount; *p; p++)
-		{
-			SendKey(0, (WORD)(unsigned char)*p, KEYEVENTF_UNICODE);
-			SendKey(0, (WORD)(unsigned char)*p, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
-		}
-		Sleep(30);
-
-		char t[128] = "";
-		GetWindowTextA(edit, t, sizeof(t));
-		return lstrcmpA(t, g_activeAccount) == 0;
-	}
-
-	// Attempt 3: direct WM_CHAR messages to the edit (synchronous, suppressed).
-	// Works when the edit's own WndProc inserts text on WM_CHAR.
-	static bool FillViaChar(HWND edit)
-	{
-		g_suppressImGuiWndProc = true;
-		for (const char* p = g_activeAccount; *p; p++)
-			SendMessage(edit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
-		g_suppressImGuiWndProc = false;
-
-		char t[128] = "";
-		GetWindowTextA(edit, t, sizeof(t));
-		return lstrcmpA(t, g_activeAccount) == 0;
-	}
-
-	// Types the account name into the account edit without moving the cursor.
-	// Tries WM_SETTEXT, then click+real-keys, then direct WM_CHAR - the first
-	// one that verifies wins. On success, focus moves to the password field
-	// (fires the EN_KILLFOCUS sync and leaves the cursor ready for the
-	// password). Returns which method worked (0 = WM_SETTEXT, 1 = typing,
-	// 2 = WM_CHAR, -1 = failed).
+	// Tries to fill the account into the edit (WM_SETTEXT for display) AND
+	// always sets the account member directly via the game's setter
+	// (FUN_008ACEFA -> dlg+0x13B88). The display is cosmetic; the member
+	// is what the login handler sends.
 	static int FillAccountEdit(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
@@ -585,20 +512,24 @@ namespace AutoLogin
 			return -1;
 
 		int result = -1;
-		if (FillViaSetText(accountEdit))
-			result = 0;
-		else if (FillViaTyping(accountEdit))
-			result = 1;
-		else if (FillViaChar(accountEdit))
-			result = 2;
+		// Display the account in the edit (cosmetic — the fgui framework's
+		// own buffer may override this on user click, but the member set
+		// below is what login actually reads).
+		if (accountEdit && IsWindow(accountEdit))
+			SendMessage(accountEdit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
 
-		// Regardless of the display fill, ALSO set the account member
-		// directly via the game's own setter. The login handler reads the
-		// member (dlg+0x13B88), not the edit - this is what actually matters.
+		// CRITICAL: set the member the login handler reads directly,
+		// bypassing the fgui edit-sync entirely.
 		if (SetAccountMemberDirectly(g_activeAccount))
 		{
-			if (result < 0)
-				result = 3;  // member set directly (display failed but OK)
+			result = 3;  // member set directly
+			if (accountEdit && IsWindow(accountEdit))
+			{
+				char t[128] = "";
+				GetWindowTextA(accountEdit, t, sizeof(t));
+				if (lstrcmpA(t, g_activeAccount) == 0)
+					result = 0;  // display also shows it
+			}
 		}
 
 		if (result >= 0 && passwordEdit && IsWindow(passwordEdit))
@@ -706,10 +637,8 @@ namespace AutoLogin
 		const char* msg = "";
 		switch (r)
 		{
-		case 0:  msg = "account set (WM_SETTEXT)"; break;
-		case 1:  msg = "account typed (click+keys)"; break;
-		case 2:  msg = "account set (WM_CHAR)"; break;
-		case 3:  msg = "member set directly (OK)"; break;
+		case 0:  msg = "account shown + member set (OK)"; break;
+		case 3:  msg = "member set directly (OK - field may stay blank)"; break;
 		default: msg = "FAILED - see Edit fields below"; break;
 		}
 		strcpy_s(g_fillStatus, msg);
