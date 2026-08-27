@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <tlhelp32.h>
 #include <cstdio>
 #include <cstdarg>
 #include "hooks/common.h"
