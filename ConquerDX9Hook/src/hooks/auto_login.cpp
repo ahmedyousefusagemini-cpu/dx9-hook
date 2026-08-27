@@ -62,6 +62,7 @@ namespace AutoLogin
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
 	char g_accountSection[32] = "";  // the section name, e.g. "Account2"
 	char g_fillStatus[96] = "";      // last "Fill Account" result
+	char g_memberAccount[64] = "";   // read-back of dlg+0x13B88 after the fill
 
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
@@ -344,6 +345,40 @@ namespace AutoLogin
 			code[3] == 0x83 && code[4] == 0x7D && code[5] == 0x08 && code[6] == 0x00;
 	}
 
+	// Reads the account string from the member (dlg+0x13B88 std::string)
+	// back into the given buffer. Uses MSVC std::string layout:
+	//   [0] = SSO buffer or heap pointer, [0x10] = size, [0x14] = capacity.
+	//   If capacity >= 0x10, deref the pointer; else read inline.
+	static bool ReadBackAccountMember(char* out, size_t outSize)
+	{
+		if (!out || outSize < 1)
+			return false;
+		out[0] = 0;
+		if (!IsAppAccessorValid())
+			return false;
+
+		typedef int (__fastcall* AppAccessorFunc)();
+		int app = ((AppAccessorFunc)APP_ACCESSOR_ADDR)();
+		intptr_t raw = (intptr_t)app + DLG_OFFSET + 0x13B88;
+		if (IsBadReadPtr((const void*)raw, 0x18))
+			return false;
+
+		const char* src = (const char*)*(intptr_t*)raw;  // SSO/ptr first dword
+		unsigned int cap = *(unsigned int*)(raw + 0x14); // capacity at +0x14
+		unsigned int len = *(unsigned int*)(raw + 0x10); // size at +0x10
+		if (len >= outSize) len = (unsigned int)(outSize - 1);
+		if (cap < 0x10)
+			src = (const char*)raw;  // SSO: the string is inline
+		if (src && len > 0 && IsBadReadPtr(src, len))
+			return false;
+		if (src && len > 0)
+		{
+			CopyMemory(out, src, len);
+			out[len] = 0;
+		}
+		return true;
+	}
+
 	// Calls the game's own account setter (FUN_008acefa) to write the
 	// account string directly into dlg+0x13B88 - the field the login
 	// handler actually reads. This bypasses the fragile fgui edit-sync.
@@ -356,10 +391,14 @@ namespace AutoLogin
 
 		typedef int (__fastcall* AppAccessorFunc)();
 		int app = ((AppAccessorFunc)APP_ACCESSOR_ADDR)();
-		if (IsBadReadPtr((const void*)app, DLG_OFFSET + 0x100))
-			return false;
 
 		void* dlg = (void*)(app + DLG_OFFSET);
+		// Only check the ranges we actually read/write (m_hWnd at +0x20,
+		// account member at +0x13B88).
+		if (IsBadReadPtr(dlg, 0x24))
+			return false;
+		if (IsBadReadPtr((const void*)((intptr_t)dlg + 0x13B88), 0x18))
+			return false;
 		// Verify the dialog's m_hWnd is valid (mirrors FUN_00BFEE8B).
 		HWND hwnd = *(HWND*)((intptr_t)dlg + 0x20);
 		if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
@@ -520,8 +559,10 @@ namespace AutoLogin
 
 		// CRITICAL: set the member the login handler reads directly,
 		// bypassing the fgui edit-sync entirely.
+		g_memberAccount[0] = 0;
 		if (SetAccountMemberDirectly(g_activeAccount))
 		{
+			ReadBackAccountMember(g_memberAccount, sizeof(g_memberAccount));
 			result = 3;  // member set directly
 			if (accountEdit && IsWindow(accountEdit))
 			{
@@ -607,6 +648,22 @@ namespace AutoLogin
 
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
+
+		// Ensure the account member matches the ini account before sending.
+		// The fgui edit-sync may have clobbered it, but the login handler
+		// reads the member (dlg+0x13B88) — re-assert it here.
+		if (g_activeAccount[0] && dialog)
+		{
+			HWND ae = NULL, pe = NULL;
+			ResolveAccountEdit(dialog, ae, pe);
+			if (ae)
+			{
+				char box[128] = "";
+				GetWindowTextA(ae, box, sizeof(box));
+				if (box[0] == 0 || lstrcmpA(box, g_activeAccount) == 0)
+					SetAccountMemberDirectly(g_activeAccount);
+			}
+		}
 
 		if (button && ClickButtonMethod(button))
 		{
@@ -802,6 +859,7 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Clicks sent: %d", AutoLogin::g_clickCount);
 		ImGui::Text("Account: \"%s\" (%s)", AutoLogin::g_activeAccount,
 			AutoLogin::g_accountSection[0] ? AutoLogin::g_accountSection : "none");
+		ImGui::Text("Member (dlg+0x13B88): \"%s\"", AutoLogin::g_memberAccount[0] ? AutoLogin::g_memberAccount : "(empty)");
 		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
 
