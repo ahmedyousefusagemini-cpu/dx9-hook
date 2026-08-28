@@ -324,9 +324,24 @@ namespace AutoLogin
 
 	// True when the window (dialog) currently has a visible Login button
 	// candidate - mirrors the game's own FUN_00BFEE8B visibility gate.
+	// For CDlgLogin we consider it usable even when not visible (Tips on top),
+	// because the Tips dialog would otherwise be picked as the login.
 	static bool IsDialogUsable(HWND hwnd)
 	{
-		return hwnd != NULL && IsWindow(hwnd) && IsWindowVisible(hwnd);
+		if (!hwnd || !IsWindow(hwnd)) return false;
+		__try {
+			typedef void* (__cdecl *AppAccFn)();
+			AppAccFn fn = (AppAccFn)0x0041F880;
+			void* app = fn ? fn() : nullptr;
+			if (app) {
+				char* dlg = (char*)app + 0x39B948;
+				if (!IsBadReadPtr(dlg, 0x40)) {
+					HWND hLogin = *(HWND*)(dlg + 0x20);
+					if (hwnd == hLogin) return true;
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		return IsWindowVisible(hwnd);
 	}
 
 	struct ChildScan
@@ -385,11 +400,38 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-	// Finds the MFC login dialog. The game's own root/render windows are
-	// skipped as candidates (they host no Edit controls); a WS_CHILD dialog
-	// with Edit+Button children is the login screen. Returns NULL in-game.
+	// Finds the MFC login dialog. First tries the CDlgLogin object at app+0x39B948
+	// (its m_hWnd at +0x20 is the login dialog, even when a Tips dialog is on top).
+	// Fallback to the old Edit+Button enumeration for robustness.
 	static HWND FindLoginDialog()
 	{
+		__try {
+			typedef void* (__cdecl *AppAccFn)();
+			AppAccFn fn = (AppAccFn)0x0041F880;
+			void* app = fn ? fn() : nullptr;
+			if (app) {
+				char* dlg = (char*)app + 0x39B948;
+				if (!IsBadReadPtr(dlg, 0x40)) {
+					HWND hDlg = *(HWND*)(dlg + 0x20);
+					if (hDlg && IsWindow(hDlg)) {
+						// Verify it looks like the login (has at least 2 edits, not the Tips with 4/153)
+						ChildScan local = {0};
+						local.dialog = hDlg;
+						EnumChildWindows(hDlg, CountChildControls, (LPARAM)&local);
+						if (local.edits >= 2 && local.edits <= 8) {
+							return hDlg;
+						}
+						// Even if edit count is off, return it if DlgMem HWNDs are valid
+						if (!IsBadReadPtr(dlg + 0xCD0, 0x30) && !IsBadReadPtr(dlg + 0xFE8, 0x30)) {
+							HWND hAcc = *(HWND*)(dlg + 0xCD0 + 0x20);
+							HWND hPwd = *(HWND*)(dlg + 0xFE8 + 0x20);
+							if ((hAcc && IsWindow(hAcc)) || (hPwd && IsWindow(hPwd)))
+								return hDlg;
+						}
+					}
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 		ChildScan best;
 		best.dialog = NULL;
 		best.edits = 0;
