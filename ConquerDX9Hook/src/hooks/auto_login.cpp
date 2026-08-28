@@ -295,7 +295,8 @@ namespace AutoLogin
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
 	HWND g_cachedButton = NULL;
-	HWND g_filledAccountDialog = NULL;  // dialog instance we already auto-filled
+	HWND g_filledAccountDialog = NULL;  // dialog instance we already auto-filled account
+	HWND g_filledPasswordDialog = NULL; // dialog instance we already auto-filled password
 	DWORD g_lastFindTick = 0;
 
 	// Diagnostics for the overlay (button identity).
@@ -1244,7 +1245,23 @@ namespace AutoLogin
 			if (g_activeAccount[0])
 			{
 				InstallLoginHook();
+				InstallGetWindowTextHooks();
 				FillAccountEdit(g_cachedDialog);
+			}
+		}
+		// Auto-fill the password field once per dialog instance as well — so the
+		// user does not need to click Fill Password every time. Uses same ini
+		// Pass= and the same robust FillPasswordEdit (WM_CHAR + direct 0x13BD0).
+		if (g_filledPasswordDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
+		{
+			g_filledPasswordDialog = g_cachedDialog;
+			if (g_activePassword[0] == 0)
+				LoadActiveAccount();
+			if (g_activePassword[0])
+			{
+				InstallLoginHook();
+				InstallGetWindowTextHooks();
+				FillPasswordEdit(g_cachedDialog, false);
 			}
 		}
 
