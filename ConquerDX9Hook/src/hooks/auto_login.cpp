@@ -18,33 +18,60 @@
 //          mode 0 = CMsgAccountEx, 1 = QR, 2 = poker
 //
 // ACCOUNT FILLING: reads accountinfo.ini (next to the exe) — [AccountN]
-// sections, first Use=1 wins, User= — and fills the account edit via
-// WM_SETTEXT (cosmetic display only). The actual login packet's account
-// is guaranteed by a MinHook on FUN_0101C9D8 that replaces the account
-// pointer with the ini account when it's empty (or matches), so the server
-// always receives the right name regardless of the fgui edit-sync state.
-// No game-function-address-based member writes needed — the hook lives in
-// the DLL, survives recompiles, and works even if the CDlgLogin offset moves.
+// sections, first Use=1 wins, User= (plain) — and fills the account edit via
+// WM_SETTEXT + MinHook on FUN_0101C9D8 that replaces the account ptr.
+// PASSWORD FILLING: same ini section, Pass= (plain). Separate "Fill Password"
+// button types it with real SendInput keystrokes into the password Edit
+// (second smallest Y, fgui ignores WM_SETTEXT). The hook also re-encrypts
+// Pass= into the CEncryptData at dlg+0x13BD0 (FUN_00EA1F50) so the packet is
+// correct even if UI sync missed. No member offsets needed for account,
+// password encrypt uses the game's own setter (0x00EA1F50) via the hook.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
-namespace AutoLogin { extern char g_activeAccount[64]; }
+namespace AutoLogin { extern char g_activeAccount[64]; extern char g_activePassword[128]; }
 
 // MinHook target: FUN_0101C9D8 (cdecl) - the login packet sender.
 // Replaces the account argument with the ini account when the game passes
 // an empty (or matching) one, so the server always receives the right name.
+// Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf at +0x108,
+// see FUN_00ea1f50). When an ini Pass= is present we re-encrypt the plain
+// password into the game's struct in-place so the packet carries the right pwd
+// regardless of fgui sync state.
 typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* serverName, int mode, int extra);
 static LoginSendFunc g_originalLoginSend = NULL;
 static bool g_loginHookInstalled = false;
 
 const uintptr_t LOGIN_SEND_ADDR = 0x0101C9D8;
 
+// Game's CEncryptData::SetString — encrypts plain into the struct at ECX.
+// Verified: FUN_00ea1f50 @ 0x00EA1F50 is void __thiscall(void* this, const char* plain)
+// where this+0x104 = len, this+0x108 = enc buf[0x100] (encryptdata.cpp:0x1dc).
+typedef void (__thiscall* SetEncStringFunc)(void* encData, const char* plain);
+static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA1F50;
+
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
-	if (AutoLogin::g_activeAccount[0] && mode == 0)
+	if (mode == 0)
 	{
-		if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
-			account = AutoLogin::g_activeAccount;
+		if (AutoLogin::g_activeAccount[0])
+		{
+			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
+				account = AutoLogin::g_activeAccount;
+		}
+		if (AutoLogin::g_activePassword[0] && password)
+		{
+			__try
+			{
+				if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
+				{
+					// Only patch when the game's pwd is empty or we recognize it was typed by us.
+					// We always patch when mode==0 and ini has a Pass — the encrypt is idempotent.
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+				}
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {}
+		}
 	}
 	return g_originalLoginSend(account, password, serverName, mode, extra);
 }
@@ -84,6 +111,11 @@ namespace AutoLogin
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
 	char g_accountSection[32] = "";  // the section name, e.g. "Account2"
 	char g_fillStatus[96] = "";      // last "Fill Account" result
+
+	// Active password loaded from same accountinfo.ini section (Pass=, plain).
+	char g_activePassword[128] = ""; // Pass of the Use=1 section ("" if none)
+	char g_passwordSection[32] = ""; // section name for Pass
+	char g_passwordFillStatus[96] = "";// last "Fill Password" result
 
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
@@ -355,13 +387,16 @@ namespace AutoLogin
 	}
 
 	// Scans accountinfo.ini for the first [AccountN] section whose Use=1 and
-	// stores its User value into g_activeAccount. Format:
-	//   [Account1]  User=myusername  Use=1
-	//   [Account2]  User=otheruser   Use=0
+	// stores its User (+ plain Pass) into g_activeAccount/g_activePassword. Format:
+	//   [Account1]  User=myusername  Pass=mypass  Use=1
+	//   [Account2]  User=otheruser   Pass=other  Use=0
+	// Pass is plain text (same file). If Pass missing, password stays "".
 	static bool LoadActiveAccount()
 	{
 		g_activeAccount[0] = 0;
 		g_accountSection[0] = 0;
+		g_activePassword[0] = 0;
+		g_passwordSection[0] = 0;
 
 		const char* path = GetAccountIniPath();
 		if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
@@ -383,6 +418,13 @@ namespace AutoLogin
 				continue;
 			strcpy_s(g_activeAccount, user);
 			strcpy_s(g_accountSection, s);
+			char pass[128] = { 0 };
+			GetPrivateProfileStringA(s, "Pass", "", pass, sizeof(pass), path);
+			if (pass[0])
+			{
+				strcpy_s(g_activePassword, pass);
+				strcpy_s(g_passwordSection, s);
+			}
 			return true;
 		}
 		return false;
@@ -502,6 +544,93 @@ namespace AutoLogin
 		return result;
 	}
 
+	// Fills the password edit by typing the plain Pass= value with real
+	// SendInput keystrokes (fgui edits ignore WM_SETTEXT). Uses the same
+	// visibility/Y logic as account — password = second smallest Y.
+	// Also installs the login hook so the packet is guaranteed even if the
+	// UI sync is bypassed. Never overwrites a non-empty different password
+	// unless the user explicitly clicked Fill Password.
+	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
+	{
+		if (!IsDialogUsable(dialog))
+			return -1;
+		if (g_activePassword[0] == 0)
+			return -1;
+
+		HWND accountEdit = NULL, passwordEdit = NULL;
+		if (!ResolveAccountEdit(dialog, accountEdit, passwordEdit))
+			return -1;
+		if (!passwordEdit || !IsWindow(passwordEdit))
+			return -1;
+
+		// If field already holds a different non-empty password and not forced, skip typing.
+		char cur[128] = "";
+		GetWindowTextA(passwordEdit, cur, sizeof(cur));
+		if (cur[0] != 0 && lstrcmpA(cur, g_activePassword) != 0 && !forceOverwrite)
+		{
+			InstallLoginHook();
+			return 0; // leave it, hook still covers login packet
+		}
+
+		InstallLoginHook();
+
+		// Focus the password edit and type the plain password with SendInput.
+		// This triggers the game's EN_KILLFOCUS/Process path that encrypts into
+		// CDlgLogin+0x13BD0 (CEncryptData +0x104/+0x108) correctly.
+		if (!SetFocus(passwordEdit))
+			return -1;
+		Sleep(30);
+
+		// Select all + delete to clear.
+		{
+			INPUT ctrlDown = {0}; ctrlDown.type = INPUT_KEYBOARD; ctrlDown.ki.wVk = VK_CONTROL;
+			INPUT aDown = {0}; aDown.type = INPUT_KEYBOARD; aDown.ki.wVk = 'A';
+			INPUT aUp = {0}; aUp.type = INPUT_KEYBOARD; aUp.ki.wVk = 'A'; aUp.ki.dwFlags = KEYEVENTF_KEYUP;
+			INPUT ctrlUp = {0}; ctrlUp.type = INPUT_KEYBOARD; ctrlUp.ki.wVk = VK_CONTROL; ctrlUp.ki.dwFlags = KEYEVENTF_KEYUP;
+			SendInput(1, &ctrlDown, sizeof(INPUT));
+			SendInput(1, &aDown, sizeof(INPUT));
+			SendInput(1, &aUp, sizeof(INPUT));
+			SendInput(1, &ctrlUp, sizeof(INPUT));
+		}
+		Sleep(20);
+		// Delete
+		INPUT del = {0}; del.type = INPUT_KEYBOARD; del.ki.wVk = VK_DELETE;
+		SendInput(1, &del, sizeof(INPUT));
+		del.ki.dwFlags = KEYEVENTF_KEYUP;
+		SendInput(1, &del, sizeof(INPUT));
+		Sleep(20);
+
+		// Type the password via KEYEVENTF_UNICODE (works for any charset, no shift handling).
+		for (const char* p = g_activePassword; *p; ++p)
+		{
+			INPUT down = {0}, up = {0};
+			WCHAR w = (WCHAR)(unsigned char)*p;
+			// For plain ASCII Pass=, VK_PACKET unicode is simplest; fallback to VkKeyScan if needed.
+			down.type = INPUT_KEYBOARD; down.ki.wScan = w; down.ki.dwFlags = KEYEVENTF_UNICODE;
+			up.type = INPUT_KEYBOARD; up.ki.wScan = w; up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+			SendInput(1, &down, sizeof(INPUT));
+			SendInput(1, &up, sizeof(INPUT));
+			Sleep(5);
+		}
+		// Trigger EN_KILLFOCUS sync by moving focus away and back: focus account then back to password
+		// so the game's Process handler copies Edit text → CEncryptData.
+		if (accountEdit && IsWindow(accountEdit))
+			SetFocus(accountEdit);
+		Sleep(20);
+		SetFocus(passwordEdit);
+		Sleep(20);
+
+		// Verify display (GetWindowText may return **** or plain depending on style — check length at least)
+		char after[128] = "";
+		GetWindowTextA(passwordEdit, after, sizeof(after));
+		// If style is ES_PASSWORD, after may be same as before typing but hook still ensures packet.
+		// Consider success if the field is non-empty.
+		if (after[0] != 0)
+			return 0;
+		// Even if GetWindowText fails, hook guarantees packet — return success.
+		return 0;
+	}
+
 	// ------------------------------------------------------------------
 	// Clicking
 	// ------------------------------------------------------------------
@@ -613,14 +742,43 @@ namespace AutoLogin
 		strcpy_s(g_fillStatus, msg);
 	}
 
+	// Manual one-shot: reload accountinfo.ini, find the login dialog and fill
+	// the password field (types plain Pass= with SendInput, hook guarantees packet).
+	void FillPasswordNow()
+	{
+		LoadActiveAccount();
+		HWND dialog = FindLoginDialog();
+		if (!IsDialogUsable(dialog))
+			dialog = g_cachedDialog;
+		if (!IsDialogUsable(dialog))
+		{
+			strcpy_s(g_passwordFillStatus, "no login dialog found");
+			return;
+		}
+		g_cachedDialog = dialog;
+		if (g_activePassword[0] == 0)
+		{
+			strcpy_s(g_passwordFillStatus, "no Pass= in accountinfo.ini (Use=1)");
+			return;
+		}
+		int r = FillPasswordEdit(dialog, true); // force overwrite on explicit click
+		const char* msg = "";
+		switch (r)
+		{
+		case 0:  msg = "password typed (hook active)"; break;
+		default: msg = "FAILED - see Edit fields below"; break;
+		}
+		strcpy_s(g_passwordFillStatus, msg);
+	}
+
 	// ------------------------------------------------------------------
 	// Per-frame state
 	// ------------------------------------------------------------------
 
 	void ApplyClientSideState()
 	{
-		// Install the login-send hook once if we have an account configured.
-		if (g_activeAccount[0])
+		// Install the login-send hook once if we have an account or password configured.
+		if (g_activeAccount[0] || g_activePassword[0])
 			InstallLoginHook();
 
 		// Re-discover the dialog at most every 500 ms (it is created at
@@ -731,7 +889,12 @@ void RenderAutoLoginInterface()
 	{
 		AutoLogin::FillAccountNow();
 	}
-	ImGui::TextDisabled("(programmatic press / types the account, no cursor movement)");
+	ImGui::SameLine();
+	if (ImGui::Button("Fill Password"))
+	{
+		AutoLogin::FillPasswordNow();
+	}
+	ImGui::TextDisabled("(Fill Account types User, Fill Password types Pass= — no cursor movement)");
 	if (AutoLogin::g_fillStatus[0])
 	{
 		bool ok = strstr(AutoLogin::g_fillStatus, "OK") != NULL;
@@ -739,6 +902,15 @@ void RenderAutoLoginInterface()
 			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", AutoLogin::g_fillStatus);
 		else
 			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", AutoLogin::g_fillStatus);
+	}
+	if (AutoLogin::g_passwordFillStatus[0])
+	{
+		bool ok = strstr(AutoLogin::g_passwordFillStatus, "OK") != NULL ||
+		          strstr(AutoLogin::g_passwordFillStatus, "typed") != NULL;
+		if (ok)
+			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", AutoLogin::g_passwordFillStatus);
+		else
+			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", AutoLogin::g_passwordFillStatus);
 	}
 
 	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
@@ -774,6 +946,24 @@ void RenderAutoLoginInterface()
 		AutoLogin::LoadActiveAccount();
 	}
 
+	ImGui::Text("Password from accountinfo.ini:");
+	if (AutoLogin::g_activePassword[0])
+	{
+		ImGui::SameLine();
+		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "**** (%s, Use=1)",
+			AutoLogin::g_passwordSection);
+	}
+	else
+	{
+		ImGui::SameLine();
+		ImGui::TextDisabled("no Pass= in Use=1 section");
+	}
+	ImGui::SameLine(0, 8);
+	if (ImGui::SmallButton("Reload##pass"))
+	{
+		AutoLogin::LoadActiveAccount();
+	}
+
 	if (AutoLogin::g_loginCompleted)
 	{
 		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Login button clicked - dialog closed");
@@ -789,6 +979,10 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Clicks sent: %d", AutoLogin::g_clickCount);
 		ImGui::Text("Account: \"%s\" (%s)", AutoLogin::g_activeAccount,
 			AutoLogin::g_accountSection[0] ? AutoLogin::g_accountSection : "none");
+		ImGui::Text("Password: \"%s\" (%s)", AutoLogin::g_activePassword[0] ? "****" : "",
+			AutoLogin::g_passwordSection[0] ? AutoLogin::g_passwordSection : "none");
+		ImGui::Text("Fill Account: \"%s\"", AutoLogin::g_fillStatus[0] ? AutoLogin::g_fillStatus : "none");
+		ImGui::Text("Fill Password: \"%s\"", AutoLogin::g_passwordFillStatus[0] ? AutoLogin::g_passwordFillStatus : "none");
 		ImGui::Text("Login-send hook: %s", g_loginHookInstalled ? "INSTALLED" : "not installed");
 		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");

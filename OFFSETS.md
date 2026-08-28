@@ -649,8 +649,11 @@ themed chrome (`Login_xOrangeBtn`/`Login_xRedBtn` @ `0x015598F8`/`0x01559940`).
 
 | Function | Address | Meaning |
 |---|---|---|
-| `FUN_LoginButtonHandler` | `0x008A8FCA` | `__fastcall(CDlgLogin*)` — the Login button handler. Reads account (`dlg+0x13B88` std::string), password (`dlg+0x13BD0` buffer), group/server (`dlg+0x135F8`/`+0x135FC`), server name; then calls `FUN_0101C9D8` |
-| `FUN_0101C9D8` | `0x0101C9D8` | **the login-packet sender**: `login(account, password, serverName, mode, extra)`. mode 0 → `CMsgAccountEx` (`FUN_00F7F7E8`), 1 → QR `CMsgAccountByQRCode` (`FUN_00DE30E0`), 2 → poker `CMsgAccountPoker` (`FUN_00F7F9E3`) |
+| `FUN_LoginButtonHandler` | `0x008A8FCA` | `__fastcall(CDlgLogin*)` — the Login button handler. Reads account (`dlg+0x13B88` std::string), password (`dlg+0x13BD0` CEncryptData, alt `dlg+0x13980` for poker path, selected via `dlg+0x13620` flag; `PUSH EAX` `LEA EAX,[EDI+0x13BD0]` @ `0x008a92c1`), group/server (`dlg+0x135F8`/`+0x135FC`), server name; then calls `FUN_0101C9D8` |
+| `FUN_0101C9D8` | `0x0101C9D8` | **the login-packet sender**: `login(account, password, serverName, mode, extra)` (`PUSH 0x408` prologue, `password` is `CEncryptData*` checked `if(pwd==0) CHECK pStrPsw` @ `0x0101c9ea`, len via `FUN_00eb07f9` @ `0x0101ca2f`). mode 0 → `CMsgAccountEx` (`FUN_00F7F7E8`), 1 → QR `CMsgAccountByQRCode` (`FUN_00DE30E0`), 2 → poker `CMsgAccountPoker` (`FUN_00F7F9E3`) |
+| `FUN_00ea1f50` | `0x00EA1F50` | `CEncryptData::SetString` — `void __thiscall(void* this, const char* plain)` encrypts plain into `this+0x108` buf[0x100], len at `this+0x104` (`encryptdata.cpp:0x1dc`, `strncpy +0x108,0x100` then `*pb = (c*'g'-0x7f)*c ^ key ^ (i>>4)*'f' ^ *pb ^ 0xb9`). Hook target for password packet guarantee |
+| `FUN_00eb07f9` | `0x00EB07F9` | `return *(CEncryptData+0x104)` — password length accessor (called on `ESI` password @ `0x0101ca2d`) |
+| `FUN_00607cd5` | `0x00607CD5` | thunk `ADD ECX,0x30C; JMP 0x00ED3462` — password field edit-sync helper (called as `FUN_00607cd5(dlg+0x13BD0)` @ `0x0089c...` in `CDlgLogin::Process`) |
 | `FUN_00BFEE8B` | `0x00BFEE8B` | visibility gate used by the dispatcher: `IsWindow(dlg+0x20) && IsWindowVisible(dlg+0x20)` |
 | app object accessor | `0x0041F880` | returns `DAT_01a546f4` (the main app object; same `83 3D` lazy-accessor shape as #14/#15 in the re-find map — disambiguate by the `0x01A546F4` dword) |
 | `appObj + 0x39B948` | member | the `CDlgLogin` instance inside the app object (dispatcher does `LEA ECX,[EBX+0x39B948]` before `CALL FUN_LoginButtonHandler`) |
@@ -689,21 +692,35 @@ disappears, then disarms. Selectable methods: 0 = Message (default), 1 = SendInp
 mouse (moves cursor), 2 = BM_CLICK (proven dead on this build). The debug tree lists
 every Button child with its CtrlID + per-button "use"/"click" testers.
 
-**Account fill (`accountinfo.ini`, next to the exe):** the "Fill Account" button reads
-`[AccountN]` sections, picks the first with `Use=1`, and TYPES its `User` into the
-account edit (the topmost **visible** Edit child of the login dialog) with real
-`SendInput` keystrokes — the fgui edits ignore `WM_SETTEXT` but accept real key input
-(Ctrl+A, Delete, then the name), and the focus move account→password runs the edit's
-EN_KILLFOCUS sync so the CDlgLogin member the login handler reads (`dlg+0x13B88`)
-carries the name. Format:
+**Account + Password fill (`accountinfo.ini`, next to the exe):** `LoadActiveAccount()` scans
+`[AccountN]` sections, picks the first with `Use=1`, reads `User=` (plain account) and
+`Pass=` (plain password, optional) into `g_activeAccount`/`g_activePassword`.
+
+* **Fill Account button** — `WM_SETTEXT` for display + `MinHook` on `FUN_0101C9D8`
+  (`0x0101C9D8`) that replaces the `account` arg (when empty/matching) so the server
+  always gets the ini `User` regardless of fgui sync. Also types via `SendInput` if needed
+  (fgui edits ignore `WM_SETTEXT`, real keys trigger `CDlgLogin::Process` `+0x13B88` sync).
+
+* **Fill Password button** — separate button, same ini section. Types plain `Pass=` with real
+  `SendInput` `KEYEVENTF_UNICODE` keystrokes into the password Edit (second smallest Y,
+  `dlg+0xFE8` `CWnd`; `ResolveAccountEdit` finds it as `scan.second`). `Ctrl+A → Delete → type`
+  triggers `Process` `FUN_00607cd5(dlg+0x13BD0)` → `CEncryptData::SetString` `0x00EA1F50`
+  that encrypts into `dlg+0x13BD0+0x108` (len `+0x104`), so the handler's
+  `FUN_0101C9D8(dlg+0x13BD0)` carries the right pwd. The same `FUN_0101C9D8` hook
+  also re-encrypts `Pass=` into the passed `CEncryptData*` in-place (via `0x00EA1F50`)
+  as a packet-level guarantee — survives offset moves, no `dlg+0x13BD0` write needed.
+
+Format:
 
 ```ini
 [Account1]
 User=myusername
+Pass=myplainpassword
 Use=1
 [Account2]
 User=otheruser
+Pass=otherpass
 Use=0
 ```
 
-Account/section diagnostics are shown in the Auto Login UI and debug tree.
+Account/Password/section diagnostics are shown in the Auto Login UI and debug tree. `Pass=` is plain text — keep the file private.

@@ -8,6 +8,46 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
+> **2026-08-28: Password auto-fill — plain Pass= in accountinfo.ini, same methodology as account.**
+
+The user requested a separate ImGui button to fill the password from the same
+`accountinfo.ini` `[AccountN]` section (`Pass=` plain, like `User=`). The password
+storage was re-verified via Ghidra to implement it like the account fill (ini load
++ UI typing + `FUN_0101C9D8` hook guarantee).
+
+**How password is stored (Ghidra 7950, verified):**
+- `FUN_LoginButtonHandler @ 0x008A8FCA` disasm `008a92c1: LEA EAX,[EDI+0x13BD0]` → `PUSH EAX`
+  → `PUSH ECX(account)` → `CALL 0x0101C9D8` — account is `dlg+0x13B88` `std::string`
+  (SSO check `CMP [EAX+0x14],0x10` @ `008a91d1`/`008a92b5`), **password is `dlg+0x13BD0`
+  `CEncryptData`** (not a string). Alt slot `dlg+0x13980` for poker/QR path selected
+  by `dlg+0x13620` flag (`008a924b: MOV EAX,0x13BD0; CMOVNZ EAX,0x13980`).
+- `CEncryptData::SetString @ 0x00EA1F50` decompile: `this+0x104 = strlen(plain);`
+  `memset(this+0x108,0,0x100); strncpy(this+0x108,plain,0x100);` then loop
+  `*pb = (c*'g'-0x7f)*c ^ keyByte ^ (i>>4)*'f' ^ *pb ^ 0xB9` (`encryptdata.cpp:0x1dc`).
+  Length accessor `FUN_00eb07f9 @ 0x00EB07F9: return *(this+0x104)` is called on the
+  `ESI` password param at `0101ca2d` (`CMP EAX,0x81` size gate `<0x81`).
+- `CDlgLogin::Process @ 0x0089C013` maps `Focus==[param_1+0xCD0]` (account `CWnd`),
+  `+0xFE8` (password), `+0x1300` (token); `HWND` at `CWnd+0x20`. Password branch calls
+  `FUN_00607cd5(dlg+0x13BD0)` (`00607cd5: ADD ECX,0x30C; JMP 0x00ED3462`) → eventually
+  `0x00EA1F50`. Real `SendInput` keystrokes are the only reliable way — fgui edits
+  ignore `WM_SETTEXT` (same root cause as account, `RESEARCH_NOTES.md:92`).
+- `FUN_0101C9D8 @ 0x0101C9D8` (`PUSH 0x408` prologue) expects `password` as
+  `CEncryptData*` (`if(pwd==0) CHECK pStrPsw @0101c9ea`, then `CALL 00EB07F9` len).
+  The account `HookedLoginSend` already hooked this; password uses same hook.
+
+**Implementation (`auto_login.cpp`): same methodology as account:**
+- `accountinfo.ini` format extended: `[Account1] User=... Pass=plain Use=1`. `LoadActiveAccount`
+  now reads `Pass=` from the same `Use=1` section into `g_activePassword[128]` (plain).
+- New `FillPasswordEdit(dlg, force)` — `ResolveAccountEdit` (top/second Y) → `SetFocus(pwdEdit)`
+  → `Ctrl+A, Delete, SendInput KEYEVENTF_UNICODE` per char → focus dance
+  `accountEdit → passwordEdit` to fire `EN_KILLFOCUS`/`Process` encrypt into `+0x13BD0`.
+  Installs the `FUN_0101C9D8` hook as well.
+- `FillPasswordNow()` — `LoadActiveAccount()` → `FindLoginDialog()` → `FillPasswordEdit(...,true)`
+  with status `g_passwordFillStatus`. **Separate button** (user asked plain, separate, manual).
+- `HookedLoginSend` now handles password: `if(mode==0 && g_activePassword[0] && pwd) ((SetEncStringFunc)0x00EA1F50)(pwd, g_activePassword)` in `__try/__except` with `IsBadReadPtr` guard — ensures packet is correct even if UI sync missed, no `dlg+0x13BD0` address needed.
+- ImGui: `RenderAutoLoginInterface` adds `Fill Password` button `SameLine` after `Fill Account`,
+  `Password from accountinfo.ini: **** (%s)` line, and debug `Password: "****"` + `Fill Password` status.
+
 > **2026-08-27 (2): Auto-login — ImGui auto-click for the MFC Login button.**
 
 The login screen is a real MFC dialog (`CDlgLogin`, `myshell/dlglogin.cpp`) hosting
