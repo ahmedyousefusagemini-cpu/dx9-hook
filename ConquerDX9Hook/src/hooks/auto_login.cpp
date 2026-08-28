@@ -876,22 +876,25 @@ namespace AutoLogin
 		// 3) SendInput unicode (real keystrokes, triggers Process per-key handler)
 		// 4) Fallback: direct memory write to CDlgLogin+0x13BD0 via game's encrypt
 		//    (bypasses UI entirely — login reads from there)
-		// Clear any existing 16-char mask first (both HWND and CEncryptData) — fixes the 16 vs 8 issue
+		// Clear any existing 16-char mask first (both HWND and CEncryptData)
 		__try {
-			typedef void* (__cdecl *AppAccFnClr)();
-			AppAccFnClr fnClr = (AppAccFnClr)0x0041F880;
-			void* appClr = fnClr ? fnClr() : nullptr;
-			if (appClr) {
-				char* dlgClr = (char*)appClr + 0x39B948;
+			void* dlgClr = nullptr;
+			if (g_cachedDialog && IsWindow(g_cachedDialog)) {
+				typedef void* (__stdcall *FromHandleFn)(HWND);
+				static FromHandleFn fh = nullptr;
+				if (!fh) { HMODULE hm = GetModuleHandleA("mfc42.dll"); if (!hm) hm = GetModuleHandleA("mfc140.dll"); if (hm) fh = (FromHandleFn)GetProcAddress(hm, (LPCSTR)4866); }
+				if (fh) dlgClr = fh(g_cachedDialog);
+			}
+			if (!dlgClr) { typedef void* (__cdecl *AppAccFnClr)(); AppAccFnClr fnClr = (AppAccFnClr)0x0041F880; void* appClr = fnClr ? fnClr() : nullptr; if (appClr) dlgClr = (char*)appClr + 0x39B948; }
+			if (dlgClr && !IsBadReadPtr(dlgClr, 0x1400)) {
+				char* dlg = (char*)dlgClr;
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
-					char* p = dlgClr + offs[oi];
-					if (IsBadWritePtr(p, 0x208)) continue;
-					DWORD oldProt = 0;
-					VirtualProtect(p, 0x208, PAGE_EXECUTE_READWRITE, &oldProt);
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(p, "");
-					DWORD tmp = 0;
-					VirtualProtect(p, 0x208, oldProt, &tmp);
+					char* pp = dlg + offs[oi];
+					if (IsBadWritePtr(pp, 0x208)) continue;
+					DWORD op = 0; VirtualProtect(pp, 0x208, PAGE_EXECUTE_READWRITE, &op);
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(pp, "");
+					DWORD tp = 0; VirtualProtect(pp, 0x208, op, &tp);
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -939,15 +942,7 @@ namespace AutoLogin
 		SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)"");
 		Sleep(20);
 
-		// Type via WM_CHAR (fgui) and VkKeyScan SendInput (MFC Process per-key handler).
-		// Manual typing is one VK per frame (~50-100ms), not burst unicode.
-		for (const char* p = g_activePassword; *p; ++p)
-		{
-			WPARAM ch = (WPARAM)(unsigned char)*p;
-			SendMessageA(passwordEdit, WM_CHAR, ch, 1);
-			Sleep(20);
-		}
-		Sleep(50);
+		// Type via VkKeyScan SendInput (single per char, like human)
 		// SendInput with VkKeyScan (generates WM_KEYDOWN/WM_CHAR via TranslateMessage)
 		for (const char* p = g_activePassword; *p; ++p)
 		{
@@ -960,7 +955,6 @@ namespace AutoLogin
 				up.type = INPUT_KEYBOARD; up.ki.wScan = w; up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
 				SendInput(1, &down, sizeof(INPUT));
 				SendInput(1, &up, sizeof(INPUT));
-				SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
 			} else {
 				BYTE vkCode = LOBYTE(vk);
 				BYTE shift = HIBYTE(vk);
@@ -990,25 +984,24 @@ namespace AutoLogin
 		Sleep(100);
 
 		// Fallback: directly write to CDlgLogin password structs via game's encrypt.
-		// FUN_008A8FCA reads either dlg+0x13BD0 or dlg+0x13980 depending on flag dlg+0x13620
-		// (0x13BD0 normally, 0x13980 for poker/QR). Write to both to be safe.
-		// This is the struct that login sends (LEA EAX,[EDI+0x13BD0] at 0x008A92C3).
-		// Doing it here ensures the packet is correct even if the HWND/fgui path failed.
 		__try {
-			typedef void* (__cdecl *AppAccFn)();
-			AppAccFn fn = (AppAccFn)0x0041F880;
-			void* app = fn ? fn() : nullptr;
-			if (app) {
-				char* dlg = (char*)app + 0x39B948;
+			void* dlgEnc = nullptr;
+			if (g_cachedDialog && IsWindow(g_cachedDialog)) {
+				typedef void* (__stdcall *FromHandleFn)(HWND);
+				static FromHandleFn fh2 = nullptr;
+				if (!fh2) { HMODULE hm2 = GetModuleHandleA("mfc42.dll"); if (!hm2) hm2 = GetModuleHandleA("mfc140.dll"); if (hm2) fh2 = (FromHandleFn)GetProcAddress(hm2, (LPCSTR)4866); }
+				if (fh2) dlgEnc = fh2(g_cachedDialog);
+			}
+			if (!dlgEnc) { typedef void* (__cdecl *AppAccFn)(); AppAccFn fn = (AppAccFn)0x0041F880; void* app = fn ? fn() : nullptr; if (app) dlgEnc = (char*)app + 0x39B948; }
+			if (dlgEnc && !IsBadReadPtr(dlgEnc, 0x1400)) {
+				char* dlg = (char*)dlgEnc;
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
-					char* p = dlg + offsEnc[oi];
-					if (IsBadWritePtr(p, 0x208)) continue;
-					DWORD oldProt = 0;
-					VirtualProtect(p, 0x208, PAGE_EXECUTE_READWRITE, &oldProt);
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(p, g_activePassword);
-					DWORD tmp = 0;
-					VirtualProtect(p, 0x208, oldProt, &tmp);
+					char* pEnc = dlg + offsEnc[oi];
+					if (IsBadWritePtr(pEnc, 0x208)) continue;
+					DWORD op = 0; VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op);
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
+					DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 				}
 				// Also try the second copy at *(dlg+0x13DD8)+0x30C if it exists (some builds use it)
 				void* pSecondBase = *(void**)(dlg + 0x13DD8);
@@ -1219,19 +1212,40 @@ namespace AutoLogin
 			HWND pwd2 = NULL;
 			ResolvePasswordEdit(g_cachedDialog, pwd2);
 		}
-		// Diagnostics: read the true login CWnd HWNDs from CDlgLogin object (app+0x39B948)
-		// to show which enumerated Edit is the real account/password (offsets +0xCD0/+0xFE8).
+		// Diagnostics: read the true login CWnd HWNDs from CDlgLogin object
+		// Try CWnd::FromHandle(g_cachedDialog) first (works even when app+0x39B948 is stale),
+		// fallback to app+0x39B948 for old builds.
 		__try {
-			typedef void* (__cdecl *AppAccFn)();
-			AppAccFn fn = (AppAccFn)0x0041F880;
-			void* app = fn ? fn() : nullptr;
-			if (app) {
-				char* dlg = (char*)app + 0x39B948;
-				if (!IsBadReadPtr(dlg, 0x1400)) {
-					g_dlgMemAccountHwnd = *(HWND*)(dlg + 0xCD0 + 0x20);
-					g_dlgMemPasswordHwnd = *(HWND*)(dlg + 0xFE8 + 0x20);
-					g_dlgMemTokenHwnd = *(HWND*)(dlg + 0x1300 + 0x20);
+			void* dlgPtr = nullptr;
+			if (g_cachedDialog && IsWindow(g_cachedDialog)) {
+				typedef void* (__stdcall *FromHandleFn)(HWND);
+				static FromHandleFn fromHandle = nullptr;
+				if (!fromHandle) {
+					HMODULE hMFC = GetModuleHandleA("mfc42.dll");
+					if (!hMFC) hMFC = GetModuleHandleA("mfc140.dll");
+					if (!hMFC) hMFC = GetModuleHandleA("mfc100.dll");
+					if (hMFC) fromHandle = (FromHandleFn)GetProcAddress(hMFC, (LPCSTR)4866);
 				}
+				if (fromHandle) dlgPtr = fromHandle(g_cachedDialog);
+			}
+			if (!dlgPtr) {
+				typedef void* (__cdecl *AppAccFn)();
+				AppAccFn fn = (AppAccFn)0x0041F880;
+				void* app = fn ? fn() : nullptr;
+				if (app) dlgPtr = (char*)app + 0x39B948;
+			}
+			if (dlgPtr && !IsBadReadPtr(dlgPtr, 0x1400)) {
+				char* dlg = (char*)dlgPtr;
+				// Try both layouts: CWnd+0x20 and direct HWND at offset
+				HWND hAcc1 = *(HWND*)(dlg + 0xCD0 + 0x20);
+				HWND hPwd1 = *(HWND*)(dlg + 0xFE8 + 0x20);
+				HWND hTok1 = *(HWND*)(dlg + 0x1300 + 0x20);
+				HWND hAcc2 = *(HWND*)(dlg + 0xCD0);
+				HWND hPwd2 = *(HWND*)(dlg + 0xFE8);
+				// Prefer the one that is a valid window and matches an enumerated edit
+				g_dlgMemAccountHwnd = (hAcc1 && IsWindow(hAcc1)) ? hAcc1 : hAcc2;
+				g_dlgMemPasswordHwnd = (hPwd1 && IsWindow(hPwd1)) ? hPwd1 : hPwd2;
+				g_dlgMemTokenHwnd = (hTok1 && IsWindow(hTok1)) ? hTok1 : *(HWND*)(dlg + 0x1300);
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
