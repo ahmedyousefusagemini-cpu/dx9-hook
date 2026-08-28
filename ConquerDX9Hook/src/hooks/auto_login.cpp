@@ -833,6 +833,39 @@ namespace AutoLogin
 		// 3) SendInput unicode (real keystrokes, triggers Process per-key handler)
 		// 4) Fallback: direct memory write to CDlgLogin+0x13BD0 via game's encrypt
 		//    (bypasses UI entirely — login reads from there)
+		// Clear any existing 16-char mask first (both HWND and CEncryptData) — fixes the 16 vs 8 issue
+		__try {
+			typedef void* (__cdecl *AppAccFnClr)();
+			AppAccFnClr fnClr = (AppAccFnClr)0x0041F880;
+			void* appClr = fnClr ? fnClr() : nullptr;
+			if (appClr) {
+				char* dlgClr = (char*)appClr + 0x39B948;
+				const uintptr_t offs[2] = {0x13BD0, 0x13980};
+				for (int oi = 0; oi < 2; ++oi) {
+					char* p = dlgClr + offs[oi];
+					if (IsBadWritePtr(p, 0x208)) continue;
+					DWORD oldProt = 0;
+					VirtualProtect(p, 0x208, PAGE_EXECUTE_READWRITE, &oldProt);
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(p, "");
+					DWORD tmp = 0;
+					VirtualProtect(p, 0x208, oldProt, &tmp);
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		for (int k = 0; k < 2; k++) {
+			HWND h = (k==0)? passwordEdit : g_resolvedPasswordHwnd;
+			if (!h || !IsWindow(h)) continue;
+			SendMessageA(h, EM_SETSEL, 0, -1);
+			SendMessageA(h, WM_CLEAR, 0, 0);
+			SendMessageA(h, WM_SETTEXT, 0, (LPARAM)"");
+		}
+		if (g_dlgMemPasswordHwnd && IsWindow(g_dlgMemPasswordHwnd)) {
+			SendMessageA(g_dlgMemPasswordHwnd, EM_SETSEL, 0, -1);
+			SendMessageA(g_dlgMemPasswordHwnd, WM_CLEAR, 0, 0);
+			SendMessageA(g_dlgMemPasswordHwnd, WM_SETTEXT, 0, (LPARAM)"");
+		}
+		Sleep(30);
+
 		if (!SetFocus(passwordEdit))
 			return -1;
 		Sleep(50);
@@ -863,27 +896,48 @@ namespace AutoLogin
 		SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)"");
 		Sleep(20);
 
-		// Type via both WM_CHAR and SendInput for maximum compatibility.
-		// WM_CHAR is what fgui's WndProc often handles for text input.
+		// Type via WM_CHAR (fgui) and VkKeyScan SendInput (MFC Process per-key handler).
+		// Manual typing is one VK per frame (~50-100ms), not burst unicode.
 		for (const char* p = g_activePassword; *p; ++p)
 		{
 			WPARAM ch = (WPARAM)(unsigned char)*p;
 			SendMessageA(passwordEdit, WM_CHAR, ch, 1);
-			Sleep(10);
+			Sleep(20);
 		}
 		Sleep(50);
-		// Also SendInput unicode as fallback (in case WM_CHAR alone is not enough)
+		// SendInput with VkKeyScan (generates WM_KEYDOWN/WM_CHAR via TranslateMessage)
 		for (const char* p = g_activePassword; *p; ++p)
 		{
-			INPUT down = {0}, up = {0};
-			WCHAR w = (WCHAR)(unsigned char)*p;
-			down.type = INPUT_KEYBOARD; down.ki.wScan = w; down.ki.dwFlags = KEYEVENTF_UNICODE;
-			up.type = INPUT_KEYBOARD; up.ki.wScan = w; up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-			SendInput(1, &down, sizeof(INPUT));
-			SendInput(1, &up, sizeof(INPUT));
-			// Also WM_CHAR for this char
-			SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
-			Sleep(30);
+			SHORT vk = VkKeyScanA(*p);
+			if (vk == -1) {
+				// Fallback to unicode for chars not in current layout
+				INPUT down = {0}, up = {0};
+				WCHAR w = (WCHAR)(unsigned char)*p;
+				down.type = INPUT_KEYBOARD; down.ki.wScan = w; down.ki.dwFlags = KEYEVENTF_UNICODE;
+				up.type = INPUT_KEYBOARD; up.ki.wScan = w; up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+				SendInput(1, &down, sizeof(INPUT));
+				SendInput(1, &up, sizeof(INPUT));
+				SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
+			} else {
+				BYTE vkCode = LOBYTE(vk);
+				BYTE shift = HIBYTE(vk);
+				INPUT shiftDown = {0}, shiftUp = {0};
+				if (shift & 1) { shiftDown.type = INPUT_KEYBOARD; shiftDown.ki.wVk = VK_SHIFT; SendInput(1, &shiftDown, sizeof(INPUT)); Sleep(10); }
+				if (shift & 2) { INPUT ctrlDown={0}; ctrlDown.type=INPUT_KEYBOARD; ctrlDown.ki.wVk=VK_CONTROL; SendInput(1,&ctrlDown,sizeof(INPUT)); Sleep(10); }
+				if (shift & 4) { INPUT altDown={0}; altDown.type=INPUT_KEYBOARD; altDown.ki.wVk=VK_MENU; SendInput(1,&altDown,sizeof(INPUT)); Sleep(10); }
+				INPUT down = {0}; down.type = INPUT_KEYBOARD; down.ki.wVk = vkCode;
+				SendInput(1, &down, sizeof(INPUT));
+				Sleep(20);
+				INPUT up = {0}; up.type = INPUT_KEYBOARD; up.ki.wVk = vkCode; up.ki.dwFlags = KEYEVENTF_KEYUP;
+				SendInput(1, &up, sizeof(INPUT));
+				Sleep(10);
+				if (shift & 4) { INPUT altUp={0}; altUp.type=INPUT_KEYBOARD; altUp.ki.wVk=VK_MENU; altUp.ki.dwFlags=KEYEVENTF_KEYUP; SendInput(1,&altUp,sizeof(INPUT)); Sleep(10); }
+				if (shift & 2) { INPUT ctrlUp={0}; ctrlUp.type=INPUT_KEYBOARD; ctrlUp.ki.wVk=VK_CONTROL; ctrlUp.ki.dwFlags=KEYEVENTF_KEYUP; SendInput(1,&ctrlUp,sizeof(INPUT)); Sleep(10); }
+				if (shift & 1) { shiftUp.type = INPUT_KEYBOARD; shiftUp.ki.wVk = VK_SHIFT; shiftUp.ki.dwFlags = KEYEVENTF_KEYUP; SendInput(1, &shiftUp, sizeof(INPUT)); Sleep(10); }
+				// Also ensure WM_CHAR is delivered
+				SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
+			}
+			Sleep(50);
 		}
 		Sleep(100);
 		// Trigger EN_KILLFOCUS sync by moving focus away and back: focus account then back to password
@@ -905,17 +959,16 @@ namespace AutoLogin
 			void* app = fn ? fn() : nullptr;
 			if (app) {
 				char* dlg = (char*)app + 0x39B948;
-				auto doEnc = [&](uintptr_t off){
-					char* p = dlg + off;
-					if (IsBadWritePtr(p, 0x208)) return;
+				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
+				for (int oi = 0; oi < 2; ++oi) {
+					char* p = dlg + offsEnc[oi];
+					if (IsBadWritePtr(p, 0x208)) continue;
 					DWORD oldProt = 0;
 					VirtualProtect(p, 0x208, PAGE_EXECUTE_READWRITE, &oldProt);
 					((SetEncStringFunc)SET_ENC_STRING_ADDR)(p, g_activePassword);
 					DWORD tmp = 0;
 					VirtualProtect(p, 0x208, oldProt, &tmp);
-				};
-				doEnc(0x13BD0);
-				doEnc(0x13980);
+				}
 				// Also try the second copy at *(dlg+0x13DD8)+0x30C if it exists (some builds use it)
 				void* pSecondBase = *(void**)(dlg + 0x13DD8);
 				if (pSecondBase && !IsBadWritePtr((char*)pSecondBase + 0x30C, 0x208)) {
