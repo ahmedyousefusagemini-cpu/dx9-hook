@@ -29,7 +29,12 @@
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
-namespace AutoLogin { extern char g_activeAccount[64]; extern char g_activePassword[128]; }
+namespace AutoLogin {
+	extern char g_activeAccount[64];
+	extern char g_activePassword[128];
+	extern HWND g_resolvedAccountHwnd;
+	extern HWND g_resolvedPasswordHwnd;
+}
 
 // MinHook target: FUN_0101C9D8 (cdecl) - the login packet sender.
 // Replaces the account argument with the ini account when the game passes
