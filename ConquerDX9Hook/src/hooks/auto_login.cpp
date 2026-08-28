@@ -1431,6 +1431,27 @@ void RenderAutoLoginInterface()
 					int len980 = *(int*)(dlgDbg + 0x13980 + 0x104);
 					char flag13620 = *(char*)(dlgDbg + 0x13620);
 					ImGui::Text("EncLens: 0x13BD0=%d 0x13980=%d flag13620=%d", lenBD0, len980, (int)flag13620);
+					// Decrypted preview via 00EB31E3 (CEncryptData::GetString)
+					__try {
+						typedef void (__thiscall *GetEncStrFn)(void*, void*);
+						char out1[32] = {0}, out2[32] = {0};
+						((GetEncStrFn)0x00EB31E3)(dlgDbg + 0x13BD0, out1);
+						((GetEncStrFn)0x00EB31E3)(dlgDbg + 0x13980, out2);
+						// std::string layout: if *(int*)(out+0x14) <=15, str at out, else *(char**)out
+						int sz1 = *(int*)(out1 + 0x14);
+						char* ps1 = (sz1 <= 15) ? out1 : *(char**)out1;
+						int sz2 = *(int*)(out2 + 0x14);
+						char* ps2 = (sz2 <= 15) ? out2 : *(char**)out2;
+						if (ps1 && !IsBadReadPtr(ps1, 1)) {
+							char tmp1[32] = {0}; strncpy(tmp1, ps1, 31);
+							ImGui::Text("Dec 0x13BD0: \"%s\" (len=%d)", tmp1, sz1);
+						}
+						if (ps2 && !IsBadReadPtr(ps2, 1)) {
+							char tmp2[32] = {0}; strncpy(tmp2, ps2, 31);
+							ImGui::Text("Dec 0x13980: \"%s\" (len=%d)", tmp2, sz2);
+						}
+						// cleanup std::string dtor (call 0x00420847 on out1/out2 if needed, but we leak small)
+					} __except(EXCEPTION_EXECUTE_HANDLER) {}
 					// Show account std::string at 0x13B88 for sanity
 					char accBuf[64] = {0};
 					char* accPtr = dlgDbg + 0x13B88;
