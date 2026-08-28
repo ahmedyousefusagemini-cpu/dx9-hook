@@ -88,6 +88,7 @@ namespace AutoLogin
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
 	HWND g_cachedButton = NULL;
+	HWND g_filledAccountDialog = NULL;  // dialog instance we already auto-filled
 	DWORD g_lastFindTick = 0;
 
 	// Diagnostics for the overlay (button identity).
@@ -460,7 +461,8 @@ namespace AutoLogin
 
 	// Fills the account edit (WM_SETTEXT for display) and logs the status.
 	// The actual login packet's account is guaranteed by the MinHook on
-	// FUN_0101C9D8 — no member write needed.
+	// FUN_0101C9D8 — no member write needed. Never overwrites a field that
+	// already holds a different account.
 	static int FillAccountEdit(HWND dialog)
 	{
 		if (!IsDialogUsable(dialog))
@@ -475,11 +477,20 @@ namespace AutoLogin
 		int result = -1;
 		if (accountEdit && IsWindow(accountEdit))
 		{
-			SendMessage(accountEdit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
 			char t[128] = "";
 			GetWindowTextA(accountEdit, t, sizeof(t));
-			if (lstrcmpA(t, g_activeAccount) == 0)
-				result = 0;  // display shows it
+			if (t[0] == 0 || lstrcmpA(t, g_activeAccount) == 0)
+			{
+				SendMessage(accountEdit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
+				char after[128] = "";
+				GetWindowTextA(accountEdit, after, sizeof(after));
+				if (lstrcmpA(after, g_activeAccount) == 0)
+					result = 0;  // display shows it
+			}
+			else
+			{
+				result = 0;  // already a different account - leave it, hook still covers login
+			}
 		}
 
 		// Install the MinHook on FUN_0101C9D8 if not done yet.
@@ -649,6 +660,20 @@ namespace AutoLogin
 					EnumChildWindows(dialog, CollectButtonsProc, (LPARAM)g_buttons);
 					EnumChildWindows(dialog, CollectEditsProc, (LPARAM)g_edits);
 				}
+			}
+		}
+
+		// Auto-fill the account field once per login dialog instance (the
+		// login screen just appeared or reappeared after a failed login).
+		if (g_filledAccountDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
+		{
+			g_filledAccountDialog = g_cachedDialog;
+			if (g_activeAccount[0] == 0)
+				LoadActiveAccount();
+			if (g_activeAccount[0])
+			{
+				InstallLoginHook();
+				FillAccountEdit(g_cachedDialog);
 			}
 		}
 
