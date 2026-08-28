@@ -76,6 +76,7 @@ namespace AutoLogin
 	extern int  g_clickMethod;
 	extern int  g_buttonIdOverride;
 	extern int  g_accountEditIndex;
+	extern int  g_passwordEditIndex;
 }
 
 extern bool g_isWireframeEnabled;
@@ -161,6 +162,7 @@ void SaveConfig()
 	WriteInt("AutoLogin", "ClickMethod", AutoLogin::g_clickMethod);
 	WriteInt("AutoLogin", "ButtonIdOverride", AutoLogin::g_buttonIdOverride);
 	WriteInt("AutoLogin", "AccountEditIndex", AutoLogin::g_accountEditIndex);
+	WriteInt("AutoLogin", "PasswordEditIndex", AutoLogin::g_passwordEditIndex);
 }
 
 void LoadConfig()
@@ -245,6 +247,8 @@ void LoadConfig()
 	if (AutoLogin::g_buttonIdOverride < 0) AutoLogin::g_buttonIdOverride = 0;
 	AutoLogin::g_accountEditIndex = GetPrivateProfileIntA("AutoLogin", "AccountEditIndex", -1, path);
 	if (AutoLogin::g_accountEditIndex < -1) AutoLogin::g_accountEditIndex = -1;
+	AutoLogin::g_passwordEditIndex = GetPrivateProfileIntA("AutoLogin", "PasswordEditIndex", -1, path);
+	if (AutoLogin::g_passwordEditIndex < -1) AutoLogin::g_passwordEditIndex = -1;
 
 	// --- Apply side effects ---
 	// The enable paths kick off the my-role scan / raise the speed cap table

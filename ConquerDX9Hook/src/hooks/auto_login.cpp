@@ -35,9 +35,11 @@ namespace AutoLogin { extern char g_activeAccount[64]; extern char g_activePassw
 // Replaces the account argument with the ini account when the game passes
 // an empty (or matching) one, so the server always receives the right name.
 // Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf at +0x108,
-// see FUN_00ea1f50). When an ini Pass= is present we re-encrypt the plain
-// password into the game's struct in-place so the packet carries the right pwd
-// regardless of fgui sync state.
+// see FUN_00ea1f50). The HOOK DOES NOT re-encrypt by default — the UI typing
+// via SendInput + Process (dlg+0x13BD0 encrypt) is the source of truth. The
+// hook only acts as a last-resort when the game's CEncryptData is empty
+// (len==0) to avoid corrupting a correctly-typed password with a potentially
+// wrong key base. See FillPasswordEdit for the UI path.
 typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* serverName, int mode, int extra);
 static LoginSendFunc g_originalLoginSend = NULL;
 static bool g_loginHookInstalled = false;
@@ -47,6 +49,10 @@ const uintptr_t LOGIN_SEND_ADDR = 0x0101C9D8;
 // Game's CEncryptData::SetString — encrypts plain into the struct at ECX.
 // Verified: FUN_00ea1f50 @ 0x00EA1F50 is void __thiscall(void* this, const char* plain)
 // where this+0x104 = len, this+0x108 = enc buf[0x100] (encryptdata.cpp:0x1dc).
+// NOTE: the correct base for the login's password is dlg+0x13BD0 directly
+// (len at +0x104), NOT the +0x30C thunk used by the UI edit-sync path
+// (FUN_00607CD5). Using the wrong base produces a wrong encrypted blob
+// and the server replies "invalid username or password".
 typedef void (__thiscall* SetEncStringFunc)(void* encData, const char* plain);
 static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA1F50;
 
@@ -59,15 +65,24 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
 				account = AutoLogin::g_activeAccount;
 		}
+		// Password: only patch if the game's CEncryptData is empty (len==0).
+		// If UI typing succeeded (len>0), leave it alone — the UI's encrypt via
+		// Process is correct. This avoids the previous bug where unconditional
+		// re-encrypt with SetEncString produced a wrong blob (wrong key base)
+		// and caused "invalid username or password".
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
 			{
 				if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
 				{
-					// Only patch when the game's pwd is empty or we recognize it was typed by us.
-					// We always patch when mode==0 and ini has a Pass — the encrypt is idempotent.
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+					int encLen = *(int*)((char*)password + 0x104);
+					// encLen is the encrypted length; 0 or 0xFFFFFFFF means empty/not set.
+					// Only patch when empty, or when the UI failed to sync.
+					if (encLen <= 0 || encLen > 0x100)
+					{
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+					}
 				}
 			}
 			__except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -106,6 +121,7 @@ namespace AutoLogin
 	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 	int  g_accountEditIndex = -1;    // -1 = auto (topmost visible Edit), else index into g_edits
+	int  g_passwordEditIndex = -1;   // -1 = auto (second smallest Y), else index into g_edits
 
 	// Active account loaded from accountinfo.ini ([AccountN] Use=1 -> User).
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
@@ -474,10 +490,28 @@ namespace AutoLogin
 		accountEdit = NULL;
 		passwordEdit = NULL;
 
-		if (g_accountEditIndex >= 0 && g_accountEditIndex < g_editListCount)
+		// If both pinned, use them directly.
+		if (g_accountEditIndex >= 0 && g_accountEditIndex < g_editListCount &&
+			g_passwordEditIndex >= 0 && g_passwordEditIndex < g_editListCount)
 		{
 			accountEdit = g_edits[g_accountEditIndex].hwnd;
-			// Password = the next visible edit below the account.
+			passwordEdit = g_edits[g_passwordEditIndex].hwnd;
+		}
+		else if (g_passwordEditIndex >= 0 && g_passwordEditIndex < g_editListCount)
+		{
+			passwordEdit = g_edits[g_passwordEditIndex].hwnd;
+			// Account = topmost above password or scan top if not found.
+			EditScan scan = { NULL, NULL, 0, 0 };
+			EnumChildWindows(dialog, FindEditFields, (LPARAM)&scan);
+			accountEdit = scan.top;
+			// If scan.second is not our pinned password, keep pinned.
+			if (passwordEdit == NULL || !IsWindow(passwordEdit))
+				passwordEdit = scan.second;
+		}
+		else if (g_accountEditIndex >= 0 && g_accountEditIndex < g_editListCount)
+		{
+			accountEdit = g_edits[g_accountEditIndex].hwnd;
+			// Password = the next visible edit below the account (auto) unless pinned.
 			int ay = g_edits[g_accountEditIndex].y;
 			int bestY = 0;
 			for (int i = 0; i < g_editListCount; i++)
@@ -499,6 +533,50 @@ namespace AutoLogin
 			passwordEdit = scan.second;
 		}
 		return accountEdit != NULL && IsWindow(accountEdit);
+	}
+
+	// Resolve only the password edit (used by FillPasswordEdit when account not needed)
+	static bool ResolvePasswordEdit(HWND dialog, HWND& passwordEdit)
+	{
+		passwordEdit = NULL;
+		if (g_passwordEditIndex >= 0 && g_passwordEditIndex < g_editListCount)
+		{
+			passwordEdit = g_edits[g_passwordEditIndex].hwnd;
+			if (passwordEdit && IsWindow(passwordEdit) && IsWindowVisible(passwordEdit))
+				return true;
+		}
+		// Fallback to second smallest Y
+		EditScan scan = { NULL, NULL, 0, 0 };
+		EnumChildWindows(dialog, FindEditFields, (LPARAM)&scan);
+		passwordEdit = scan.second;
+		if (passwordEdit == NULL)
+		{
+			// If only one edit, try any visible edit not the account top.
+			HWND accountEdit = NULL;
+			if (g_accountEditIndex >= 0 && g_accountEditIndex < g_editListCount)
+				accountEdit = g_edits[g_accountEditIndex].hwnd;
+			else
+				accountEdit = scan.top;
+			// Find next best below account
+			if (accountEdit)
+			{
+				int ay = 0;
+				RECT rc;
+				if (GetWindowRect(accountEdit, &rc)) ay = rc.top;
+				int bestY = 0;
+				for (int i = 0; i < g_editListCount; i++)
+				{
+					if (g_edits[i].hwnd == accountEdit) continue;
+					if (g_edits[i].y <= ay) continue;
+					if (passwordEdit == NULL || g_edits[i].y < bestY)
+					{
+						passwordEdit = g_edits[i].hwnd;
+						bestY = g_edits[i].y;
+					}
+				}
+			}
+		}
+		return passwordEdit != NULL && IsWindow(passwordEdit);
 	}
 
 	// Fills the account edit (WM_SETTEXT for display) and logs the status.
@@ -557,11 +635,18 @@ namespace AutoLogin
 		if (g_activePassword[0] == 0)
 			return -1;
 
-		HWND accountEdit = NULL, passwordEdit = NULL;
-		if (!ResolveAccountEdit(dialog, accountEdit, passwordEdit))
+		HWND passwordEdit = NULL;
+		if (!ResolvePasswordEdit(dialog, passwordEdit))
 			return -1;
 		if (!passwordEdit || !IsWindow(passwordEdit))
 			return -1;
+		// Also resolve account for focus dance (best effort)
+		HWND accountEdit = NULL;
+		{
+			HWND tmpAcc = NULL, tmpPwd = NULL;
+			if (ResolveAccountEdit(dialog, tmpAcc, tmpPwd))
+				accountEdit = tmpAcc;
+		}
 
 		// If field already holds a different non-empty password and not forced, skip typing.
 		char cur[128] = "";
@@ -989,27 +1074,39 @@ void RenderAutoLoginInterface()
 
 		if (AutoLogin::g_editListCount > 0)
 		{
-			ImGui::Text("Edit fields (click 'use' to pick the account field):");
+			ImGui::Text("Edit fields (pin with acc/pwd, auto = top/second Y):");
+			ImGui::TextDisabled("Current: account idx=%d  password idx=%d", AutoLogin::g_accountEditIndex, AutoLogin::g_passwordEditIndex);
 			for (int i = 0; i < AutoLogin::g_editListCount; i++)
 			{
 				const AutoLogin::EditInfo& ei = AutoLogin::g_edits[i];
 				ImGui::PushID(1000 + i);
+				const char* tag = "";
+				if (i == AutoLogin::g_accountEditIndex && i == AutoLogin::g_passwordEditIndex) tag = "  <== ACC+PWD";
+				else if (i == AutoLogin::g_accountEditIndex) tag = "  <== ACCOUNT";
+				else if (i == AutoLogin::g_passwordEditIndex) tag = "  <== PASSWORD";
 				ImGui::Text("  #%02d y=%-5d 0x%08X \"%s\"%s",
 					i, ei.y, (unsigned int)ei.hwnd,
 					ei.text[0] ? ei.text : "(empty)",
-					i == AutoLogin::g_accountEditIndex ? "  <== ACCOUNT" : "");
+					tag);
 				ImGui::SameLine();
-				if (ImGui::SmallButton("use"))
+				if (ImGui::SmallButton("acc"))
 				{
 					AutoLogin::g_accountEditIndex = i;
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton("pwd"))
+				{
+					AutoLogin::g_passwordEditIndex = i;
 				}
 				ImGui::SameLine();
 				if (ImGui::SmallButton("auto"))
 				{
 					AutoLogin::g_accountEditIndex = -1;
+					AutoLogin::g_passwordEditIndex = -1;
 				}
 				ImGui::PopID();
 			}
+			ImGui::TextDisabled("Tip: if Fill Password types into wrong box (see 6 edits), pin pwd index here then retry Fill Password");
 		}
 
 		ImGui::InputInt("Button ID override (0=auto)", &AutoLogin::g_buttonIdOverride);
