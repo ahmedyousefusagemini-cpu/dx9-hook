@@ -935,8 +935,6 @@ namespace AutoLogin
 				if (shift & 4) { INPUT altUp={0}; altUp.type=INPUT_KEYBOARD; altUp.ki.wVk=VK_MENU; altUp.ki.dwFlags=KEYEVENTF_KEYUP; SendInput(1,&altUp,sizeof(INPUT)); Sleep(10); }
 				if (shift & 2) { INPUT ctrlUp={0}; ctrlUp.type=INPUT_KEYBOARD; ctrlUp.ki.wVk=VK_CONTROL; ctrlUp.ki.dwFlags=KEYEVENTF_KEYUP; SendInput(1,&ctrlUp,sizeof(INPUT)); Sleep(10); }
 				if (shift & 1) { shiftUp.type = INPUT_KEYBOARD; shiftUp.ki.wVk = VK_SHIFT; shiftUp.ki.dwFlags = KEYEVENTF_KEYUP; SendInput(1, &shiftUp, sizeof(INPUT)); Sleep(10); }
-				// Also ensure WM_CHAR is delivered
-				SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
 			}
 			Sleep(50);
 		}
