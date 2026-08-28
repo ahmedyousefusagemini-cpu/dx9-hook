@@ -1443,11 +1443,11 @@ void RenderAutoLoginInterface()
 						int sz2 = *(int*)(out2 + 0x14);
 						char* ps2 = (sz2 <= 15) ? out2 : *(char**)out2;
 						if (ps1 && !IsBadReadPtr(ps1, 1)) {
-							char tmp1[32] = {0}; strncpy(tmp1, ps1, 31);
+							char tmp1[32] = {0}; strncpy_s(tmp1, sizeof(tmp1), ps1, _TRUNCATE);
 							ImGui::Text("Dec 0x13BD0: \"%s\" (len=%d)", tmp1, sz1);
 						}
 						if (ps2 && !IsBadReadPtr(ps2, 1)) {
-							char tmp2[32] = {0}; strncpy(tmp2, ps2, 31);
+							char tmp2[32] = {0}; strncpy_s(tmp2, sizeof(tmp2), ps2, _TRUNCATE);
 							ImGui::Text("Dec 0x13980: \"%s\" (len=%d)", tmp2, sz2);
 						}
 						// cleanup std::string dtor (call 0x00420847 on out1/out2 if needed, but we leak small)
