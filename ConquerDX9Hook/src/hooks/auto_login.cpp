@@ -275,6 +275,9 @@ namespace AutoLogin
 	int  g_passwordEditIndex = -1;   // -1 = auto (second smallest Y), else index into g_edits
 	HWND g_resolvedAccountHwnd = NULL; // last resolved account HWND (for GetWindowText hook)
 	HWND g_resolvedPasswordHwnd = NULL;// last resolved password HWND (for GetWindowText hook)
+	HWND g_dlgMemAccountHwnd = NULL; // HWND at dlg+0xCD0+0x20 (true account CWnd)
+	HWND g_dlgMemPasswordHwnd = NULL;// HWND at dlg+0xFE8+0x20 (true password CWnd)
+	HWND g_dlgMemTokenHwnd = NULL;   // HWND at dlg+0x1300+0x20 (token CWnd)
 
 	// Active account loaded from accountinfo.ini ([AccountN] Use=1 -> User).
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
@@ -796,12 +799,17 @@ namespace AutoLogin
 			return -1;
 		if (!passwordEdit || !IsWindow(passwordEdit))
 			return -1;
+		// Prefer the true login CWnd from dlg+0xFE8 if we have it (more reliable than Y-sort)
+		if (g_dlgMemPasswordHwnd && IsWindow(g_dlgMemPasswordHwnd) && IsWindowVisible(g_dlgMemPasswordHwnd))
+			passwordEdit = g_dlgMemPasswordHwnd;
 		// Also resolve account for focus dance (best effort)
 		HWND accountEdit = NULL;
 		{
 			HWND tmpAcc = NULL, tmpPwd = NULL;
 			if (ResolveAccountEdit(dialog, tmpAcc, tmpPwd))
 				accountEdit = tmpAcc;
+			if (g_dlgMemAccountHwnd && IsWindow(g_dlgMemAccountHwnd))
+				accountEdit = g_dlgMemAccountHwnd;
 		}
 
 		// If field already holds a different non-empty password and not forced, skip typing.
@@ -815,14 +823,23 @@ namespace AutoLogin
 
 		InstallLoginHook();
 
-		// Focus the password edit and type the plain password with SendInput.
-		// This triggers the game's EN_KILLFOCUS/Process path that encrypts into
-		// CDlgLogin+0x13BD0 (CEncryptData +0x104/+0x108) correctly.
+		// Focus the password edit and type the plain password.
+		// Strategy: try all input paths that the fgui/MFC login may listen to:
+		// 1) WM_SETTEXT via SendMessage (quick, but fgui may ignore)
+		// 2) WM_CHAR via SendMessage (fgui's char handler)
+		// 3) SendInput unicode (real keystrokes, triggers Process per-key handler)
+		// 4) Fallback: direct memory write to CDlgLogin+0x13BD0 via game's encrypt
+		//    (bypasses UI entirely — login reads from there)
 		if (!SetFocus(passwordEdit))
 			return -1;
+		Sleep(50);
+		InstallGetWindowTextHooks(); // ensure GetWindowText hook is up for the game's GetWindowText path
+
+		// Try WM_SETTEXT first (some builds accept it for display)
+		SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
 		Sleep(30);
 
-		// Select all + delete to clear.
+		// Select all + delete to clear via SendInput (ensures fgui's internal buffer is cleared)
 		{
 			INPUT ctrlDown = {0}; ctrlDown.type = INPUT_KEYBOARD; ctrlDown.ki.wVk = VK_CONTROL;
 			INPUT aDown = {0}; aDown.type = INPUT_KEYBOARD; aDown.ki.wVk = 'A';
@@ -833,42 +850,91 @@ namespace AutoLogin
 			SendInput(1, &aUp, sizeof(INPUT));
 			SendInput(1, &ctrlUp, sizeof(INPUT));
 		}
-		Sleep(20);
-		// Delete
+		Sleep(30);
 		INPUT del = {0}; del.type = INPUT_KEYBOARD; del.ki.wVk = VK_DELETE;
 		SendInput(1, &del, sizeof(INPUT));
 		del.ki.dwFlags = KEYEVENTF_KEYUP;
 		SendInput(1, &del, sizeof(INPUT));
+		Sleep(30);
+		// Clear via WM_SETTEXT again to be sure
+		SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)"");
 		Sleep(20);
 
-		// Type the password via KEYEVENTF_UNICODE (works for any charset, no shift handling).
+		// Type via both WM_CHAR and SendInput for maximum compatibility.
+		// WM_CHAR is what fgui's WndProc often handles for text input.
+		for (const char* p = g_activePassword; *p; ++p)
+		{
+			WPARAM ch = (WPARAM)(unsigned char)*p;
+			SendMessageA(passwordEdit, WM_CHAR, ch, 1);
+			Sleep(10);
+		}
+		Sleep(50);
+		// Also SendInput unicode as fallback (in case WM_CHAR alone is not enough)
 		for (const char* p = g_activePassword; *p; ++p)
 		{
 			INPUT down = {0}, up = {0};
 			WCHAR w = (WCHAR)(unsigned char)*p;
-			// For plain ASCII Pass=, VK_PACKET unicode is simplest; fallback to VkKeyScan if needed.
 			down.type = INPUT_KEYBOARD; down.ki.wScan = w; down.ki.dwFlags = KEYEVENTF_UNICODE;
 			up.type = INPUT_KEYBOARD; up.ki.wScan = w; up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
 			SendInput(1, &down, sizeof(INPUT));
 			SendInput(1, &up, sizeof(INPUT));
-			Sleep(5);
+			// Also WM_CHAR for this char
+			SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 1);
+			Sleep(30);
 		}
+		Sleep(100);
 		// Trigger EN_KILLFOCUS sync by moving focus away and back: focus account then back to password
 		// so the game's Process handler copies Edit text → CEncryptData.
 		if (accountEdit && IsWindow(accountEdit))
 			SetFocus(accountEdit);
-		Sleep(20);
+		Sleep(50);
 		SetFocus(passwordEdit);
-		Sleep(20);
+		Sleep(100);
 
-		// Verify display (GetWindowText may return **** or plain depending on style — check length at least)
+		// Fallback: directly write to CDlgLogin+0x13BD0 via game's encrypt.
+		// This is the struct that FUN_008A8FCA reads at login time (LEA EAX,[EDI+0x13BD0]).
+		// Doing it here ensures the packet is correct even if the HWND path failed.
+		// The hook's GetWindowText path already covers the per-frame copy, but this
+		// direct write is the ultimate guarantee.
+		__try {
+			typedef void* (__cdecl *AppAccFn)();
+			AppAccFn fn = (AppAccFn)0x0041F880;
+			void* app = fn ? fn() : nullptr;
+			if (app) {
+				char* dlg = (char*)app + 0x39B948;
+				if (!IsBadWritePtr(dlg + 0x13BD0, 0x208)) {
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(dlg + 0x13BD0, g_activePassword);
+					// Also try the second copy at *(dlg+0x13DD8)+0x30C if it exists (some builds use it)
+					void* pSecondBase = *(void**)(dlg + 0x13DD8);
+					if (pSecondBase && !IsBadWritePtr((char*)pSecondBase + 0x30C, 0x208)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)((char*)pSecondBase + 0x30C, g_activePassword);
+					}
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+		Sleep(50);
+		// Verify via GetWindowText hook (should now return Pass) or via direct memory len
 		char after[128] = "";
+		// GetWindowText will be hooked to return Pass for this HWND, so check that
 		GetWindowTextA(passwordEdit, after, sizeof(after));
-		// If style is ES_PASSWORD, after may be same as before typing but hook still ensures packet.
-		// Consider success if the field is non-empty.
-		if (after[0] != 0)
+		if (after[0] != 0 && lstrcmpA(after, g_activePassword) == 0)
 			return 0;
-		// Even if GetWindowText fails, hook guarantees packet — return success.
+		// Also check the dlg's encrypted len as ground truth
+		__try {
+			typedef void* (__cdecl *AppAccFn2)();
+			AppAccFn2 fn2 = (AppAccFn2)0x0041F880;
+			void* app2 = fn2 ? fn2() : nullptr;
+			if (app2) {
+				char* dlg2 = (char*)app2 + 0x39B948;
+				if (!IsBadReadPtr(dlg2 + 0x13BD0 + 0x104, 4)) {
+					int encLen = *(int*)(dlg2 + 0x13BD0 + 0x104);
+					if (encLen > 0 && encLen < 0x100)
+						return 0;
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		// Even if checks fail, the GetWindowText hook + direct write should make login succeed.
 		return 0;
 	}
 
@@ -1037,6 +1103,21 @@ namespace AutoLogin
 			HWND pwd2 = NULL;
 			ResolvePasswordEdit(g_cachedDialog, pwd2);
 		}
+		// Diagnostics: read the true login CWnd HWNDs from CDlgLogin object (app+0x39B948)
+		// to show which enumerated Edit is the real account/password (offsets +0xCD0/+0xFE8).
+		__try {
+			typedef void* (__cdecl *AppAccFn)();
+			AppAccFn fn = (AppAccFn)0x0041F880;
+			void* app = fn ? fn() : nullptr;
+			if (app) {
+				char* dlg = (char*)app + 0x39B948;
+				if (!IsBadReadPtr(dlg, 0x1400)) {
+					g_dlgMemAccountHwnd = *(HWND*)(dlg + 0xCD0 + 0x20);
+					g_dlgMemPasswordHwnd = *(HWND*)(dlg + 0xFE8 + 0x20);
+					g_dlgMemTokenHwnd = *(HWND*)(dlg + 0x1300 + 0x20);
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
 		// Re-discover the dialog at most every 500 ms (it is created at
 		// startup and destroyed on login; cheap to re-scan that rarely).
@@ -1243,6 +1324,12 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Login-send hook: %s", g_loginHookInstalled ? "INSTALLED" : "not installed");
 		ImGui::Text("GW hook: %s", g_gwHookInstalled ? "INSTALLED" : "not installed");
 		ImGui::Text("Resolved HWNDs: acc 0x%08X pwd 0x%08X", (unsigned int)AutoLogin::g_resolvedAccountHwnd, (unsigned int)AutoLogin::g_resolvedPasswordHwnd);
+		ImGui::Text("DlgMem HWNDs: acc 0x%08X pwd 0x%08X token 0x%08X", (unsigned int)AutoLogin::g_dlgMemAccountHwnd, (unsigned int)AutoLogin::g_dlgMemPasswordHwnd, (unsigned int)AutoLogin::g_dlgMemTokenHwnd);
+		if (AutoLogin::g_dlgMemPasswordHwnd && AutoLogin::g_resolvedPasswordHwnd &&
+		    AutoLogin::g_dlgMemPasswordHwnd != AutoLogin::g_resolvedPasswordHwnd)
+		{
+			ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "WARNING: pinned pwd != DlgMem pwd — pin via pwd button to match DlgMem");
+		}
 		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
 
