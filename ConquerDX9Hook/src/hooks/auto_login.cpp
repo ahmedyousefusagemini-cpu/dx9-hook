@@ -134,12 +134,12 @@ static int WINAPI HookedGetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount)
 {
 	if (hWnd && lpString && nMaxCount > 1)
 	{
-		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		if (AutoLogin::g_activePassword[0] && (hWnd == AutoLogin::g_resolvedPasswordHwnd || hWnd == AutoLogin::g_dlgMemPasswordHwnd))
 		{
 			lstrcpynA(lpString, AutoLogin::g_activePassword, nMaxCount);
 			return lstrlenA(lpString);
 		}
-		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		if (AutoLogin::g_activeAccount[0] && (hWnd == AutoLogin::g_resolvedAccountHwnd || hWnd == AutoLogin::g_dlgMemAccountHwnd))
 		{
 			lstrcpynA(lpString, AutoLogin::g_activeAccount, nMaxCount);
 			return lstrlenA(lpString);
@@ -155,14 +155,14 @@ static int WINAPI HookedGetWindowTextW(HWND hWnd, LPWSTR lpString, int nMaxCount
 {
 	if (hWnd && lpString && nMaxCount > 1)
 	{
-		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		if (AutoLogin::g_activePassword[0] && (hWnd == AutoLogin::g_resolvedPasswordHwnd || hWnd == AutoLogin::g_dlgMemPasswordHwnd))
 		{
 			// Convert ANSI Pass to wide
 			int len = MultiByteToWideChar(CP_ACP, 0, AutoLogin::g_activePassword, -1, lpString, nMaxCount);
 			if (len > 0) return len - 1;
 			return 0;
 		}
-		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		if (AutoLogin::g_activeAccount[0] && (hWnd == AutoLogin::g_resolvedAccountHwnd || hWnd == AutoLogin::g_dlgMemAccountHwnd))
 		{
 			int len = MultiByteToWideChar(CP_ACP, 0, AutoLogin::g_activeAccount, -1, lpString, nMaxCount);
 			if (len > 0) return len - 1;
@@ -178,7 +178,7 @@ static LRESULT WINAPI HookedSendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPA
 {
 	if (Msg == WM_GETTEXT && hWnd && lParam)
 	{
-		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		if (AutoLogin::g_activePassword[0] && (hWnd == AutoLogin::g_resolvedPasswordHwnd || hWnd == AutoLogin::g_dlgMemPasswordHwnd))
 		{
 			int nMax = (int)wParam;
 			LPSTR buf = (LPSTR)lParam;
@@ -188,7 +188,7 @@ static LRESULT WINAPI HookedSendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPA
 				return lstrlenA(buf);
 			}
 		}
-		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		if (AutoLogin::g_activeAccount[0] && (hWnd == AutoLogin::g_resolvedAccountHwnd || hWnd == AutoLogin::g_dlgMemAccountHwnd))
 		{
 			int nMax = (int)wParam;
 			LPSTR buf = (LPSTR)lParam;
@@ -208,7 +208,7 @@ static LRESULT WINAPI HookedSendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPA
 {
 	if (Msg == WM_GETTEXT && hWnd && lParam)
 	{
-		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		if (AutoLogin::g_activePassword[0] && (hWnd == AutoLogin::g_resolvedPasswordHwnd || hWnd == AutoLogin::g_dlgMemPasswordHwnd))
 		{
 			int nMax = (int)wParam;
 			LPWSTR buf = (LPWSTR)lParam;
@@ -219,7 +219,7 @@ static LRESULT WINAPI HookedSendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPA
 				return 0;
 			}
 		}
-		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		if (AutoLogin::g_activeAccount[0] && (hWnd == AutoLogin::g_resolvedAccountHwnd || hWnd == AutoLogin::g_dlgMemAccountHwnd))
 		{
 			int nMax = (int)wParam;
 			LPWSTR buf = (LPWSTR)lParam;
