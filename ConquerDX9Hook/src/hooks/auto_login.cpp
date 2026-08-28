@@ -34,6 +34,9 @@ namespace AutoLogin {
 	extern char g_activePassword[128];
 	extern HWND g_resolvedAccountHwnd;
 	extern HWND g_resolvedPasswordHwnd;
+	extern HWND g_dlgMemAccountHwnd;
+	extern HWND g_dlgMemPasswordHwnd;
+	extern HWND g_dlgMemTokenHwnd;
 }
 
 // MinHook target: FUN_0101C9D8 (cdecl) - the login packet sender.
