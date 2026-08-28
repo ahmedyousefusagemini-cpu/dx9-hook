@@ -111,6 +111,152 @@ static bool InstallLoginHook()
 	return true;
 }
 
+// --- GetWindowText / SendMessage hooks for fgui Edits (account/password) ---
+// The fgui Edit HWNDs return "" via GetWindowText/WM_GETTEXT, so the game's
+// CWnd::GetWindowText sees empty. Hooking lets us feed the ini plain text
+// when the game queries the pinned account/password HWNDs.
+typedef int (WINAPI *GetWindowTextAFunc)(HWND, LPSTR, int);
+typedef int (WINAPI *GetWindowTextWFunc)(HWND, LPWSTR, int);
+typedef LRESULT (WINAPI *SendMessageAFunc)(HWND, UINT, WPARAM, LPARAM);
+typedef LRESULT (WINAPI *SendMessageWFunc)(HWND, UINT, WPARAM, LPARAM);
+static GetWindowTextAFunc g_origGetWindowTextA = NULL;
+static GetWindowTextWFunc g_origGetWindowTextW = NULL;
+static SendMessageAFunc g_origSendMessageA = NULL;
+static SendMessageWFunc g_origSendMessageW = NULL;
+static bool g_gwHookInstalled = false;
+
+static int WINAPI HookedGetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount)
+{
+	if (hWnd && lpString && nMaxCount > 1)
+	{
+		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		{
+			lstrcpynA(lpString, AutoLogin::g_activePassword, nMaxCount);
+			return lstrlenA(lpString);
+		}
+		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		{
+			lstrcpynA(lpString, AutoLogin::g_activeAccount, nMaxCount);
+			return lstrlenA(lpString);
+		}
+	}
+	if (g_origGetWindowTextA)
+		return g_origGetWindowTextA(hWnd, lpString, nMaxCount);
+	// Fallback: call original via GetProcAddress if hook not yet installed correctly
+	return DefWindowProcA(hWnd, WM_GETTEXT, (WPARAM)nMaxCount, (LPARAM)lpString);
+}
+
+static int WINAPI HookedGetWindowTextW(HWND hWnd, LPWSTR lpString, int nMaxCount)
+{
+	if (hWnd && lpString && nMaxCount > 1)
+	{
+		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		{
+			// Convert ANSI Pass to wide
+			int len = MultiByteToWideChar(CP_ACP, 0, AutoLogin::g_activePassword, -1, lpString, nMaxCount);
+			if (len > 0) return len - 1;
+			return 0;
+		}
+		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		{
+			int len = MultiByteToWideChar(CP_ACP, 0, AutoLogin::g_activeAccount, -1, lpString, nMaxCount);
+			if (len > 0) return len - 1;
+			return 0;
+		}
+	}
+	if (g_origGetWindowTextW)
+		return g_origGetWindowTextW(hWnd, lpString, nMaxCount);
+	return DefWindowProcW(hWnd, WM_GETTEXT, (WPARAM)nMaxCount, (LPARAM)lpString);
+}
+
+static LRESULT WINAPI HookedSendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+{
+	if (Msg == WM_GETTEXT && hWnd && lParam)
+	{
+		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		{
+			int nMax = (int)wParam;
+			LPSTR buf = (LPSTR)lParam;
+			if (nMax > 1 && buf)
+			{
+				lstrcpynA(buf, AutoLogin::g_activePassword, nMax);
+				return lstrlenA(buf);
+			}
+		}
+		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		{
+			int nMax = (int)wParam;
+			LPSTR buf = (LPSTR)lParam;
+			if (nMax > 1 && buf)
+			{
+				lstrcpynA(buf, AutoLogin::g_activeAccount, nMax);
+				return lstrlenA(buf);
+			}
+		}
+	}
+	if (g_origSendMessageA)
+		return g_origSendMessageA(hWnd, Msg, wParam, lParam);
+	return SendMessageA(hWnd, Msg, wParam, lParam);
+}
+
+static LRESULT WINAPI HookedSendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+{
+	if (Msg == WM_GETTEXT && hWnd && lParam)
+	{
+		if (AutoLogin::g_activePassword[0] && hWnd == AutoLogin::g_resolvedPasswordHwnd)
+		{
+			int nMax = (int)wParam;
+			LPWSTR buf = (LPWSTR)lParam;
+			if (nMax > 1 && buf)
+			{
+				int len = MultiByteToWideChar(CP_ACP, 0, AutoLogin::g_activePassword, -1, buf, nMax);
+				if (len > 0) return len - 1;
+				return 0;
+			}
+		}
+		if (AutoLogin::g_activeAccount[0] && hWnd == AutoLogin::g_resolvedAccountHwnd)
+		{
+			int nMax = (int)wParam;
+			LPWSTR buf = (LPWSTR)lParam;
+			if (nMax > 1 && buf)
+			{
+				int len = MultiByteToWideChar(CP_ACP, 0, AutoLogin::g_activeAccount, -1, buf, nMax);
+				if (len > 0) return len - 1;
+				return 0;
+			}
+		}
+	}
+	if (g_origSendMessageW)
+		return g_origSendMessageW(hWnd, Msg, wParam, lParam);
+	return SendMessageW(hWnd, Msg, wParam, lParam);
+}
+
+static bool InstallGetWindowTextHooks()
+{
+	if (g_gwHookInstalled) return true;
+	HMODULE hUser = GetModuleHandleA("user32.dll");
+	if (!hUser) return false;
+	void* pGTA = (void*)GetProcAddress(hUser, "GetWindowTextA");
+	void* pGTW = (void*)GetProcAddress(hUser, "GetWindowTextW");
+	void* pSMA = (void*)GetProcAddress(hUser, "SendMessageA");
+	void* pSMW = (void*)GetProcAddress(hUser, "SendMessageW");
+	if (!pGTA || !pGTW || !pSMA || !pSMW) return false;
+	MH_STATUS st = MH_Initialize();
+	if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) return false;
+	bool ok = true;
+	if (MH_CreateHook(pGTA, (LPVOID)HookedGetWindowTextA, (LPVOID*)&g_origGetWindowTextA) != MH_OK) ok = false;
+	if (MH_CreateHook(pGTW, (LPVOID)HookedGetWindowTextW, (LPVOID*)&g_origGetWindowTextW) != MH_OK) ok = false;
+	if (MH_CreateHook(pSMA, (LPVOID)HookedSendMessageA, (LPVOID*)&g_origSendMessageA) != MH_OK) ok = false;
+	if (MH_CreateHook(pSMW, (LPVOID)HookedSendMessageW, (LPVOID*)&g_origSendMessageW) != MH_OK) ok = false;
+	if (!ok) return false;
+	if (MH_EnableHook(pGTA) != MH_OK) return false;
+	if (MH_EnableHook(pGTW) != MH_OK) return false;
+	if (MH_EnableHook(pSMA) != MH_OK) return false;
+	if (MH_EnableHook(pSMW) != MH_OK) return false;
+	g_gwHookInstalled = true;
+	return true;
+}
+
 namespace AutoLogin
 {
 	// User intent - auto-click the Login button until the dialog disappears.
@@ -122,6 +268,8 @@ namespace AutoLogin
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 	int  g_accountEditIndex = -1;    // -1 = auto (topmost visible Edit), else index into g_edits
 	int  g_passwordEditIndex = -1;   // -1 = auto (second smallest Y), else index into g_edits
+	HWND g_resolvedAccountHwnd = NULL; // last resolved account HWND (for GetWindowText hook)
+	HWND g_resolvedPasswordHwnd = NULL;// last resolved password HWND (for GetWindowText hook)
 
 	// Active account loaded from accountinfo.ini ([AccountN] Use=1 -> User).
 	char g_activeAccount[64] = "";   // User of the Use=1 section ("" if none)
@@ -532,6 +680,8 @@ namespace AutoLogin
 			accountEdit = scan.top;
 			passwordEdit = scan.second;
 		}
+		g_resolvedAccountHwnd = accountEdit;
+		g_resolvedPasswordHwnd = passwordEdit;
 		return accountEdit != NULL && IsWindow(accountEdit);
 	}
 
@@ -576,6 +726,7 @@ namespace AutoLogin
 				}
 			}
 		}
+		g_resolvedPasswordHwnd = passwordEdit;
 		return passwordEdit != NULL && IsWindow(passwordEdit);
 	}
 
@@ -784,10 +935,12 @@ namespace AutoLogin
 			return;
 		g_clickInProgress = true;
 
-		// The account packet is patched by the FUN_0101C9D8 hook — no member
-		// writes needed here.
-		if (g_activeAccount[0])
+		// Ensure packet + GetWindowText hooks are up (account + password).
+		if (g_activeAccount[0] || g_activePassword[0])
+		{
 			InstallLoginHook();
+			InstallGetWindowTextHooks();
+		}
 
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
@@ -808,6 +961,7 @@ namespace AutoLogin
 	void FillAccountNow()
 	{
 		LoadActiveAccount();
+		InstallGetWindowTextHooks();
 		HWND dialog = FindLoginDialog();
 		if (!IsDialogUsable(dialog))
 			dialog = g_cachedDialog;
@@ -832,6 +986,7 @@ namespace AutoLogin
 	void FillPasswordNow()
 	{
 		LoadActiveAccount();
+		InstallGetWindowTextHooks();
 		HWND dialog = FindLoginDialog();
 		if (!IsDialogUsable(dialog))
 			dialog = g_cachedDialog;
@@ -862,9 +1017,21 @@ namespace AutoLogin
 
 	void ApplyClientSideState()
 	{
-		// Install the login-send hook once if we have an account or password configured.
+		// Install the login-send + GetWindowText hooks once if we have credentials.
 		if (g_activeAccount[0] || g_activePassword[0])
+		{
 			InstallLoginHook();
+			InstallGetWindowTextHooks();
+		}
+		// Keep resolved HWNDs up to date for the GetWindowText hook (needs HWND match).
+		if (IsDialogUsable(g_cachedDialog))
+		{
+			HWND acc = NULL, pwd = NULL;
+			ResolveAccountEdit(g_cachedDialog, acc, pwd);
+			// ResolvePasswordEdit also updates g_resolvedPasswordHwnd if pinned differently
+			HWND pwd2 = NULL;
+			ResolvePasswordEdit(g_cachedDialog, pwd2);
+		}
 
 		// Re-discover the dialog at most every 500 ms (it is created at
 		// startup and destroyed on login; cheap to re-scan that rarely).
@@ -1069,6 +1236,8 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Fill Account: \"%s\"", AutoLogin::g_fillStatus[0] ? AutoLogin::g_fillStatus : "none");
 		ImGui::Text("Fill Password: \"%s\"", AutoLogin::g_passwordFillStatus[0] ? AutoLogin::g_passwordFillStatus : "none");
 		ImGui::Text("Login-send hook: %s", g_loginHookInstalled ? "INSTALLED" : "not installed");
+		ImGui::Text("GW hook: %s", g_gwHookInstalled ? "INSTALLED" : "not installed");
+		ImGui::Text("Resolved HWNDs: acc 0x%08X pwd 0x%08X", (unsigned int)AutoLogin::g_resolvedAccountHwnd, (unsigned int)AutoLogin::g_resolvedPasswordHwnd);
 		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
 
