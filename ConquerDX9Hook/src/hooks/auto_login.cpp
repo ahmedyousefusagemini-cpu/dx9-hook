@@ -891,23 +891,37 @@ namespace AutoLogin
 		SetFocus(passwordEdit);
 		Sleep(100);
 
-		// Fallback: directly write to CDlgLogin+0x13BD0 via game's encrypt.
-		// This is the struct that FUN_008A8FCA reads at login time (LEA EAX,[EDI+0x13BD0]).
-		// Doing it here ensures the packet is correct even if the HWND path failed.
-		// The hook's GetWindowText path already covers the per-frame copy, but this
-		// direct write is the ultimate guarantee.
+		// Fallback: directly write to CDlgLogin password structs via game's encrypt.
+		// FUN_008A8FCA reads either dlg+0x13BD0 or dlg+0x13980 depending on flag dlg+0x13620
+		// (0x13BD0 normally, 0x13980 for poker/QR). Write to both to be safe.
+		// This is the struct that login sends (LEA EAX,[EDI+0x13BD0] at 0x008A92C3).
+		// Doing it here ensures the packet is correct even if the HWND/fgui path failed.
 		__try {
 			typedef void* (__cdecl *AppAccFn)();
 			AppAccFn fn = (AppAccFn)0x0041F880;
 			void* app = fn ? fn() : nullptr;
 			if (app) {
 				char* dlg = (char*)app + 0x39B948;
-				if (!IsBadWritePtr(dlg + 0x13BD0, 0x208)) {
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(dlg + 0x13BD0, g_activePassword);
-					// Also try the second copy at *(dlg+0x13DD8)+0x30C if it exists (some builds use it)
-					void* pSecondBase = *(void**)(dlg + 0x13DD8);
-					if (pSecondBase && !IsBadWritePtr((char*)pSecondBase + 0x30C, 0x208)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)((char*)pSecondBase + 0x30C, g_activePassword);
+				auto doEnc = [&](uintptr_t off){
+					char* p = dlg + off;
+					if (IsBadWritePtr(p, 0x208)) return;
+					DWORD oldProt = 0;
+					VirtualProtect(p, 0x208, PAGE_EXECUTE_READWRITE, &oldProt);
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(p, g_activePassword);
+					DWORD tmp = 0;
+					VirtualProtect(p, 0x208, oldProt, &tmp);
+				};
+				doEnc(0x13BD0);
+				doEnc(0x13980);
+				// Also try the second copy at *(dlg+0x13DD8)+0x30C if it exists (some builds use it)
+				void* pSecondBase = *(void**)(dlg + 0x13DD8);
+				if (pSecondBase && !IsBadWritePtr((char*)pSecondBase + 0x30C, 0x208)) {
+					char* p2 = (char*)pSecondBase + 0x30C;
+					DWORD oldProt2 = 0;
+					if (VirtualProtect(p2, 0x208, PAGE_EXECUTE_READWRITE, &oldProt2)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(p2, g_activePassword);
+						DWORD tmp2 = 0;
+						VirtualProtect(p2, 0x208, oldProt2, &tmp2);
 					}
 				}
 			}
@@ -920,7 +934,7 @@ namespace AutoLogin
 		GetWindowTextA(passwordEdit, after, sizeof(after));
 		if (after[0] != 0 && lstrcmpA(after, g_activePassword) == 0)
 			return 0;
-		// Also check the dlg's encrypted len as ground truth
+		// Also check the dlg's encrypted len as ground truth (both offsets)
 		__try {
 			typedef void* (__cdecl *AppAccFn2)();
 			AppAccFn2 fn2 = (AppAccFn2)0x0041F880;
@@ -930,6 +944,11 @@ namespace AutoLogin
 				if (!IsBadReadPtr(dlg2 + 0x13BD0 + 0x104, 4)) {
 					int encLen = *(int*)(dlg2 + 0x13BD0 + 0x104);
 					if (encLen > 0 && encLen < 0x100)
+						return 0;
+				}
+				if (!IsBadReadPtr(dlg2 + 0x13980 + 0x104, 4)) {
+					int encLen2 = *(int*)(dlg2 + 0x13980 + 0x104);
+					if (encLen2 > 0 && encLen2 < 0x100)
 						return 0;
 				}
 			}
@@ -1330,6 +1349,35 @@ void RenderAutoLoginInterface()
 		{
 			ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "WARNING: pinned pwd != DlgMem pwd — pin via pwd button to match DlgMem");
 		}
+		__try {
+			typedef void* (__cdecl *AppAccFnDbg)();
+			AppAccFnDbg fnDbg = (AppAccFnDbg)0x0041F880;
+			void* appDbg = fnDbg ? fnDbg() : nullptr;
+			if (appDbg) {
+				char* dlgDbg = (char*)appDbg + 0x39B948;
+				if (!IsBadReadPtr(dlgDbg + 0x13BD0, 0x300) && !IsBadReadPtr(dlgDbg + 0x13980, 0x208)) {
+					int lenBD0 = *(int*)(dlgDbg + 0x13BD0 + 0x104);
+					int len980 = *(int*)(dlgDbg + 0x13980 + 0x104);
+					char flag13620 = *(char*)(dlgDbg + 0x13620);
+					ImGui::Text("EncLens: 0x13BD0=%d 0x13980=%d flag13620=%d", lenBD0, len980, (int)flag13620);
+					// Show account std::string at 0x13B88 for sanity
+					char accBuf[64] = {0};
+					char* accPtr = dlgDbg + 0x13B88;
+					if (!IsBadReadPtr(accPtr + 0x14, 4)) {
+						int accSize = *(int*)(accPtr + 0x14);
+						if (accSize >= 0 && accSize < 64) {
+							char* accStr = accPtr;
+							if (accSize > 0xF) accStr = *(char**)accPtr;
+							if (!IsBadReadPtr(accStr, accSize)) {
+								memcpy(accBuf, accStr, accSize);
+								accBuf[accSize] = 0;
+								ImGui::Text("DlgMem account: \"%s\" (len=%d)", accBuf, accSize);
+							}
+						}
+					}
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
 		ImGui::TextDisabled("Button found = the MFC login dialog is up");
 
