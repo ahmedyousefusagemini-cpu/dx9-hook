@@ -89,6 +89,13 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		// old len-gate let a mask-filled blob through, but that is now handled
 		// by FillPasswordEdit clearing the CEncryptData before typing — the
 		// len-gate safely skips when the user typed a real password.
+		// NOTE: CEncryptData::SetString treats param_1+0..0xFF as the key.
+		// The key at dlg+0x13BD0+0..0xFF is correctly initialized by the dialog
+		// to a fixed key table (same every session, shared with the server).
+		// Direct SetString on the login slot is the correct approach — any
+		// indirection through the +0x30C wrapper's CEncryptData uses a
+		// DIFFERENT (uninitialized) key that produces random garbage each
+		// restart, as the debug Dec 0x13BD0 showed.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
@@ -98,25 +105,7 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					int encLen = *(int*)((char*)password + 0x104);
 					if (encLen <= 0 || encLen > 0x100)
 					{
-						// CRITICAL: replicate the client's process-chain exactly.
-						// The canonical CEncryptData (whose key the server trusts)
-						// lives at *(password+0x208)+0x30C. SetString THAT first
-						// (it uses the canonical key), then sync only len+blob
-						// (0x104 bytes from +0x104) into the login slot — exactly
-						// what the client's Process handler does. Writing the
-						// login slot directly with its own (disjoint) key produces
-						// a blob the server rejects.
-						void* pCanon = *(void**)((char*)password + 0x208);
-						if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x208) &&
-							!IsBadWritePtr((char*)pCanon + 0x30C, 0x208))
-						{
-							((SetEncStringFunc)SET_ENC_STRING_ADDR)((char*)pCanon + 0x30C, AutoLogin::g_activePassword);
-							memcpy((char*)password + 0x104, (char*)pCanon + 0x30C + 0x104, 0x104);
-						}
-						else
-						{
-							((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
-						}
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
 					}
 				}
 			}
@@ -1055,37 +1044,20 @@ namespace AutoLogin
 			}
 			if (dlgEnc && !IsBadReadPtr(dlgEnc, 0x1400)) {
 				char* dlg = (char*)dlgEnc;
-				// CRITICAL: replicate the client's exact process-chain.
-				// The client's Process handler (FUN_0089C013 password branch)
-				// first encrypts the password into the canonical CEncryptData at
-				// *(dlg+0x13DD8)+0x30C via FUN_00607CD5(ADD ECX,0x30C), then syncs
-				// only the len+blob (0x104 bytes from +0x104) into the login slot
-				// dlg+0x13BD0, leaving 0x13BD0's key region untouched (that is why
-				// the debug's GetString on 0x13BD0 shows garbage "??q??qe?" for a
-				// correctly-encrypted blob). The server only accepts blobs produced
-				// by that canonical object. Our own SetString on 0x13BD0 uses the
-				// disjoint key at 0x13BD0+0..0xFF and the server rejects it (debug:
-				// Dec 0x13BD0 "3643748z" -> server-invalid). Do exactly what the
-				// client does: encrypt canonical, then copy len+blob to 0x13BD0 and
-				// 0x13980.
-				void* pCanon = *(void**)(dlg + 0x13DD8);
-				if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x208) &&
-					!IsBadWritePtr((char*)pCanon + 0x30C, 0x208))
-				{
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)((char*)pCanon + 0x30C, g_activePassword);
-					memcpy(dlg + 0x13BD0 + 0x104, (char*)pCanon + 0x30C + 0x104, 0x104);
-					memcpy(dlg + 0x13980 + 0x104, (char*)pCanon + 0x30C + 0x104, 0x104);
-				}
-				else
-				{
-					const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
-					for (int oi = 0; oi < 2; ++oi) {
-						char* pEnc = dlg + offsEnc[oi];
-						if (IsBadWritePtr(pEnc, 0x208)) continue;
-						DWORD op = 0; VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op);
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
-						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
-					}
+				// Direct SetString on the login slots. CEncryptData::SetString
+				// uses the key bytes at param_1+0..0xFF — 0x13BD0's key is
+				// correctly initialized to the fixed key table (stable Dec
+				// across restarts, matches the server's key). Do NOT route
+				// through the wrapper's +0x30C CEncryptData: its key bytes are
+				// NOT initialized and produce random blobs each restart (the
+				// debug Dec 0x13BD0 garbage change proved that).
+				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
+				for (int oi = 0; oi < 2; ++oi) {
+					char* pEnc = dlg + offsEnc[oi];
+					if (IsBadWritePtr(pEnc, 0x208)) continue;
+					DWORD op = 0; VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op);
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
+					DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}

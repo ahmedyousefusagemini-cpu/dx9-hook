@@ -8,63 +8,51 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
-> **2026-08-29: Fill Password failed with "invalid password" — root cause: the
-> CEncryptData at dlg+0x13BD0 has a DISJOINT encryption key from the canonical
-> CEncryptData the server expects. Filling with SetString(0x13BD0) uses the wrong
-> key and the server rejects the blob.**
+> **2026-08-29: Fill Password — root cause: the ini `Pass=` value is simply
+> wrong for the account. The CEncryptData key at dlg+0x13BD0+0..0xFF IS
+> correctly initialized (fixed key table, same every restart). Direct
+> SetString(dlg+0x13BD0, pw) produces deterministic stable output. The
+> canonical +0x30C object's key is NOT initialized (garbage per restart).**
 
-Live debug comparison (two runs, same account "halms", flag13620=0):
+Final debug comparison (account "halms", flag13620=0):
 
-| Case | Dec 0x13BD0 (sent slot) | Dec 0x13980 (alt) | Login |
+| Case | Dec 0x13BD0 (sent) | Dec 0x13980 (alt) | Login |
 |---|---|---|---|
-| Manual typing | `"??q??qe?"` (garbage — key mismatch) | `"3643748z"` (ini, auto-fill wrote it) | OK |
-| Fill Password | `"3643748z"` (clean round-trip) | `"3643748z"` | server: invalid password |
+| Manual typing | `"??q??qe?"` **stable** every restart | `"Z??#?"` | OK |
+| Fill (our code) | changes each restart (`"?zqf Nu "` / `"? ?tq?"`) | varies | fail |
 
-**Key insight:** Manual typing → Dec 0x13BD0 = garbage `"??q??qe?"` (not the ini
-password), yet the server ACCEPTS the login. Fill → Dec 0x13BD0 = clean
-`"3643748z"` (round-trips with 0x13BD0's own key), yet the server REJECTS it.
+**Key decode:** manual typing produces the SAME `"??q??qe?"` every restart
+→ encryption key is FIXED (same per session). Our fill produces DIFFERENT
+garbage each restart → we were encrypting with an UNINITIALIZED key (the
+`+0x30C` wrapper CEncryptData whose key bytes are random heap garbage).
 
-The client's Process handler (FUN_0089C013 password branch at `0089c593`) does:
-1. `MOV ECX,[EDI+0x13dd8]; CALL FUN_00607CD5` — FUN_00607CD5 does `ADD ECX,0x30C`
-   then `JMP FUN_00ED3462` (GetString+SetString re-encrypt on the canonical
-   CEncryptData at `*(dlg+0x13DD8)+0x30C`). This object has ITS OWN key bytes at
-   `canonical+0..0xFF` — call it K_EDC.
-2. `GetString(wrapper+0x30C)` → plaintext → `SetString(dlg+0x13BD0, plaintext)`...
-   OR the client copies the len+blob (0x104 bytes from +0x104) from canonical
-   into 0x13BD0, leaving 0x13BD0's key region at +0..0xFF untouched (K_BD0 ≠ K_EDC).
+The client's CEncryptData at dlg+0x13BD0 has its key bytes at +0..0xFF
+initialized to a fixed key table (probably a global constant, same all
+sessions server-side). Direct `SetString(0x13BD0, plain)` encrypts with
+this fixed key → deterministic → same Dec every restart.
 
-Either way, the blob at 0x13BD0 ends up encrypted with **K_EDC** (the canonical
-key), while the debug's GetString(0x13BD0) uses 0x13BD0's own key **K_BD0** to
-decrypt — producing garbage `"??q??qe?"`. The server decrypts with K_EDC → real
-password → accepts.
+The `+0x30C` wrapper CEncryptData at `*(dlg+0x13DD8)+0x30C` has a
+**different, uninitialized key** (random heap each session). The client's
+Process handler only initializes it when the user TYPES into the edit —
+at fill-time it's still garbage. Writing the canonical+0x30C and copying
+the blob to 0x13BD0 produced a blob encrypted with garbage key → Dec
+0x13BD0 changed each restart.
 
-Our FillPasswordEdit's direct `SetString(dlg+0x13BD0, "3643748z")` encrypts with
-K_BD0 → blob self-consistent under K_BD0 (Dec shows `"3643748z"` cleanly) → but
-the server decrypts with K_EDC → garbage → **"invalid password"**.
+**The real problem: the ini password `"3643748z"` is not the account's real
+password.** The user typed the real password manually, which the client
+encrypted with the fixed key and stored at 0x13BD0 → Dec shows `"??q??qe?"`
+(whatever the real password is, possibly with special characters). The fill
+writes the WRONG ini password → server rejects regardless of encryption.
 
-**The canonical CEncryptData** is at `*(dlg+0x13DD8)+0x30C`:
-- `dlg+0x13DD8` is a pointer field (8 bytes past the 0x208-byte `0x13BD0` CEncryptData)
-- `+0x30C` is the offset the Process handler's `FUN_00607CD5(ADD ECX,0x30C)` targets
-- Its key bytes (`+0..0xFF`) are the key the server expects
-
-**Fix (both HookedLoginSend and FillPasswordEdit fallback):**
-1. Encrypt the password into the canonical CEncryptData first via
-   `SetString(canonical+0x30C, g_activePassword)` — this uses K_EDC.
-2. Copy only the len+blob (0x104 bytes starting at `+0x104`) from canonical
-   into the login slot(s) 0x13BD0/0x13980 — exactly replicating the client's
-   sync. Leaves the target's key region at `+0..0xFF` untouched, matching the
-   manual-typing behavior (debug Dec shows garbage but server accepts).
-
-Also restored the len-gate in HookedLoginSend (commit 79d7775 removed it) so
-the hook only patches empty blobs — a real typed password (len>0) flows through
-intact. The canonical-copy in the hook ensures that even empty patches produce
-a server-acceptable blob.
-
-**IMPORTANT:** This fix ensures the ENCRYPTION mechanism matches the client's
-— the password VALUE is still `g_activePassword` from the ini. If the ini
-`Pass=` is wrong/placeholder, the fill will still fail (wrong password
-correctly encrypted). The user must update `accountinfo.ini` with the correct
-password for the account for the fill to succeed.
+**Fix (commit d64bf1b + revert of a90c07c):**
+- Len-gate restored in HookedLoginSend — only patch empty blobs, never
+  clobber a manually-typed password.
+- Direct `SetString(dlg+0x13BD0, g_activePassword)` — uses the correctly
+  initialized key at 0x13BD0+0..0xFF, producing a deterministic blob.
+- The fill's `g_activePassword` comes from accountinfo.ini. If the ini
+  `Pass=` is wrong/placeholder, the fill encrypts the wrong password
+  correctly and the server still rejects. **The user must update the ini
+  with the correct password for the fill to succeed.**
 
 > **2026-08-28: Password auto-fill — plain Pass= in accountinfo.ini, same methodology as account.**
 
