@@ -1105,8 +1105,8 @@ namespace AutoLogin
 	}
 
 	// Direct login: invoke FUN_LoginButtonHandler on the CDlgLogin instance
-	// (gpDlgShell + 0x39B948). This is exactly what the game runs when the MFC
-	// Login button is clicked, but calling it directly skips the fgui layer's
+	// (app+0x39B948). This is exactly what the game runs when the MFC Login
+	// button is clicked, but calling it directly skips the fgui layer's
 	// client-side field check (which rejects an empty-looking visible edit with
 	// a local "Wrong password." tip BEFORE any packet is sent). The handler
 	// reads account/password from dlg+0x13B88 / dlg+0x13BD0 in memory, and
@@ -1116,12 +1116,15 @@ namespace AutoLogin
 	{
 		__try
 		{
-			void* dlg = GetCDlgLogin();
-			if (!dlg)
+			typedef void* (__cdecl *AppAccFn)();
+			AppAccFn fn = (AppAccFn)0x0041F880;
+			void* app = fn ? fn() : nullptr;
+			if (!app)
 				return false;
-			if (IsBadReadPtr(dlg, 0x1400))
+			char* dlg = (char*)app + 0x39B948;
+			if (IsBadReadPtr(dlg, 0x40))
 				return false;
-			HWND hDlg = *(HWND*)((char*)dlg + 0x20);
+			HWND hDlg = *(HWND*)(dlg + 0x20);
 			if (!hDlg || !IsWindow(hDlg))
 				return false;
 			((LoginBtnHandlerFunc)LOGIN_BTN_HANDLER_ADDR)(dlg);
