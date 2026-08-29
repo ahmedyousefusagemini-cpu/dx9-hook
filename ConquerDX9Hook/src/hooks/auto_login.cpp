@@ -96,6 +96,10 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		// indirection through the +0x30C wrapper's CEncryptData uses a
 		// DIFFERENT (uninitialized) key that produces random garbage each
 		// restart, as the debug Dec 0x13BD0 showed.
+		// The client ALSO applies a per-character XOR transform before
+		// SetString: transformed[i] = raw[i] ^ key[i] (key = this object's own
+		// +0..0xFF bytes). The server compares the decrypted blob against the
+		// transformed form, so the patch must XOR too.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
@@ -105,7 +109,16 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					int encLen = *(int*)((char*)password + 0x104);
 					if (encLen <= 0 || encLen > 0x100)
 					{
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+						char keyBuf[0x100] = {0};
+						memcpy(keyBuf, password, 0x100);
+						char transformed[128] = {0};
+						int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
+						if (tlen > 0 && tlen < 127) {
+							for (int i = 0; i < tlen; i++)
+								transformed[i] = AutoLogin::g_activePassword[i] ^ keyBuf[i];
+							transformed[tlen] = 0;
+						}
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
 					}
 				}
 			}
@@ -1034,20 +1047,35 @@ namespace AutoLogin
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
-				// Direct SetString on the login slots. CEncryptData::SetString
-				// uses the key bytes at param_1+0..0xFF — 0x13BD0's key is
-				// correctly initialized to the fixed key table (stable Dec
-				// across restarts, matches the server's key). Do NOT route
-				// through the wrapper's +0x30C CEncryptData: its key bytes are
-				// NOT initialized and produce random blobs each restart (the
-				// debug Dec 0x13BD0 garbage change proved that).
+				// CRITICAL: the client applies a per-character XOR transform
+				// before SetString. The CEncryptData key bytes at param_1+0..0xFF
+				// are used BOTH as the XOR key for the transform AND as the
+				// encryption key in SetString. The transform is:
+				//   transformed[i] = raw[i] ^ key[i]
+				// where key[i] = *(byte*)(param_1 + i).
+				// The server decrypts the blob and compares against the
+				// transformed form. Without the XOR, the server receives the
+				// raw password and rejects it (debug Dec 0x13BD0 showed raw
+				// "3643748z" vs expected transformed "??q??qe?").
+				// Read the key bytes from the object's own key region.
+				char keyBuf[0x100] = {0};
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offsEnc[oi];
-					DWORD op = 0;
-					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
-						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+					// Read key bytes from the CEncryptData's own key region
+					memcpy(keyBuf, pEnc, 0x100);
+					// Build the transformed password: raw ^ key
+					char transformed[128] = {0};
+					int tlen = (int)lstrlenA(g_activePassword);
+					if (tlen > 0 && tlen < 127) {
+						for (int i = 0; i < tlen; i++)
+							transformed[i] = g_activePassword[i] ^ keyBuf[i];
+						transformed[tlen] = 0;
+						DWORD op = 0;
+						if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+							((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, transformed);
+							DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+						}
 					}
 				}
 			}
