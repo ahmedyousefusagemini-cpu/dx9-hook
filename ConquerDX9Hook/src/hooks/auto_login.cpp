@@ -83,24 +83,21 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
 				account = AutoLogin::g_activeAccount;
 		}
-		// Password: only patch if the game's CEncryptData is empty (len==0).
-		// If UI typing succeeded (len>0), leave it alone — the UI's encrypt via
-		// Process is correct. This avoids the previous bug where unconditional
-		// re-encrypt with SetEncString produced a wrong blob (wrong key base)
-		// and caused "invalid username or password".
+		// Password: ALWAYS SetString with the ini Pass= in mode 0.
+		// The previous len-gate (only patch when encLen<=0) let a stale or
+		// mask-filled CEncryptData blob through when encLen was already
+		// non-zero, so the server got a wrong password. The len-gate was a
+		// workaround for the old wrong CDlgLogin base (FUN_0041F880 = 36-byte
+		// CQUIManager); that base is fixed (gpDlgShell 0x01A5A510), so the
+		// unconditional SetString is correct. The key is password+0..0xFF
+		// (this CEncryptData's own key), so the blob decrypts on the server.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
 			{
 				if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
 				{
-					int encLen = *(int*)((char*)password + 0x104);
-					// encLen is the encrypted length; 0 or 0xFFFFFFFF means empty/not set.
-					// Only patch when empty, or when the UI failed to sync.
-					if (encLen <= 0 || encLen > 0x100)
-					{
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
-					}
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
 				}
 			}
 			__except (EXCEPTION_EXECUTE_HANDLER) {}
