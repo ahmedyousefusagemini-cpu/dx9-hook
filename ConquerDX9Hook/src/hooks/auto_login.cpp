@@ -1610,10 +1610,27 @@ void RenderAutoLoginInterface()
 						if (ps1 && !IsBadReadPtr(ps1, 1)) {
 							char tmp1[32] = {0}; strncpy_s(tmp1, sizeof(tmp1), ps1, _TRUNCATE);
 							ImGui::Text("Dec 0x13BD0: \"%s\" (len=%d)", tmp1, sz1);
+							// Hex dump of the actual decrypted bytes
+							char hex1[128] = {0};
+							int dlen = (lenBD0 > 0 && lenBD0 < 16) ? lenBD0 : (int)strlen(tmp1);
+							if (dlen > 16) dlen = 16;
+							for (int i = 0; i < dlen; i++) {
+								char b[8]; sprintf_s(b, "%02X ", (unsigned char)ps1[i]);
+								strcat_s(hex1, b);
+							}
+							ImGui::Text("Hex 0x13BD0: %s", hex1);
 						}
 						if (ps2 && !IsBadReadPtr(ps2, 1)) {
 							char tmp2[32] = {0}; strncpy_s(tmp2, sizeof(tmp2), ps2, _TRUNCATE);
 							ImGui::Text("Dec 0x13980: \"%s\" (len=%d)", tmp2, sz2);
+							char hex2[128] = {0};
+							int dlen2 = (len980 > 0 && len980 < 16) ? len980 : (int)strlen(tmp2);
+							if (dlen2 > 16) dlen2 = 16;
+							for (int i = 0; i < dlen2; i++) {
+								char b[8]; sprintf_s(b, "%02X ", (unsigned char)ps2[i]);
+								strcat_s(hex2, b);
+							}
+							ImGui::Text("Hex 0x13980: %s", hex2);
 						}
 						// cleanup std::string dtor (call 0x00420847 on out1/out2 if needed, but we leak small)
 					} __except(EXCEPTION_EXECUTE_HANDLER) {}
