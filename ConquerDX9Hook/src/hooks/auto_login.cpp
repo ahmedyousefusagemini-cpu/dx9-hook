@@ -887,14 +887,19 @@ namespace AutoLogin
 		//    (bypasses UI entirely — login reads from there)
 		// Clear any existing 16-char mask first (both HWND and CEncryptData)
 		__try {
+			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
+			// Verified by the debug panel (manual typing shows 0x13BD0=8 here).
+			// Prefer this over CWnd::FromHandle — the latter returns a generic
+			// CWnd wrapper whose +0x13BD0 is NOT the login password slot.
 			void* dlgClr = nullptr;
-			if (g_cachedDialog && IsWindow(g_cachedDialog)) {
+			void* shellClr = *(void**)0x01A5A510;
+			if (shellClr) dlgClr = (char*)shellClr + 0x39B948;
+			if (!dlgClr && g_cachedDialog && IsWindow(g_cachedDialog)) {
 				typedef void* (__stdcall *FromHandleFn)(HWND);
 				static FromHandleFn fh = nullptr;
 				if (!fh) { HMODULE hm = GetModuleHandleA("mfc42.dll"); if (!hm) hm = GetModuleHandleA("mfc140.dll"); if (hm) fh = (FromHandleFn)GetProcAddress(hm, (LPCSTR)4866); }
 				if (fh) dlgClr = fh(g_cachedDialog);
 			}
-			if (!dlgClr) { void* shellClr = *(void**)0x01A5A510; if (shellClr) dlgClr = (char*)shellClr + 0x39B948; }
 			if (dlgClr && !IsBadReadPtr(dlgClr, 0x1400)) {
 				char* dlg = (char*)dlgClr;
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
@@ -1013,14 +1018,21 @@ namespace AutoLogin
 
 		// Fallback: directly write to CDlgLogin password structs via game's encrypt.
 		__try {
+			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
+			// Verified by the debug panel: manual typing shows 0x13BD0=8 at this
+			// base. DO NOT use CWnd::FromHandle(g_cachedDialog) — it returns a
+			// generic CWnd wrapper, NOT the CDlgLogin subobject, so +0x13BD0
+			// would be the wrong offset and the fill would never land where the
+			// login handler reads it.
 			void* dlgEnc = nullptr;
-			if (g_cachedDialog && IsWindow(g_cachedDialog)) {
+			void* shellEnc = *(void**)0x01A5A510;
+			if (shellEnc) dlgEnc = (char*)shellEnc + 0x39B948;
+			if (!dlgEnc && g_cachedDialog && IsWindow(g_cachedDialog)) {
 				typedef void* (__stdcall *FromHandleFn)(HWND);
 				static FromHandleFn fh2 = nullptr;
 				if (!fh2) { HMODULE hm2 = GetModuleHandleA("mfc42.dll"); if (!hm2) hm2 = GetModuleHandleA("mfc140.dll"); if (hm2) fh2 = (FromHandleFn)GetProcAddress(hm2, (LPCSTR)4866); }
 				if (fh2) dlgEnc = fh2(g_cachedDialog);
 			}
-			if (!dlgEnc) { void* shellEnc = *(void**)0x01A5A510; if (shellEnc) dlgEnc = (char*)shellEnc + 0x39B948; }
 			if (dlgEnc && !IsBadReadPtr(dlgEnc, 0x1400)) {
 				char* dlg = (char*)dlgEnc;
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
