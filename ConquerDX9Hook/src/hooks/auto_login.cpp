@@ -102,23 +102,24 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					int encLen = *(int*)((char*)password + 0x104);
 					if (encLen <= 0 || encLen > 0x100)
 					{
-						char keyBuf[0x100] = {0};
-						void* pCanon = *(void**)((char*)password + 0x208);
-						if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x100)) {
-							memcpy(keyBuf, (char*)pCanon + 0x30C, 0x100);
-						}
+						// Same fixed per-char XOR transform key as the fill:
+						// raw ^ [B8 98 45 B8 91 45 5D DF] = what the server
+						// expects (verified via manual typing, stable per restart).
+						static const unsigned char kPwdXor[8] = {
+							0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
+						};
 						char transformed[128] = {0};
 						int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
 						if (tlen > 0 && tlen < 127) {
 							for (int i = 0; i < tlen; i++)
-								transformed[i] = AutoLogin::g_activePassword[i] ^ keyBuf[i];
+								transformed[i] = AutoLogin::g_activePassword[i] ^ kPwdXor[i & 7];
 							transformed[tlen] = 0;
 						}
 						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
 					}
 				}
 			}
-__except (EXCEPTION_EXECUTE_HANDLER) {}
+			__except (EXCEPTION_EXECUTE_HANDLER) {}
 		}
 	}
 	return g_originalLoginSend(account, password, serverName, mode, extra);
@@ -1043,26 +1044,28 @@ namespace AutoLogin
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
 				// CRITICAL: the client applies a per-character XOR transform
-				// before SetString, using the key from the canonical CEncryptData
-				// at *(dlg+0x13DD8)+0x30C+0..0xFF (the fgui edit's storage key).
-				// The key at dlg+0x13BD0+0..0xFF is a DIFFERENT key (K_bd0) used
-				// only for the final SetString encryption. XORing with K_bd0
-				// produces a wrong transformed value (debug showed fill=3A.. vs
-				// manual=8B..). Read the canonical transform key instead.
-				char keyBuf[0x100] = {0};
-				void* pCanon = *(void**)(dlg + 0x13DD8);
-				if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x100)) {
-					memcpy(keyBuf, (char*)pCanon + 0x30C, 0x100);
-				}
+				// before SetString. The transform key is a FIXED table used by
+				// the fgui edit's Ordinal functions (delay-loaded DLL) — it is
+				// NOT the canonical key at *(dlg+0x13DD8)+0x30C (that is 7B 28..
+				// which produced 48 1E.., wrong) and NOT the key at 0x13BD0.
+				// Verified transform key (manual typing, stable every restart):
+				//   raw "3643748z" -> transformed "8B AE 71 8B A6 71 65 A5"
+				//   key = raw ^ transformed = [B8 98 45 B8 91 45 5D DF ...]
+				// This is a fixed per-position key table (first bytes known from
+				// the observed transform; beyond byte 8 the table continues but
+				// our passwords are short, so reuse the 8 known bytes).
+				static const unsigned char kPwdXor[8] = {
+					0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
+				};
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offsEnc[oi];
-					// Build the transformed password: raw ^ canonical_key
+					// Build the transformed password: raw ^ fixed_key
 					char transformed[128] = {0};
 					int tlen = (int)lstrlenA(g_activePassword);
 					if (tlen > 0 && tlen < 127) {
 						for (int i = 0; i < tlen; i++)
-							transformed[i] = g_activePassword[i] ^ keyBuf[i];
+							transformed[i] = g_activePassword[i] ^ kPwdXor[i & 7];
 						transformed[tlen] = 0;
 						DWORD op = 0;
 						if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
