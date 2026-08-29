@@ -118,13 +118,7 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					}
 				}
 			}
-			__except (EXCEPTION_EXECUTE_HANDLER) {}
-		}
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
-					}
-				}
-			}
-			__except (EXCEPTION_EXECUTE_HANDLER) {}
+__except (EXCEPTION_EXECUTE_HANDLER) {}
 		}
 	}
 	return g_originalLoginSend(account, password, serverName, mode, extra);
