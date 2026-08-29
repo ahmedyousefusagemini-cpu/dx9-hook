@@ -54,6 +54,16 @@ static bool g_loginHookInstalled = false;
 
 const uintptr_t LOGIN_SEND_ADDR = 0x0101C9D8;
 
+// FUN_LoginButtonHandler @ 0x008A8FCA - __fastcall(CDlgLogin*). The MFC login
+// button handler: reads account (dlg+0x13B88) and password (dlg+0x13BD0) from
+// memory and sends the packet via FUN_0101C9D8 (which HookedLoginSend hooks,
+// guaranteeing the ini account/password reach the server). Calling it directly
+// bypasses the fgui Login button's client-side field gate (the Lua handler that
+// shows "Wrong password." locally when the visible edit is empty, before any
+// packet is built).
+typedef void (__fastcall* LoginBtnHandlerFunc)(void* dlg);
+static const uintptr_t LOGIN_BTN_HANDLER_ADDR = 0x008A8FCA;
+
 // Game's CEncryptData::SetString — encrypts plain into the struct at ECX.
 // Verified: FUN_00ea1f50 @ 0x00EA1F50 is void __thiscall(void* this, const char* plain)
 // where this+0x104 = len, this+0x108 = enc buf[0x100] (encryptdata.cpp:0x1dc).
@@ -272,7 +282,7 @@ namespace AutoLogin
 	int  g_clickIntervalMs = 1000;   // min ms between automatic clicks
 	int  g_clickCount = 0;           // total clicks sent this session
 	bool g_loginCompleted = false;   // a click made the login dialog disappear
-	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK
+	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK, 3 = direct FUN_LoginButtonHandler call (bypasses fgui gate)
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 	int  g_accountEditIndex = -1;    // -1 = auto (topmost visible Edit), else index into g_edits
 	int  g_passwordEditIndex = -1;   // -1 = auto (second smallest Y), else index into g_edits
@@ -1094,9 +1104,40 @@ namespace AutoLogin
 		return true;
 	}
 
+	// Direct login: invoke FUN_LoginButtonHandler on the CDlgLogin instance
+	// (gpDlgShell + 0x39B948). This is exactly what the game runs when the MFC
+	// Login button is clicked, but calling it directly skips the fgui layer's
+	// client-side field check (which rejects an empty-looking visible edit with
+	// a local "Wrong password." tip BEFORE any packet is sent). The handler
+	// reads account/password from dlg+0x13B88 / dlg+0x13BD0 in memory, and
+	// HookedLoginSend guarantees the packet carries the ini values, so login
+	// proceeds even when the UI fields appear empty.
+	static bool DirectLoginCall()
+	{
+		__try
+		{
+			void* dlg = GetCDlgLogin();
+			if (!dlg)
+				return false;
+			if (IsBadReadPtr(dlg, 0x1400))
+				return false;
+			HWND hDlg = *(HWND*)((char*)dlg + 0x20);
+			if (!hDlg || !IsWindow(hDlg))
+				return false;
+			((LoginBtnHandlerFunc)LOGIN_BTN_HANDLER_ADDR)(dlg);
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
 	// Applies the user-selected click method to an arbitrary button HWND.
 	static bool ClickButtonMethod(HWND button)
 	{
+		if (g_clickMethod == 3)
+			return DirectLoginCall();  // no HWND needed - direct handler call
 		if (!button || !IsWindow(button))
 			return false;
 		if (g_clickMethod == 1)
@@ -1125,7 +1166,14 @@ namespace AutoLogin
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
-		if (button && ClickButtonMethod(button))
+		// Method 3 (direct handler call) does not need the button HWND.
+		bool ok = false;
+		if (g_clickMethod == 3)
+			ok = DirectLoginCall();
+		else if (button)
+			ok = ClickButtonMethod(button);
+
+		if (ok)
 		{
 			g_clickCount++;
 			g_lastClickTick = GetTickCount();
@@ -1409,7 +1457,7 @@ void RenderAutoLoginInterface()
 	}
 
 	ImGui::Combo("Click method", &AutoLogin::g_clickMethod,
-		"Message (no cursor)\0Mouse (real click)\0BM_CLICK\0");
+		"Message (no cursor)\0Mouse (real click)\0BM_CLICK\0Direct handler (bypass fgui)\0");
 
 	ImGui::Spacing();
 	ImGui::Text("Account from accountinfo.ini:");
