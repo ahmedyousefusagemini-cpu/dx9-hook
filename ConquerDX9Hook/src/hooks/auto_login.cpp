@@ -295,6 +295,8 @@ namespace AutoLogin
 {
 	// User intent - auto-click the Login button until the dialog disappears.
 	bool g_autoClickLogin = false;
+	bool g_autoFillAccount = true;   // auto-fill account when the login dialog appears
+	bool g_autoFillPassword = true;  // auto-fill password when the login dialog appears
 	int  g_clickIntervalMs = 1000;   // min ms between automatic clicks
 	int  g_clickCount = 0;           // total clicks sent this session
 	bool g_loginCompleted = false;   // a click made the login dialog disappear
@@ -1395,7 +1397,7 @@ namespace AutoLogin
 
 		// Auto-fill the account field once per login dialog instance (the
 		// login screen just appeared or reappeared after a failed login).
-		if (g_filledAccountDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
+		if (g_autoFillAccount && g_filledAccountDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
 		{
 			g_filledAccountDialog = g_cachedDialog;
 			if (g_activeAccount[0] == 0)
@@ -1407,10 +1409,10 @@ namespace AutoLogin
 				FillAccountEdit(g_cachedDialog);
 			}
 		}
-		// Auto-fill the password field once per dialog instance as well â€” so the
+		// Auto-fill the password field once per dialog instance as well — so the
 		// user does not need to click Fill Password every time. Uses same ini
 		// Pass= and the same robust FillPasswordEdit (WM_CHAR + direct 0x13BD0).
-		if (g_filledPasswordDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
+		if (g_autoFillPassword && g_filledPasswordDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
 		{
 			g_filledPasswordDialog = g_cachedDialog;
 			if (g_activePassword[0] == 0)
@@ -1501,6 +1503,15 @@ void RenderAutoLoginInterface()
 			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", AutoLogin::g_passwordFillStatus);
 	}
 
+	if (ImGui::Checkbox("Auto fill Account", &AutoLogin::g_autoFillAccount))
+	{
+		// Toggle on/off — no side effects needed
+	}
+	ImGui::SameLine();
+	if (ImGui::Checkbox("Auto fill Password", &AutoLogin::g_autoFillPassword))
+	{
+		// Toggle on/off — no side effects needed
+	}
 	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
 		AutoLogin::g_autoClickLogin)
 	{

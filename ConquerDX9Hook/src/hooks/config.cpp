@@ -72,6 +72,8 @@ namespace GearSwap
 namespace AutoLogin
 {
 	extern bool g_autoClickLogin;
+	extern bool g_autoFillAccount;
+	extern bool g_autoFillPassword;
 	extern int  g_clickIntervalMs;
 	extern int  g_clickMethod;
 	extern int  g_buttonIdOverride;
@@ -158,6 +160,8 @@ void SaveConfig()
 
 	// --- Auto Login ---
 	WritePrivateProfileStringA("AutoLogin", "AutoClick", AutoLogin::g_autoClickLogin ? "1" : "0", path);
+	WritePrivateProfileStringA("AutoLogin", "AutoFillAccount", AutoLogin::g_autoFillAccount ? "1" : "0", path);
+	WritePrivateProfileStringA("AutoLogin", "AutoFillPassword", AutoLogin::g_autoFillPassword ? "1" : "0", path);
 	WriteInt("AutoLogin", "ClickIntervalMs", AutoLogin::g_clickIntervalMs);
 	WriteInt("AutoLogin", "ClickMethod", AutoLogin::g_clickMethod);
 	WriteInt("AutoLogin", "ButtonIdOverride", AutoLogin::g_buttonIdOverride);
@@ -235,6 +239,8 @@ void LoadConfig()
 
 	// --- Auto Login ---
 	AutoLogin::g_autoClickLogin = GetPrivateProfileIntA("AutoLogin", "AutoClick", 0, path) != 0;
+	AutoLogin::g_autoFillAccount = GetPrivateProfileIntA("AutoLogin", "AutoFillAccount", 1, path) != 0;
+	AutoLogin::g_autoFillPassword = GetPrivateProfileIntA("AutoLogin", "AutoFillPassword", 1, path) != 0;
 	AutoLogin::g_clickIntervalMs = GetPrivateProfileIntA("AutoLogin", "ClickIntervalMs", 1000, path);
 	if (AutoLogin::g_clickIntervalMs < 250) AutoLogin::g_clickIntervalMs = 250;
 	if (AutoLogin::g_clickIntervalMs > 5000) AutoLogin::g_clickIntervalMs = 5000;
