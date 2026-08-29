@@ -1171,12 +1171,24 @@ namespace AutoLogin
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
-		// Method 3 (direct handler call) does not need the button HWND.
+		// Credentials are loaded from accountinfo.ini. Prefer the direct
+		// FUN_LoginButtonHandler call — it bypasses the fgui Login button's
+		// client-side field gate (which shows "Wrong password." locally when the
+		// visible edit looks empty). The handler reads account/password from
+		// dlg+0x13B88/dlg+0x13BD0 in memory and HookedLoginSend guarantees the
+		// ini values reach the server, so login proceeds even if the UI fields
+		// appear empty. Falls back to the selected click method only if the
+		// direct call cannot run (dialog not resolved).
 		bool ok = false;
-		if (g_clickMethod == 3)
+		if (AutoLogin::g_activeAccount[0] || AutoLogin::g_activePassword[0])
 			ok = DirectLoginCall();
-		else if (button)
-			ok = ClickButtonMethod(button);
+		if (!ok)
+		{
+			if (g_clickMethod == 3)
+				ok = DirectLoginCall();
+			else if (button)
+				ok = ClickButtonMethod(button);
+		}
 
 		if (ok)
 		{
