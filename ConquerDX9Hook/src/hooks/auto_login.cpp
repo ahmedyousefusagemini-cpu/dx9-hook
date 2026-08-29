@@ -895,29 +895,30 @@ namespace AutoLogin
 		// 4) Fallback: direct memory write to CDlgLogin+0x13BD0 via game's encrypt
 		//    (bypasses UI entirely — login reads from there)
 		// Clear any existing 16-char mask first (both HWND and CEncryptData)
+		// Resolve the CDlgLogin base ONCE and reuse for clear + write to avoid
+		// any timing window between reads of the gpDlgShell global.
+		void* dlgBase = nullptr;
 		__try {
-			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// Verified by the debug panel (manual typing shows 0x13BD0=8 here).
-			// Prefer this over CWnd::FromHandle — the latter returns a generic
-			// CWnd wrapper whose +0x13BD0 is NOT the login password slot.
-			void* dlgClr = nullptr;
-			void* shellClr = *(void**)0x01A5A510;
-			if (shellClr) dlgClr = (char*)shellClr + 0x39B948;
-			if (!dlgClr && g_cachedDialog && IsWindow(g_cachedDialog)) {
-				typedef void* (__stdcall *FromHandleFn)(HWND);
-				static FromHandleFn fh = nullptr;
-				if (!fh) { HMODULE hm = GetModuleHandleA("mfc42.dll"); if (!hm) hm = GetModuleHandleA("mfc140.dll"); if (hm) fh = (FromHandleFn)GetProcAddress(hm, (LPCSTR)4866); }
-				if (fh) dlgClr = fh(g_cachedDialog);
-			}
-			if (dlgClr && !IsBadReadPtr(dlgClr, 0x1400)) {
-				char* dlg = (char*)dlgClr;
+			void* shell = *(void**)0x01A5A510;
+			if (shell) dlgBase = (char*)shell + 0x39B948;
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		if (!dlgBase && g_cachedDialog && IsWindow(g_cachedDialog)) {
+			typedef void* (__stdcall *FromHandleFn)(HWND);
+			static FromHandleFn fh = nullptr;
+			if (!fh) { HMODULE hm = GetModuleHandleA("mfc42.dll"); if (!hm) hm = GetModuleHandleA("mfc140.dll"); if (hm) fh = (FromHandleFn)GetProcAddress(hm, (LPCSTR)4866); }
+			if (fh) dlgBase = fh(g_cachedDialog);
+		}
+		__try {
+			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
+				char* dlg = (char*)dlgBase;
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pp = dlg + offs[oi];
-					if (IsBadWritePtr(pp, 0x208)) continue;
-					DWORD op = 0; VirtualProtect(pp, 0x208, PAGE_EXECUTE_READWRITE, &op);
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(pp, "");
-					DWORD tp = 0; VirtualProtect(pp, 0x208, op, &tp);
+					DWORD op = 0;
+					if (VirtualProtect(pp, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pp, "");
+						DWORD tp = 0; VirtualProtect(pp, 0x208, op, &tp);
+					}
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -1026,24 +1027,13 @@ namespace AutoLogin
 		Sleep(100);
 
 		// Fallback: directly write to CDlgLogin password structs via game's encrypt.
+		// Uses dlgBase resolved once above (same base as the clear step) to avoid
+		// a stale re-read of the gpDlgShell global. No IsBadWritePtr pre-check —
+		// VirtualProtect + SEH is the only gate (IsBadWritePtr on a
+		// VirtualProtect-restored page can wrongly fail and skip the write).
 		__try {
-			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// Verified by the debug panel: manual typing shows 0x13BD0=8 at this
-			// base. DO NOT use CWnd::FromHandle(g_cachedDialog) — it returns a
-			// generic CWnd wrapper, NOT the CDlgLogin subobject, so +0x13BD0
-			// would be the wrong offset and the fill would never land where the
-			// login handler reads it.
-			void* dlgEnc = nullptr;
-			void* shellEnc = *(void**)0x01A5A510;
-			if (shellEnc) dlgEnc = (char*)shellEnc + 0x39B948;
-			if (!dlgEnc && g_cachedDialog && IsWindow(g_cachedDialog)) {
-				typedef void* (__stdcall *FromHandleFn)(HWND);
-				static FromHandleFn fh2 = nullptr;
-				if (!fh2) { HMODULE hm2 = GetModuleHandleA("mfc42.dll"); if (!hm2) hm2 = GetModuleHandleA("mfc140.dll"); if (hm2) fh2 = (FromHandleFn)GetProcAddress(hm2, (LPCSTR)4866); }
-				if (fh2) dlgEnc = fh2(g_cachedDialog);
-			}
-			if (dlgEnc && !IsBadReadPtr(dlgEnc, 0x1400)) {
-				char* dlg = (char*)dlgEnc;
+			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
+				char* dlg = (char*)dlgBase;
 				// Direct SetString on the login slots. CEncryptData::SetString
 				// uses the key bytes at param_1+0..0xFF — 0x13BD0's key is
 				// correctly initialized to the fixed key table (stable Dec
@@ -1054,10 +1044,11 @@ namespace AutoLogin
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offsEnc[oi];
-					if (IsBadWritePtr(pEnc, 0x208)) continue;
-					DWORD op = 0; VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op);
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
-					DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+					DWORD op = 0;
+					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
+						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+					}
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
