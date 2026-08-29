@@ -1612,24 +1612,34 @@ void RenderAutoLoginInterface()
 							ImGui::Text("Dec 0x13BD0: \"%s\" (len=%d)", tmp1, sz1);
 							// Hex dump of the actual decrypted bytes
 							char hex1[128] = {0};
+							static const char kHex[] = "0123456789ABCDEF";
 							int dlen = (lenBD0 > 0 && lenBD0 < 16) ? lenBD0 : (int)strlen(tmp1);
 							if (dlen > 16) dlen = 16;
+							int hpos = 0;
 							for (int i = 0; i < dlen; i++) {
-								char b[8]; sprintf(b, "%02X ", (unsigned char)ps1[i]);
-								strcat_s(hex1, b);
+								unsigned char c = (unsigned char)ps1[i];
+								hex1[hpos++] = kHex[c >> 4];
+								hex1[hpos++] = kHex[c & 0xF];
+								hex1[hpos++] = ' ';
 							}
+							hex1[hpos] = 0;
 							ImGui::Text("Hex 0x13BD0: %s", hex1);
 						}
 						if (ps2 && !IsBadReadPtr(ps2, 1)) {
 							char tmp2[32] = {0}; strncpy_s(tmp2, sizeof(tmp2), ps2, _TRUNCATE);
 							ImGui::Text("Dec 0x13980: \"%s\" (len=%d)", tmp2, sz2);
 							char hex2[128] = {0};
+							static const char kHex2[] = "0123456789ABCDEF";
 							int dlen2 = (len980 > 0 && len980 < 16) ? len980 : (int)strlen(tmp2);
 							if (dlen2 > 16) dlen2 = 16;
+							int hpos2 = 0;
 							for (int i = 0; i < dlen2; i++) {
-								char b[8]; sprintf(b, "%02X ", (unsigned char)ps2[i]);
-								strcat_s(hex2, b);
+								unsigned char c = (unsigned char)ps2[i];
+								hex2[hpos2++] = kHex2[c >> 4];
+								hex2[hpos2++] = kHex2[c & 0xF];
+								hex2[hpos2++] = ' ';
 							}
+							hex2[hpos2] = 0;
 							ImGui::Text("Hex 0x13980: %s", hex2);
 						}
 						// cleanup std::string dtor (call 0x00420847 on out1/out2 if needed, but we leak small)
