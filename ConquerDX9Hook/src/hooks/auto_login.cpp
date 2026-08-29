@@ -1,4 +1,4 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include "imgui.h"
 #include "MinHook.h"
 
@@ -17,8 +17,8 @@
 //          login(account, password, serverName, mode, extra)
 //          mode 0 = CMsgAccountEx, 1 = QR, 2 = poker
 //
-// ACCOUNT FILLING: reads accountinfo.ini (next to the exe) — [AccountN]
-// sections, first Use=1 wins, User= (plain) — and fills the account edit via
+// ACCOUNT FILLING: reads accountinfo.ini (next to the exe) â€” [AccountN]
+// sections, first Use=1 wins, User= (plain) â€” and fills the account edit via
 // WM_SETTEXT + MinHook on FUN_0101C9D8 that replaces the account ptr.
 // PASSWORD FILLING: same ini section, Pass= (plain). Separate "Fill Password"
 // button types it with real SendInput keystrokes into the password Edit
@@ -43,7 +43,7 @@ namespace AutoLogin {
 // Replaces the account argument with the ini account when the game passes
 // an empty (or matching) one, so the server always receives the right name.
 // Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf at +0x108,
-// see FUN_00ea1f50). The HOOK DOES NOT re-encrypt by default — the UI typing
+// see FUN_00ea1f50). The HOOK DOES NOT re-encrypt by default â€” the UI typing
 // via SendInput + Process (dlg+0x13BD0 encrypt) is the source of truth. The
 // hook only acts as a last-resort when the game's CEncryptData is empty
 // (len==0) to avoid corrupting a correctly-typed password with a potentially
@@ -64,7 +64,7 @@ const uintptr_t LOGIN_SEND_ADDR = 0x0101C9D8;
 typedef void (__fastcall* LoginBtnHandlerFunc)(void* dlg);
 static const uintptr_t LOGIN_BTN_HANDLER_ADDR = 0x008A8FCA;
 
-// Game's CEncryptData::SetString — encrypts plain into the struct at ECX.
+// Game's CEncryptData::SetString â€” encrypts plain into the struct at ECX.
 // Verified: FUN_00ea1f50 @ 0x00EA1F50 is void __thiscall(void* this, const char* plain)
 // where this+0x104 = len, this+0x108 = enc buf[0x100] (encryptdata.cpp:0x1dc).
 // NOTE: the correct base for the login's password is dlg+0x13BD0 directly
@@ -87,12 +87,12 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		// so that a manually-typed real password flows through intact.
 		// The unconditional SetString (commit 79d7775) was needed because the
 		// old len-gate let a mask-filled blob through, but that is now handled
-		// by FillPasswordEdit clearing the CEncryptData before typing — the
+		// by FillPasswordEdit clearing the CEncryptData before typing â€” the
 		// len-gate safely skips when the user typed a real password.
 		// NOTE: CEncryptData::SetString treats param_1+0..0xFF as the key.
 		// The key at dlg+0x13BD0+0..0xFF is correctly initialized by the dialog
 		// to a fixed key table (same every session, shared with the server).
-		// Direct SetString on the login slot is the correct approach — any
+		// Direct SetString on the login slot is the correct approach â€” any
 		// indirection through the +0x30C wrapper's CEncryptData uses a
 		// DIFFERENT (uninitialized) key that produces random garbage each
 		// restart, as the debug Dec 0x13BD0 showed.
@@ -360,7 +360,7 @@ namespace AutoLogin
 		if (!hwnd || !IsWindow(hwnd)) return false;
 		__try {
 			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+			// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
 			// +0x39B948 reads unrelated heap.
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
@@ -437,7 +437,7 @@ namespace AutoLogin
 	{
 		__try {
 			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+			// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
 			// +0x39B948 reads unrelated heap.
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
@@ -817,7 +817,7 @@ namespace AutoLogin
 
 	// Fills the account edit (WM_SETTEXT for display) and logs the status.
 	// The actual login packet's account is guaranteed by the MinHook on
-	// FUN_0101C9D8 — no member write needed. Never overwrites a field that
+	// FUN_0101C9D8 â€” no member write needed. Never overwrites a field that
 	// already holds a different account.
 	static int FillAccountEdit(HWND dialog)
 	{
@@ -860,7 +860,7 @@ namespace AutoLogin
 
 	// Fills the password edit by typing the plain Pass= value with real
 	// SendInput keystrokes (fgui edits ignore WM_SETTEXT). Uses the same
-	// visibility/Y logic as account — password = second smallest Y.
+	// visibility/Y logic as account â€” password = second smallest Y.
 	// Also installs the login hook so the packet is guaranteed even if the
 	// UI sync is bypassed. Never overwrites a non-empty different password
 	// unless the user explicitly clicked Fill Password.
@@ -906,7 +906,7 @@ namespace AutoLogin
 		// 2) WM_CHAR via SendMessage (fgui's char handler)
 		// 3) SendInput unicode (real keystrokes, triggers Process per-key handler)
 		// 4) Fallback: direct memory write to CDlgLogin+0x13BD0 via game's encrypt
-		//    (bypasses UI entirely — login reads from there)
+		//    (bypasses UI entirely â€” login reads from there)
 		// Clear any existing 16-char mask first (both HWND and CEncryptData)
 		// Resolve the CDlgLogin base ONCE and reuse for clear + write to avoid
 		// any timing window between reads of the gpDlgShell global.
@@ -951,7 +951,7 @@ namespace AutoLogin
 
 		// Real click into the field first (same technique as MessageClickButton:
 		// synchronous WM_LBUTTONDOWN/UP with the ImGui WndProc suppressed). A
-		// human click is what gives the FGUI canvas true keyboard focus —
+		// human click is what gives the FGUI canvas true keyboard focus â€”
 		// SetFocus on the MFC proxy HWND alone does NOT, so SendInput keystrokes
 		// never reach the fgui password edit and the field stays visually empty.
 		// The fgui login button's client-side gate then rejects the login with a
@@ -1032,7 +1032,7 @@ namespace AutoLogin
 		}
 		Sleep(100);
 		// Trigger EN_KILLFOCUS sync by moving focus away and back: focus account then back to password
-		// so the game's Process handler copies Edit text → CEncryptData.
+		// so the game's Process handler copies Edit text â†’ CEncryptData.
 		if (accountEdit && IsWindow(accountEdit))
 			SetFocus(accountEdit);
 		Sleep(50);
@@ -1041,7 +1041,7 @@ namespace AutoLogin
 
 		// Fallback: directly write to CDlgLogin password structs via game's encrypt.
 		// Uses dlgBase resolved once above (same base as the clear step) to avoid
-		// a stale re-read of the gpDlgShell global. No IsBadWritePtr pre-check —
+		// a stale re-read of the gpDlgShell global. No IsBadWritePtr pre-check â€”
 		// VirtualProtect + SEH is the only gate (IsBadWritePtr on a
 		// VirtualProtect-restored page can wrongly fail and skip the write).
 		__try {
@@ -1161,7 +1161,7 @@ namespace AutoLogin
 	// is the CMyShellApp singleton pointer stored at global 0x01A5A510. The game
 	// itself uses this exact base (e.g. FUN_0089CA85:
 	// CWnd::SetFocus((CWnd *)(DAT_01a5a510 + 0x39b948))). NOTE: FUN_0041F880 is
-	// NOT the app accessor — it returns the 36-byte CQUIManager singleton, so
+	// NOT the app accessor â€” it returns the 36-byte CQUIManager singleton, so
 	// adding 0x39B948 to it reads unrelated heap. Calling the handler directly
 	// skips the fgui layer's client-side field check (which rejects an
 	// empty-looking visible edit with a local "Wrong password." tip BEFORE any
@@ -1337,7 +1337,7 @@ namespace AutoLogin
 			}
 			if (!dlgPtr) {
 				// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-				// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+				// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
 				// +0x39B948 reads unrelated heap.
 				void* shell = *(void**)0x01A5A510;
 				if (shell) dlgPtr = (char*)shell + 0x39B948;
@@ -1411,7 +1411,7 @@ namespace AutoLogin
 				FillAccountEdit(g_cachedDialog);
 			}
 		}
-		// Auto-fill the password field once per dialog instance as well — so the
+		// Auto-fill the password field once per dialog instance as well â€” so the
 		// user does not need to click Fill Password every time. Uses same ini
 		// Pass= and the same robust FillPasswordEdit (WM_CHAR + direct 0x13BD0).
 		if (g_filledPasswordDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
@@ -1486,7 +1486,7 @@ void RenderAutoLoginInterface()
 	{
 		AutoLogin::FillPasswordNow();
 	}
-	ImGui::TextDisabled("(Fill Account types User, Fill Password types Pass= — no cursor movement)");
+	ImGui::TextDisabled("(Fill Account types User, Fill Password types Pass= â€” no cursor movement)");
 	if (AutoLogin::g_fillStatus[0])
 	{
 		bool ok = strstr(AutoLogin::g_fillStatus, "OK") != NULL;
@@ -1582,11 +1582,11 @@ void RenderAutoLoginInterface()
 		if (AutoLogin::g_dlgMemPasswordHwnd && AutoLogin::g_resolvedPasswordHwnd &&
 		    AutoLogin::g_dlgMemPasswordHwnd != AutoLogin::g_resolvedPasswordHwnd)
 		{
-			ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "WARNING: pinned pwd != DlgMem pwd — pin via pwd button to match DlgMem");
+			ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "WARNING: pinned pwd != DlgMem pwd â€” pin via pwd button to match DlgMem");
 		}
 		__try {
 			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+			// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
 			// +0x39B948 reads unrelated heap (crash + bogus login fields).
 			void* shellDbg = *(void**)0x01A5A510;
 			if (shellDbg) {
@@ -1615,7 +1615,7 @@ void RenderAutoLoginInterface()
 							int dlen = (lenBD0 > 0 && lenBD0 < 16) ? lenBD0 : (int)strlen(tmp1);
 							if (dlen > 16) dlen = 16;
 							for (int i = 0; i < dlen; i++) {
-								char b[8]; sprintf_s(b, "%02X ", (unsigned char)ps1[i]);
+								char b[8]; sprintf(b, "%02X ", (unsigned char)ps1[i]);
 								strcat_s(hex1, b);
 							}
 							ImGui::Text("Hex 0x13BD0: %s", hex1);
@@ -1627,7 +1627,7 @@ void RenderAutoLoginInterface()
 							int dlen2 = (len980 > 0 && len980 < 16) ? len980 : (int)strlen(tmp2);
 							if (dlen2 > 16) dlen2 = 16;
 							for (int i = 0; i < dlen2; i++) {
-								char b[8]; sprintf_s(b, "%02X ", (unsigned char)ps2[i]);
+								char b[8]; sprintf(b, "%02X ", (unsigned char)ps2[i]);
 								strcat_s(hex2, b);
 							}
 							ImGui::Text("Hex 0x13980: %s", hex2);
