@@ -8,35 +8,65 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
-> **2026-08-29: Fill Password failed with "invalid password" — root cause was the
-> unconditional password SetString in HookedLoginSend (commit 79d7775), NOT the
-> encryption.**
+> **2026-08-29: Fill Password failed with "invalid password" — root cause: the
+> CEncryptData at dlg+0x13BD0 has a DISJOINT encryption key from the canonical
+> CEncryptData the server expects. Filling with SetString(0x13BD0) uses the wrong
+> key and the server rejects the blob.**
 
-Live debug comparison (two runs, same account "halms", same dialog state
-`flag13620=0` so the login handler sends the `dlg+0x13BD0` CEncryptData):
+Live debug comparison (two runs, same account "halms", flag13620=0):
 
-| Case | Dec 0x13BD0 (sent slot) | Dec 0x13980 (alt slot) | Result |
+| Case | Dec 0x13BD0 (sent slot) | Dec 0x13980 (alt) | Login |
 |---|---|---|---|
-| Manual typing | `"??q??qe?"` (real password) | `"3643748z"` (ini Pass=) | login OK |
-| Fill Password button | `"3643748z"` (ini Pass=) | `"3643748z"` | server: invalid password |
+| Manual typing | `"??q??qe?"` (garbage — key mismatch) | `"3643748z"` (ini, auto-fill wrote it) | OK |
+| Fill Password | `"3643748z"` (clean round-trip) | `"3643748z"` | server: invalid password |
 
-Key evidence: the manually-typed real password at 0x13BD0 decrypts via
-`FUN_00EB31E3` (CEncryptData::GetString) to something that is NOT the ini
-`Pass=` value — i.e. **the ini `Pass=3643748z` is not the account's real
-password**. The 0x13980 alt slot (not used when flag13620=0) is what the fill
-path wrote. So `HookedLoginSend`'s ALWAYS-`SetString(password, g_activePassword)`
-was force-replacing the correctly-typed real password with the wrong ini value
-at send time.
+**Key insight:** Manual typing → Dec 0x13BD0 = garbage `"??q??qe?"` (not the ini
+password), yet the server ACCEPTS the login. Fill → Dec 0x13BD0 = clean
+`"3643748z"` (round-trips with 0x13BD0's own key), yet the server REJECTS it.
 
-Fix: restored the len-gate — the send hook only patches the password
-CEncryptData when it is empty (`len<=0 || len>0x100`), so a real typed password
-(len>0) flows through intact. The original reason 79d7775 removed the gate
-(mask-filled stale blob) is handled by FillPasswordEdit clearing both
-CEncryptData slots with `SetString("")` before typing, so a fill still lands the
-ini password when the blob is empty. NOTE: with a wrong ini Pass= the Fill
-button still fails (it writes the ini password by design) — the ini must hold
-the correct password for fill to work; the hook no longer sabotages manual
-typing.
+The client's Process handler (FUN_0089C013 password branch at `0089c593`) does:
+1. `MOV ECX,[EDI+0x13dd8]; CALL FUN_00607CD5` — FUN_00607CD5 does `ADD ECX,0x30C`
+   then `JMP FUN_00ED3462` (GetString+SetString re-encrypt on the canonical
+   CEncryptData at `*(dlg+0x13DD8)+0x30C`). This object has ITS OWN key bytes at
+   `canonical+0..0xFF` — call it K_EDC.
+2. `GetString(wrapper+0x30C)` → plaintext → `SetString(dlg+0x13BD0, plaintext)`...
+   OR the client copies the len+blob (0x104 bytes from +0x104) from canonical
+   into 0x13BD0, leaving 0x13BD0's key region at +0..0xFF untouched (K_BD0 ≠ K_EDC).
+
+Either way, the blob at 0x13BD0 ends up encrypted with **K_EDC** (the canonical
+key), while the debug's GetString(0x13BD0) uses 0x13BD0's own key **K_BD0** to
+decrypt — producing garbage `"??q??qe?"`. The server decrypts with K_EDC → real
+password → accepts.
+
+Our FillPasswordEdit's direct `SetString(dlg+0x13BD0, "3643748z")` encrypts with
+K_BD0 → blob self-consistent under K_BD0 (Dec shows `"3643748z"` cleanly) → but
+the server decrypts with K_EDC → garbage → **"invalid password"**.
+
+**The canonical CEncryptData** is at `*(dlg+0x13DD8)+0x30C`:
+- `dlg+0x13DD8` is a pointer field (8 bytes past the 0x208-byte `0x13BD0` CEncryptData)
+- `+0x30C` is the offset the Process handler's `FUN_00607CD5(ADD ECX,0x30C)` targets
+- Its key bytes (`+0..0xFF`) are the key the server expects
+
+**Fix (both HookedLoginSend and FillPasswordEdit fallback):**
+1. Encrypt the password into the canonical CEncryptData first via
+   `SetString(canonical+0x30C, g_activePassword)` — this uses K_EDC.
+2. Copy only the len+blob (0x104 bytes starting at `+0x104`) from canonical
+   into the login slot(s) 0x13BD0/0x13980 — exactly replicating the client's
+   sync. Leaves the target's key region at `+0..0xFF` untouched, matching the
+   manual-typing behavior (debug Dec shows garbage but server accepts).
+
+Also restored the len-gate in HookedLoginSend (commit 79d7775 removed it) so
+the hook only patches empty blobs — a real typed password (len>0) flows through
+intact. The canonical-copy in the hook ensures that even empty patches produce
+a server-acceptable blob.
+
+**IMPORTANT:** This fix ensures the ENCRYPTION mechanism matches the client's
+— the password VALUE is still `g_activePassword` from the ini. If the ini
+`Pass=` is wrong/placeholder, the fill will still fail (wrong password
+correctly encrypted). The user must update `accountinfo.ini` with the correct
+password for the account for the fill to succeed.
+
+> **2026-08-28: Password auto-fill — plain Pass= in accountinfo.ini, same methodology as account.**
 
 > **2026-08-28: Password auto-fill — plain Pass= in accountinfo.ini, same methodology as account.**
 

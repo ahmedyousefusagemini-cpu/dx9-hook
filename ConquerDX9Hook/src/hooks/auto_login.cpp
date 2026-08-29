@@ -98,7 +98,25 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					int encLen = *(int*)((char*)password + 0x104);
 					if (encLen <= 0 || encLen > 0x100)
 					{
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+						// CRITICAL: replicate the client's process-chain exactly.
+						// The canonical CEncryptData (whose key the server trusts)
+						// lives at *(password+0x208)+0x30C. SetString THAT first
+						// (it uses the canonical key), then sync only len+blob
+						// (0x104 bytes from +0x104) into the login slot — exactly
+						// what the client's Process handler does. Writing the
+						// login slot directly with its own (disjoint) key produces
+						// a blob the server rejects.
+						void* pCanon = *(void**)((char*)password + 0x208);
+						if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x208) &&
+							!IsBadWritePtr((char*)pCanon + 0x30C, 0x208))
+						{
+							((SetEncStringFunc)SET_ENC_STRING_ADDR)((char*)pCanon + 0x30C, AutoLogin::g_activePassword);
+							memcpy((char*)password + 0x104, (char*)pCanon + 0x30C + 0x104, 0x104);
+						}
+						else
+						{
+							((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+						}
 					}
 				}
 			}
@@ -1037,23 +1055,36 @@ namespace AutoLogin
 			}
 			if (dlgEnc && !IsBadReadPtr(dlgEnc, 0x1400)) {
 				char* dlg = (char*)dlgEnc;
-				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
-				for (int oi = 0; oi < 2; ++oi) {
-					char* pEnc = dlg + offsEnc[oi];
-					if (IsBadWritePtr(pEnc, 0x208)) continue;
-					DWORD op = 0; VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op);
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
-					DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+				// CRITICAL: replicate the client's exact process-chain.
+				// The client's Process handler (FUN_0089C013 password branch)
+				// first encrypts the password into the canonical CEncryptData at
+				// *(dlg+0x13DD8)+0x30C via FUN_00607CD5(ADD ECX,0x30C), then syncs
+				// only the len+blob (0x104 bytes from +0x104) into the login slot
+				// dlg+0x13BD0, leaving 0x13BD0's key region untouched (that is why
+				// the debug's GetString on 0x13BD0 shows garbage "??q??qe?" for a
+				// correctly-encrypted blob). The server only accepts blobs produced
+				// by that canonical object. Our own SetString on 0x13BD0 uses the
+				// disjoint key at 0x13BD0+0..0xFF and the server rejects it (debug:
+				// Dec 0x13BD0 "3643748z" -> server-invalid). Do exactly what the
+				// client does: encrypt canonical, then copy len+blob to 0x13BD0 and
+				// 0x13980.
+				void* pCanon = *(void**)(dlg + 0x13DD8);
+				if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x208) &&
+					!IsBadWritePtr((char*)pCanon + 0x30C, 0x208))
+				{
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)((char*)pCanon + 0x30C, g_activePassword);
+					memcpy(dlg + 0x13BD0 + 0x104, (char*)pCanon + 0x30C + 0x104, 0x104);
+					memcpy(dlg + 0x13980 + 0x104, (char*)pCanon + 0x30C + 0x104, 0x104);
 				}
-				// Also try the second copy at *(dlg+0x13DD8)+0x30C if it exists (some builds use it)
-				void* pSecondBase = *(void**)(dlg + 0x13DD8);
-				if (pSecondBase && !IsBadWritePtr((char*)pSecondBase + 0x30C, 0x208)) {
-					char* p2 = (char*)pSecondBase + 0x30C;
-					DWORD oldProt2 = 0;
-					if (VirtualProtect(p2, 0x208, PAGE_EXECUTE_READWRITE, &oldProt2)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(p2, g_activePassword);
-						DWORD tmp2 = 0;
-						VirtualProtect(p2, 0x208, oldProt2, &tmp2);
+				else
+				{
+					const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
+					for (int oi = 0; oi < 2; ++oi) {
+						char* pEnc = dlg + offsEnc[oi];
+						if (IsBadWritePtr(pEnc, 0x208)) continue;
+						DWORD op = 0; VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op);
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
+						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
 			}
