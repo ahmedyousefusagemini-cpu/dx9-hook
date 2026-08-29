@@ -295,8 +295,8 @@ namespace AutoLogin
 {
 	// User intent - auto-click the Login button until the dialog disappears.
 	bool g_autoClickLogin = false;
-	bool g_autoFillAccount = true;   // auto-fill account when the login dialog appears
-	bool g_autoFillPassword = true;  // auto-fill password when the login dialog appears
+	bool g_autoFillAccount = false;   // auto-fill account when the login dialog appears
+	bool g_autoFillPassword = false;  // auto-fill password when the login dialog appears
 	int  g_clickIntervalMs = 1000;   // min ms between automatic clicks
 	int  g_clickCount = 0;           // total clicks sent this session
 	bool g_loginCompleted = false;   // a click made the login dialog disappear

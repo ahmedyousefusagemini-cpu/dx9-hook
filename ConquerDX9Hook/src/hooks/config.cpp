@@ -239,8 +239,8 @@ void LoadConfig()
 
 	// --- Auto Login ---
 	AutoLogin::g_autoClickLogin = GetPrivateProfileIntA("AutoLogin", "AutoClick", 0, path) != 0;
-	AutoLogin::g_autoFillAccount = GetPrivateProfileIntA("AutoLogin", "AutoFillAccount", 1, path) != 0;
-	AutoLogin::g_autoFillPassword = GetPrivateProfileIntA("AutoLogin", "AutoFillPassword", 1, path) != 0;
+	AutoLogin::g_autoFillAccount = GetPrivateProfileIntA("AutoLogin", "AutoFillAccount", 0, path) != 0;
+	AutoLogin::g_autoFillPassword = GetPrivateProfileIntA("AutoLogin", "AutoFillPassword", 0, path) != 0;
 	AutoLogin::g_clickIntervalMs = GetPrivateProfileIntA("AutoLogin", "ClickIntervalMs", 1000, path);
 	if (AutoLogin::g_clickIntervalMs < 250) AutoLogin::g_clickIntervalMs = 250;
 	if (AutoLogin::g_clickIntervalMs > 5000) AutoLogin::g_clickIntervalMs = 5000;
