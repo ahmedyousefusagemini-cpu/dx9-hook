@@ -8,6 +8,36 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
+> **2026-08-29: Fill Password failed with "invalid password" — root cause was the
+> unconditional password SetString in HookedLoginSend (commit 79d7775), NOT the
+> encryption.**
+
+Live debug comparison (two runs, same account "halms", same dialog state
+`flag13620=0` so the login handler sends the `dlg+0x13BD0` CEncryptData):
+
+| Case | Dec 0x13BD0 (sent slot) | Dec 0x13980 (alt slot) | Result |
+|---|---|---|---|
+| Manual typing | `"??q??qe?"` (real password) | `"3643748z"` (ini Pass=) | login OK |
+| Fill Password button | `"3643748z"` (ini Pass=) | `"3643748z"` | server: invalid password |
+
+Key evidence: the manually-typed real password at 0x13BD0 decrypts via
+`FUN_00EB31E3` (CEncryptData::GetString) to something that is NOT the ini
+`Pass=` value — i.e. **the ini `Pass=3643748z` is not the account's real
+password**. The 0x13980 alt slot (not used when flag13620=0) is what the fill
+path wrote. So `HookedLoginSend`'s ALWAYS-`SetString(password, g_activePassword)`
+was force-replacing the correctly-typed real password with the wrong ini value
+at send time.
+
+Fix: restored the len-gate — the send hook only patches the password
+CEncryptData when it is empty (`len<=0 || len>0x100`), so a real typed password
+(len>0) flows through intact. The original reason 79d7775 removed the gate
+(mask-filled stale blob) is handled by FillPasswordEdit clearing both
+CEncryptData slots with `SetString("")` before typing, so a fill still lands the
+ini password when the blob is empty. NOTE: with a wrong ini Pass= the Fill
+button still fails (it writes the ini password by design) — the ini must hold
+the correct password for fill to work; the hook no longer sabotages manual
+typing.
+
 > **2026-08-28: Password auto-fill — plain Pass= in accountinfo.ini, same methodology as account.**
 
 The user requested a separate ImGui button to fill the password from the same

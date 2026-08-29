@@ -83,21 +83,23 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
 				account = AutoLogin::g_activeAccount;
 		}
-		// Password: ALWAYS SetString with the ini Pass= in mode 0.
-		// The previous len-gate (only patch when encLen<=0) let a stale or
-		// mask-filled CEncryptData blob through when encLen was already
-		// non-zero, so the server got a wrong password. The len-gate was a
-		// workaround for the old wrong CDlgLogin base (FUN_0041F880 = 36-byte
-		// CQUIManager); that base is fixed (gpDlgShell 0x01A5A510), so the
-		// unconditional SetString is correct. The key is password+0..0xFF
-		// (this CEncryptData's own key), so the blob decrypts on the server.
+		// Password: only patch if the CEncryptData is empty (len<=0 or len>0x100)
+		// so that a manually-typed real password flows through intact.
+		// The unconditional SetString (commit 79d7775) was needed because the
+		// old len-gate let a mask-filled blob through, but that is now handled
+		// by FillPasswordEdit clearing the CEncryptData before typing — the
+		// len-gate safely skips when the user typed a real password.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
 			{
 				if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
 				{
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+					int encLen = *(int*)((char*)password + 0x104);
+					if (encLen <= 0 || encLen > 0x100)
+					{
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+					}
 				}
 			}
 			__except (EXCEPTION_EXECUTE_HANDLER) {}
