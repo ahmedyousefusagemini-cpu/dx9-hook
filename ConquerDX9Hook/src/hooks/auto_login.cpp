@@ -340,11 +340,12 @@ namespace AutoLogin
 	{
 		if (!hwnd || !IsWindow(hwnd)) return false;
 		__try {
-			typedef void* (__cdecl *AppAccFn)();
-			AppAccFn fn = (AppAccFn)0x0041F880;
-			void* app = fn ? fn() : nullptr;
-			if (app) {
-				char* dlg = (char*)app + 0x39B948;
+			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
+			// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+			// +0x39B948 reads unrelated heap.
+			void* shell = *(void**)0x01A5A510;
+			if (shell) {
+				char* dlg = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlg, 0x40)) {
 					HWND hLogin = *(HWND*)(dlg + 0x20);
 					if (hwnd == hLogin) return true;
@@ -410,17 +411,18 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-	// Finds the MFC login dialog. First tries the CDlgLogin object at app+0x39B948
-	// (its m_hWnd at +0x20 is the login dialog, even when a Tips dialog is on top).
-	// Fallback to the old Edit+Button enumeration for robustness.
+	// Finds the MFC login dialog. First tries the CDlgLogin object at
+	// gpDlgShell+0x39B948 (its m_hWnd at +0x20 is the login dialog, even when a
+	// Tips dialog is on top). Fallback to the old Edit+Button enumeration.
 	static HWND FindLoginDialog()
 	{
 		__try {
-			typedef void* (__cdecl *AppAccFn)();
-			AppAccFn fn = (AppAccFn)0x0041F880;
-			void* app = fn ? fn() : nullptr;
-			if (app) {
-				char* dlg = (char*)app + 0x39B948;
+			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
+			// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+			// +0x39B948 reads unrelated heap.
+			void* shell = *(void**)0x01A5A510;
+			if (shell) {
+				char* dlg = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlg, 0x40)) {
 					HWND hDlg = *(HWND*)(dlg + 0x20);
 					if (hDlg && IsWindow(hDlg)) {
@@ -895,7 +897,7 @@ namespace AutoLogin
 				if (!fh) { HMODULE hm = GetModuleHandleA("mfc42.dll"); if (!hm) hm = GetModuleHandleA("mfc140.dll"); if (hm) fh = (FromHandleFn)GetProcAddress(hm, (LPCSTR)4866); }
 				if (fh) dlgClr = fh(g_cachedDialog);
 			}
-			if (!dlgClr) { typedef void* (__cdecl *AppAccFnClr)(); AppAccFnClr fnClr = (AppAccFnClr)0x0041F880; void* appClr = fnClr ? fnClr() : nullptr; if (appClr) dlgClr = (char*)appClr + 0x39B948; }
+			if (!dlgClr) { void* shellClr = *(void**)0x01A5A510; if (shellClr) dlgClr = (char*)shellClr + 0x39B948; }
 			if (dlgClr && !IsBadReadPtr(dlgClr, 0x1400)) {
 				char* dlg = (char*)dlgClr;
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
@@ -1002,7 +1004,7 @@ namespace AutoLogin
 				if (!fh2) { HMODULE hm2 = GetModuleHandleA("mfc42.dll"); if (!hm2) hm2 = GetModuleHandleA("mfc140.dll"); if (hm2) fh2 = (FromHandleFn)GetProcAddress(hm2, (LPCSTR)4866); }
 				if (fh2) dlgEnc = fh2(g_cachedDialog);
 			}
-			if (!dlgEnc) { typedef void* (__cdecl *AppAccFn)(); AppAccFn fn = (AppAccFn)0x0041F880; void* app = fn ? fn() : nullptr; if (app) dlgEnc = (char*)app + 0x39B948; }
+			if (!dlgEnc) { void* shellEnc = *(void**)0x01A5A510; if (shellEnc) dlgEnc = (char*)shellEnc + 0x39B948; }
 			if (dlgEnc && !IsBadReadPtr(dlgEnc, 0x1400)) {
 				char* dlg = (char*)dlgEnc;
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
@@ -1036,11 +1038,9 @@ namespace AutoLogin
 			return 0;
 		// Also check the dlg's encrypted len as ground truth (both offsets)
 		__try {
-			typedef void* (__cdecl *AppAccFn2)();
-			AppAccFn2 fn2 = (AppAccFn2)0x0041F880;
-			void* app2 = fn2 ? fn2() : nullptr;
-			if (app2) {
-				char* dlg2 = (char*)app2 + 0x39B948;
+			void* shell2 = *(void**)0x01A5A510;
+			if (shell2) {
+				char* dlg2 = (char*)shell2 + 0x39B948;
 				if (!IsBadReadPtr(dlg2 + 0x13BD0 + 0x104, 4)) {
 					int encLen = *(int*)(dlg2 + 0x13BD0 + 0x104);
 					if (encLen > 0 && encLen < 0x100)
@@ -1104,24 +1104,26 @@ namespace AutoLogin
 		return true;
 	}
 
-	// Direct login: invoke FUN_LoginButtonHandler on the CDlgLogin instance
-	// (app+0x39B948). This is exactly what the game runs when the MFC Login
-	// button is clicked, but calling it directly skips the fgui layer's
-	// client-side field check (which rejects an empty-looking visible edit with
-	// a local "Wrong password." tip BEFORE any packet is sent). The handler
-	// reads account/password from dlg+0x13B88 / dlg+0x13BD0 in memory, and
-	// HookedLoginSend guarantees the packet carries the ini values, so login
-	// proceeds even when the UI fields appear empty.
+	// Direct login: invoke FUN_LoginButtonHandler on the CDlgLogin instance.
+	// The CDlgLogin subobject lives at gpDlgShell + 0x39B948, where gpDlgShell
+	// is the CMyShellApp singleton pointer stored at global 0x01A5A510. The game
+	// itself uses this exact base (e.g. FUN_0089CA85:
+	// CWnd::SetFocus((CWnd *)(DAT_01a5a510 + 0x39b948))). NOTE: FUN_0041F880 is
+	// NOT the app accessor — it returns the 36-byte CQUIManager singleton, so
+	// adding 0x39B948 to it reads unrelated heap. Calling the handler directly
+	// skips the fgui layer's client-side field check (which rejects an
+	// empty-looking visible edit with a local "Wrong password." tip BEFORE any
+	// packet is sent). The handler reads account/password from dlg+0x13B88 /
+	// dlg+0x13BD0 in memory, and HookedLoginSend guarantees the packet carries
+	// the ini values, so login proceeds even when the UI fields appear empty.
 	static bool DirectLoginCall()
 	{
 		__try
 		{
-			typedef void* (__cdecl *AppAccFn)();
-			AppAccFn fn = (AppAccFn)0x0041F880;
-			void* app = fn ? fn() : nullptr;
-			if (!app)
+			void* shell = *(void**)0x01A5A510;
+			if (!shell)
 				return false;
-			char* dlg = (char*)app + 0x39B948;
+			char* dlg = (char*)shell + 0x39B948;
 			if (IsBadReadPtr(dlg, 0x40))
 				return false;
 			HWND hDlg = *(HWND*)(dlg + 0x20);
@@ -1280,10 +1282,11 @@ namespace AutoLogin
 				if (fromHandle) dlgPtr = fromHandle(g_cachedDialog);
 			}
 			if (!dlgPtr) {
-				typedef void* (__cdecl *AppAccFn)();
-				AppAccFn fn = (AppAccFn)0x0041F880;
-				void* app = fn ? fn() : nullptr;
-				if (app) dlgPtr = (char*)app + 0x39B948;
+				// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
+				// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+				// +0x39B948 reads unrelated heap.
+				void* shell = *(void**)0x01A5A510;
+				if (shell) dlgPtr = (char*)shell + 0x39B948;
 			}
 			if (dlgPtr && !IsBadReadPtr(dlgPtr, 0x1400)) {
 				char* dlg = (char*)dlgPtr;
@@ -1528,11 +1531,12 @@ void RenderAutoLoginInterface()
 			ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "WARNING: pinned pwd != DlgMem pwd — pin via pwd button to match DlgMem");
 		}
 		__try {
-			typedef void* (__cdecl *AppAccFnDbg)();
-			AppAccFnDbg fnDbg = (AppAccFnDbg)0x0041F880;
-			void* appDbg = fnDbg ? fnDbg() : nullptr;
-			if (appDbg) {
-				char* dlgDbg = (char*)appDbg + 0x39B948;
+			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
+			// NOT FUN_0041F880() — that is the 36-byte CQUIManager singleton and
+			// +0x39B948 reads unrelated heap (crash + bogus login fields).
+			void* shellDbg = *(void**)0x01A5A510;
+			if (shellDbg) {
+				char* dlgDbg = (char*)shellDbg + 0x39B948;
 				if (!IsBadReadPtr(dlgDbg + 0x13BD0, 0x300) && !IsBadReadPtr(dlgDbg + 0x13980, 0x208)) {
 					int lenBD0 = *(int*)(dlgDbg + 0x13BD0 + 0x104);
 					int len980 = *(int*)(dlgDbg + 0x13980 + 0x104);
