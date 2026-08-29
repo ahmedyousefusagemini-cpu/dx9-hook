@@ -924,6 +924,25 @@ namespace AutoLogin
 		}
 		Sleep(30);
 
+		// Real click into the field first (same technique as MessageClickButton:
+		// synchronous WM_LBUTTONDOWN/UP with the ImGui WndProc suppressed). A
+		// human click is what gives the FGUI canvas true keyboard focus —
+		// SetFocus on the MFC proxy HWND alone does NOT, so SendInput keystrokes
+		// never reach the fgui password edit and the field stays visually empty.
+		// The fgui login button's client-side gate then rejects the login with a
+		// local "Wrong password." before any packet is sent.
+		{
+			RECT rc;
+			if (GetClientRect(passwordEdit, &rc))
+			{
+				LPARAM pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
+				g_suppressImGuiWndProc = true;
+				SendMessage(passwordEdit, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+				SendMessage(passwordEdit, WM_LBUTTONUP, 0, pos);
+				g_suppressImGuiWndProc = false;
+			}
+		}
+		Sleep(50);
 		if (!SetFocus(passwordEdit))
 			return -1;
 		Sleep(50);
@@ -1171,24 +1190,14 @@ namespace AutoLogin
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
-		// Credentials are loaded from accountinfo.ini. Prefer the direct
-		// FUN_LoginButtonHandler call — it bypasses the fgui Login button's
-		// client-side field gate (which shows "Wrong password." locally when the
-		// visible edit looks empty). The handler reads account/password from
-		// dlg+0x13B88/dlg+0x13BD0 in memory and HookedLoginSend guarantees the
-		// ini values reach the server, so login proceeds even if the UI fields
-		// appear empty. Falls back to the selected click method only if the
-		// direct call cannot run (dialog not resolved).
+		// Method 3 = explicit direct FUN_LoginButtonHandler call (bypasses the
+		// fgui client-side field gate). All other methods use the button click,
+		// which is the previously-working behavior.
 		bool ok = false;
-		if (AutoLogin::g_activeAccount[0] || AutoLogin::g_activePassword[0])
+		if (g_clickMethod == 3)
 			ok = DirectLoginCall();
-		if (!ok)
-		{
-			if (g_clickMethod == 3)
-				ok = DirectLoginCall();
-			else if (button)
-				ok = ClickButtonMethod(button);
-		}
+		else if (button)
+			ok = ClickButtonMethod(button);
 
 		if (ok)
 		{
