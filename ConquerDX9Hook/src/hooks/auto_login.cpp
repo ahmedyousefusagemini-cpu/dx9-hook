@@ -83,23 +83,16 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
 				account = AutoLogin::g_activeAccount;
 		}
-		// Password: only patch if the CEncryptData is empty (len<=0 or len>0x100)
+// Password: only patch if the CEncryptData is empty (len<=0 or len>0x100)
 		// so that a manually-typed real password flows through intact.
 		// The unconditional SetString (commit 79d7775) was needed because the
 		// old len-gate let a mask-filled blob through, but that is now handled
-		// by FillPasswordEdit clearing the CEncryptData before typing â€” the
+		// by FillPasswordEdit clearing the CEncryptData before typing — the
 		// len-gate safely skips when the user typed a real password.
-		// NOTE: CEncryptData::SetString treats param_1+0..0xFF as the key.
-		// The key at dlg+0x13BD0+0..0xFF is correctly initialized by the dialog
-		// to a fixed key table (same every session, shared with the server).
-		// Direct SetString on the login slot is the correct approach â€” any
-		// indirection through the +0x30C wrapper's CEncryptData uses a
-		// DIFFERENT (uninitialized) key that produces random garbage each
-		// restart, as the debug Dec 0x13BD0 showed.
-		// The client ALSO applies a per-character XOR transform before
-		// SetString: transformed[i] = raw[i] ^ key[i] (key = this object's own
-		// +0..0xFF bytes). The server compares the decrypted blob against the
-		// transformed form, so the patch must XOR too.
+		// The client applies a per-char XOR transform with the CANONICAL key
+		// (at *(password+0x208)+0x30C+0..0xFF), NOT the key at password+0..0xFF.
+		// SetString then encrypts with the object's own key, so the server
+		// decrypts to the transformed form.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
@@ -110,7 +103,10 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					if (encLen <= 0 || encLen > 0x100)
 					{
 						char keyBuf[0x100] = {0};
-						memcpy(keyBuf, password, 0x100);
+						void* pCanon = *(void**)((char*)password + 0x208);
+						if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x100)) {
+							memcpy(keyBuf, (char*)pCanon + 0x30C, 0x100);
+						}
 						char transformed[128] = {0};
 						int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
 						if (tlen > 0 && tlen < 127) {
@@ -118,6 +114,12 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 								transformed[i] = AutoLogin::g_activePassword[i] ^ keyBuf[i];
 							transformed[tlen] = 0;
 						}
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
+					}
+				}
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {}
+		}
 						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
 					}
 				}
@@ -1041,30 +1043,27 @@ namespace AutoLogin
 
 		// Fallback: directly write to CDlgLogin password structs via game's encrypt.
 		// Uses dlgBase resolved once above (same base as the clear step) to avoid
-		// a stale re-read of the gpDlgShell global. No IsBadWritePtr pre-check â€”
-		// VirtualProtect + SEH is the only gate (IsBadWritePtr on a
-		// VirtualProtect-restored page can wrongly fail and skip the write).
+		// a stale re-read of the gpDlgShell global. No IsBadWritePtr pre-check —
+		// VirtualProtect + SEH is the only gate.
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
 				// CRITICAL: the client applies a per-character XOR transform
-				// before SetString. The CEncryptData key bytes at param_1+0..0xFF
-				// are used BOTH as the XOR key for the transform AND as the
-				// encryption key in SetString. The transform is:
-				//   transformed[i] = raw[i] ^ key[i]
-				// where key[i] = *(byte*)(param_1 + i).
-				// The server decrypts the blob and compares against the
-				// transformed form. Without the XOR, the server receives the
-				// raw password and rejects it (debug Dec 0x13BD0 showed raw
-				// "3643748z" vs expected transformed "??q??qe?").
-				// Read the key bytes from the object's own key region.
+				// before SetString, using the key from the canonical CEncryptData
+				// at *(dlg+0x13DD8)+0x30C+0..0xFF (the fgui edit's storage key).
+				// The key at dlg+0x13BD0+0..0xFF is a DIFFERENT key (K_bd0) used
+				// only for the final SetString encryption. XORing with K_bd0
+				// produces a wrong transformed value (debug showed fill=3A.. vs
+				// manual=8B..). Read the canonical transform key instead.
 				char keyBuf[0x100] = {0};
+				void* pCanon = *(void**)(dlg + 0x13DD8);
+				if (pCanon && !IsBadReadPtr((char*)pCanon + 0x30C, 0x100)) {
+					memcpy(keyBuf, (char*)pCanon + 0x30C, 0x100);
+				}
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offsEnc[oi];
-					// Read key bytes from the CEncryptData's own key region
-					memcpy(keyBuf, pEnc, 0x100);
-					// Build the transformed password: raw ^ key
+					// Build the transformed password: raw ^ canonical_key
 					char transformed[128] = {0};
 					int tlen = (int)lstrlenA(g_activePassword);
 					if (tlen > 0 && tlen < 127) {
@@ -1596,6 +1595,23 @@ void RenderAutoLoginInterface()
 					int len980 = *(int*)(dlgDbg + 0x13980 + 0x104);
 					char flag13620 = *(char*)(dlgDbg + 0x13620);
 					ImGui::Text("EncLens: 0x13BD0=%d 0x13980=%d flag13620=%d", lenBD0, len980, (int)flag13620);
+					// Show the canonical transform key (first 8 bytes) for verification
+					__try {
+						void* pCanDbg = *(void**)(dlgDbg + 0x13DD8);
+						if (pCanDbg && !IsBadReadPtr((char*)pCanDbg + 0x30C, 0x100)) {
+							char ckey[96] = {0};
+							static const char kHexc[] = "0123456789ABCDEF";
+							int cp = 0;
+							for (int i = 0; i < 8; i++) {
+								unsigned char c = (unsigned char)((char*)pCanDbg + 0x30C)[i];
+								ckey[cp++] = kHexc[c >> 4]; ckey[cp++] = kHexc[c & 0xF]; ckey[cp++] = ' ';
+							}
+							ckey[cp] = 0;
+							ImGui::Text("CanonKey: %s", ckey);
+						} else {
+							ImGui::Text("CanonKey: (unreadable)");
+						}
+					} __except(EXCEPTION_EXECUTE_HANDLER) {}
 					// Decrypted preview via 00EB31E3 (CEncryptData::GetString)
 					__try {
 						typedef void (__thiscall *GetEncStrFn)(void*, void*);
