@@ -8,6 +8,31 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
+> **2026-08-30: Fill Password — root cause: the per-char XOR transform key is
+> indexed by the CHARACTER VALUE, NOT by position. The hardcoded 8-byte
+> per-position table `[B8 98 45 B8 91 45 5D DF]` only coincidentally matched
+> the sample password `"3643748"` (its digits at positions 0..6 map to those
+> key bytes); any password containing other characters (letters!) produced a
+> wrong transformed blob → server rejected → "fill only works for numbers".**
+
+Evidence (Ghidra-verified, manual typing of `"3643748z"` → decrypted
+`"8B AE 71 8B A6 71 65 A5"`):
+- `'3'` at position 0 AND position 3 both → `0x8B`, key byte `0x33^0x8B=0xB8`
+- `'4'` at position 2 AND position 5 both → `0x71`, key byte `0x34^0x71=0x45`
+
+Same char at DIFFERENT positions gives the SAME key byte → the transform is
+`transformed[i] = raw[i] ^ keyTable[raw[i]]` (256-byte table indexed by the
+character's ASCII value). The CEncryptData's own key table at `+0..0xFF` IS
+this table (fixed, same every restart).
+
+**Fix (`auto_login.cpp`):**
+- `FillPasswordEdit` + `HookedLoginSend` now read the key table from the
+  CEncryptData at runtime (`(const unsigned char*)pEnc`) and apply
+  `raw[i] ^ keyTable[(unsigned char)raw[i]]` — correct for ALL characters.
+- `FillPasswordEdit` also skips the direct write when the typed path already
+  populated the CEncryptData (len>0) — the game's own transform is then used.
+- Hardcoded per-position table `kPwdXor[8]` removed from both places.
+
 > **2026-08-29: Fill Password — root cause: the ini `Pass=` value is simply
 > wrong for the account. The CEncryptData key at dlg+0x13BD0+0..0xFF IS
 > correctly initialized (fixed key table, same every restart). Direct

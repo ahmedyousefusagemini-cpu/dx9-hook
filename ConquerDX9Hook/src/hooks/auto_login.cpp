@@ -26,6 +26,11 @@
 // Pass= into the CEncryptData at dlg+0x13BD0 (FUN_00EA1F50) so the packet is
 // correct even if UI sync missed. No member offsets needed for account,
 // password encrypt uses the game's own setter (0x00EA1F50) via the hook.
+// PASSWORD TRANSFORM: the fgui edit XORs each typed char with a per-char key
+// table (the CEncryptData's own key at +0..0xFF, indexed by the char VALUE,
+// NOT by position). Verified: '3' at pos 0 and pos 3 both XOR to 0x8B with
+// key byte 0xB8; '4' at pos 2 and pos 5 both to 0x71 with key byte 0x45.
+// The fill reproduces this per-char transform using the runtime key table.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
@@ -89,10 +94,9 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		// old len-gate let a mask-filled blob through, but that is now handled
 		// by FillPasswordEdit clearing the CEncryptData before typing — the
 		// len-gate safely skips when the user typed a real password.
-		// The client applies a per-char XOR transform with the CANONICAL key
-		// (at *(password+0x208)+0x30C+0..0xFF), NOT the key at password+0..0xFF.
-		// SetString then encrypts with the object's own key, so the server
-		// decrypts to the transformed form.
+		// The client applies a per-character XOR transform before SetString,
+		// keyed by the CEncryptData's own key table at +0..0xFF (the fgui edit
+		// uses the same fixed table indexed by the character's value).
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
@@ -102,17 +106,15 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					int encLen = *(int*)((char*)password + 0x104);
 					if (encLen <= 0 || encLen > 0x100)
 					{
-						// Same fixed per-char XOR transform key as the fill:
-						// raw ^ [B8 98 45 B8 91 45 5D DF] = what the server
-						// expects (verified via manual typing, stable per restart).
-						static const unsigned char kPwdXor[8] = {
-							0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
-						};
+						// Same per-char XOR transform key as the fill: the
+						// CEncryptData's own key table at +0..0xFF, indexed by
+						// the character value (not position).
+						const unsigned char* keyTable = (const unsigned char*)password;
 						char transformed[128] = {0};
 						int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
 						if (tlen > 0 && tlen < 127) {
 							for (int i = 0; i < tlen; i++)
-								transformed[i] = AutoLogin::g_activePassword[i] ^ kPwdXor[i & 7];
+								transformed[i] = AutoLogin::g_activePassword[i] ^ keyTable[(unsigned char)AutoLogin::g_activePassword[i]];
 							transformed[tlen] = 0;
 						}
 						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
@@ -1042,32 +1044,26 @@ namespace AutoLogin
 		// Uses dlgBase resolved once above (same base as the clear step) to avoid
 		// a stale re-read of the gpDlgShell global. No IsBadWritePtr pre-check —
 		// VirtualProtect + SEH is the only gate.
+		// The transform is per-character: the fgui edit XORs each typed char with
+		// a 256-byte key table indexed by the character's ASCII value. The same
+		// key table is the CEncryptData's own key at +0..0xFF (fixed, same every
+		// restart). Indexing by char value (not position) is correct for all chars.
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
-				// CRITICAL: the client applies a per-character XOR transform
-				// before SetString. The transform key is a FIXED table used by
-				// the fgui edit's Ordinal functions (delay-loaded DLL) — it is
-				// NOT the canonical key at *(dlg+0x13DD8)+0x30C (that is 7B 28..
-				// which produced 48 1E.., wrong) and NOT the key at 0x13BD0.
-				// Verified transform key (manual typing, stable every restart):
-				//   raw "3643748z" -> transformed "8B AE 71 8B A6 71 65 A5"
-				//   key = raw ^ transformed = [B8 98 45 B8 91 45 5D DF ...]
-				// This is a fixed per-position key table (first bytes known from
-				// the observed transform; beyond byte 8 the table continues but
-				// our passwords are short, so reuse the 8 known bytes).
-				static const unsigned char kPwdXor[8] = {
-					0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
-				};
 				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offsEnc[oi];
-					// Build the transformed password: raw ^ fixed_key
+					// Skip if already populated by the typed path (game's own transform is correct)
+					if (*(int*)(pEnc + 0x104) > 0 && *(int*)(pEnc + 0x104) <= 0x100)
+						continue;
+					// Read the per-char key table from the CEncryptData's own key (+0..0xFF)
+					const unsigned char* keyTable = (const unsigned char*)pEnc;
 					char transformed[128] = {0};
 					int tlen = (int)lstrlenA(g_activePassword);
 					if (tlen > 0 && tlen < 127) {
 						for (int i = 0; i < tlen; i++)
-							transformed[i] = g_activePassword[i] ^ kPwdXor[i & 7];
+							transformed[i] = g_activePassword[i] ^ keyTable[(unsigned char)g_activePassword[i]];
 						transformed[tlen] = 0;
 						DWORD op = 0;
 						if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
