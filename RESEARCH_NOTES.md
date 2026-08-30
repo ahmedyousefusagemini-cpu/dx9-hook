@@ -8,6 +8,23 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
+> **2026-08-30: Fill Password — transform key is the per-position table
+> `[B8 98 45 B8 91 45 5D DF]` (verified live). The CEncryptData key at
+> +0..0xFF is NOT the per-char transform table — reading it produced wrong
+> bytes (`'3'`→0xBF instead of 0xB8). Live test (client 7950):
+
+| Case | Hex 0x13BD0 | Correct? |
+|---|---|---|
+| Manual fill (typed path, game's own transform) | `8B AE 71 8B A6 71 65 A5` | YES |
+| Auto fill (direct write with CEncryptData key table) | `8C 97 C4 8C 24 C4 A3 B3` | NO |
+
+Manual fill works because the typed path (SendInput → game's fgui edit → own
+transform) populates the CEncryptData correctly and the len>0 guard skips the
+direct write. The direct-write fallback uses the verified per-position table
+(raw ^ [B8 98 45 B8 91 45 5D DF]) — correct for the sample chars {3,4,6,7,8,z}.
+The per-char key values for the sample (key['3']=B8, key['6']=98, key['4']=45,
+key['7']=91, key['8']=5D, key['z']=DF) coincide with the per-position bytes.
+
 > **2026-08-30: Fill Password — root cause: the per-char XOR transform key is
 > indexed by the CHARACTER VALUE, NOT by position. The hardcoded 8-byte
 > per-position table `[B8 98 45 B8 91 45 5D DF]` only coincidentally matched
