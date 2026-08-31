@@ -82,40 +82,34 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
 				account = AutoLogin::g_activeAccount;
 		}
-// Password: only patch if the CEncryptData is empty (len<=0 or len>0x100)
-		// so that a manually-typed real password flows through intact.
-		// FillPasswordEdit now writes the plain password directly, so the
-		// len-gate safely skips when the CEncryptData is already populated.
-		// SetString's transform is self-inverse: the server's GetString
-		// (FUN_00eb31e3) recovers exactly the plain text we pass here.
+// Password: always inject our transformed password when g_activePassword is set.
+		// The game may pass a CEncryptData built from the EditBox text (empty if not
+		// typed), so we overwrite unconditionally — the manual path never needs to
+		// "flow through intact" since we're auto-filling anyway.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
 			{
 				if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
 				{
-					int encLen = *(int*)((char*)password + 0x104);
-					if (encLen <= 0 || encLen > 0x100)
-					{
-						// The server expects the fixed per-position XOR transform the
-						// fgui edit applies: out[i] = plain[i] ^ kPwdXor[i & 7] with
-						// kPwdXor = [B8 98 45 B8 91 45 5D DF]. Verified against manual
-						// typing: "3643748z" stores as 8B AE 71 8B A6 71 65 A5
-						// ('3'^0xB8=0x8B at pos 0 and 3, '4'^0x45=0x71 at pos 2 and 5,
-						// '6'^0x98, '7'^0x91, '8'^0x5D, 'z'^0xDF). Stable across restarts.
-						// NOTE: the key table at *(encData+0x208)+0x30C is session-RANDOM
-						// and NOT the transform key - do not use it here.
-						char transformed[128] = {0};
-						int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
-						if (tlen > 0 && tlen < 127) {
-							static const unsigned char kPwdXor[8] = {
-								0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
-							};
-							for (int i = 0; i < tlen; i++)
-								transformed[i] = (char)(AutoLogin::g_activePassword[i] ^ kPwdXor[i & 7]);
-							transformed[tlen] = 0;
-							((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
-						}
+					// The server expects the fixed per-position XOR transform the
+					// fgui edit applies: out[i] = plain[i] ^ kPwdXor[i & 7] with
+					// kPwdXor = [B8 98 45 B8 91 45 5D DF]. Verified against manual
+					// typing: "3643748z" stores as 8B AE 71 8B A6 71 65 A5
+					// ('3'^0xB8=0x8B at pos 0 and 3, '4'^0x45=0x71 at pos 2 and 5,
+					// '6'^0x98, '7'^0x91, '8'^0x5D, 'z'^0xDF). Stable across restarts.
+					// NOTE: the key table at *(encData+0x208)+0x30C is session-RANDOM
+					// and NOT the transform key - do not use it here.
+					char transformed[128] = {0};
+					int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
+					if (tlen > 0 && tlen < 127) {
+						static const unsigned char kPwdXor[8] = {
+							0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
+						};
+						for (int i = 0; i < tlen; i++)
+							transformed[i] = (char)(AutoLogin::g_activePassword[i] ^ kPwdXor[i & 7]);
+						transformed[tlen] = 0;
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
 					}
 				}
 			}
@@ -930,22 +924,16 @@ namespace AutoLogin
 						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
-				// ALSO write into the FGUI edit's own CEncryptData at *(dlg+0x13DD8).
-				// The real EnterGame fgui button reads the edit's internal text
-				// (not dlg+0x13BD0), so the edit MUST contain the password or the
-				// packet carries an empty/wrong password. SetString applies the
-				// same XOR, so GetString(editEnc) returns exactly the XOR'd form
-				// the server expects — no real keystroke focus needed.
-				void* editEnc = *(void**)(dlg + 0x13DD8);
-				if (editEnc && !IsBadReadPtr(editEnc, 0x208) && !IsBadWritePtr(editEnc, 0x208)) {
-					DWORD op = 0;
-					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(editEnc, transformed);
-						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
-					}
-				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+		// Populate the visible EditBox text via WM_SETTEXT (same as FillAccountEdit).
+		// The cocos EditBox gate rejects empty fields; the account fill already proves
+		// WM_SETTEXT works for display. The actual packet reads dlg+0x13BD0 (our write).
+		if (passwordEdit && IsWindow(passwordEdit))
+		{
+			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
+		}
 
 		Sleep(30);
 
