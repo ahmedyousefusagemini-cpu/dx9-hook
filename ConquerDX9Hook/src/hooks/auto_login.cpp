@@ -1498,6 +1498,38 @@ void RenderAutoLoginInterface()
 						if (ps1 && !IsBadReadPtr(ps1, 1)) {
 							char tmp1[32] = {0}; strncpy_s(tmp1, sizeof(tmp1), ps1, _TRUNCATE);
 							ImGui::Text("Dec 0x13BD0: \"%s\" (len=%d)", tmp1, sz1);
+							// The FGUI edit's own CEncryptData at *(dlg+0x13DD8) — the
+							// fgui EnterGame button reads the password from HERE.
+							__try {
+								void* editCEnc = *(void**)(dlgDbg + 0x13DD8);
+								if (editCEnc && !IsBadReadPtr(editCEnc, 0x208)) {
+									int editLen = *(int*)((char*)editCEnc + 0x104);
+									char editOut[32] = {0};
+									((GetEncStrFn)0x00EB31E3)(editCEnc, editOut);
+									int esz = *(int*)(editOut + 0x14);
+									char* eps = (esz <= 15) ? editOut : *(char**)editOut;
+									if (eps && !IsBadReadPtr(eps, 1)) {
+										char etmp[32] = {0}; strncpy_s(etmp, sizeof(etmp), eps, _TRUNCATE);
+										ImGui::Text("EditCEnc ptr=0x%08X len=%d GS: \"%s\" (len=%d)",
+											(unsigned int)editCEnc, editLen, etmp, esz);
+										char ehex[128] = {0};
+										static const char kHexE[] = "0123456789ABCDEF";
+										int edlen = (editLen > 0 && editLen < 16) ? editLen : (int)strlen(etmp);
+										if (edlen > 16) edlen = 16;
+										int ehpos = 0;
+										for (int i = 0; i < edlen; i++) {
+											unsigned char c = (unsigned char)eps[i];
+											ehex[ehpos++] = kHexE[c >> 4];
+											ehex[ehpos++] = kHexE[c & 0xF];
+											ehex[ehpos++] = ' ';
+										}
+										ehex[ehpos] = 0;
+										ImGui::Text("EditCEnc Hex: %s", ehex);
+									}
+								} else {
+									ImGui::Text("EditCEnc: (unreadable)");
+								}
+							} __except(EXCEPTION_EXECUTE_HANDLER) {}
 							// Hex dump of the actual decrypted bytes
 							char hex1[128] = {0};
 							static const char kHex[] = "0123456789ABCDEF";
