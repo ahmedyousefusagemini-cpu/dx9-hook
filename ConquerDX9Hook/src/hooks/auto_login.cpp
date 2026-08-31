@@ -930,29 +930,22 @@ namespace AutoLogin
 						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
+				// ALSO write into the FGUI edit's own CEncryptData at *(dlg+0x13DD8).
+				// The real EnterGame fgui button reads the edit's internal text
+				// (not dlg+0x13BD0), so the edit MUST contain the password or the
+				// packet carries an empty/wrong password. SetString applies the
+				// same XOR, so GetString(editEnc) returns exactly the XOR'd form
+				// the server expects — no real keystroke focus needed.
+				void* editEnc = *(void**)(dlg + 0x13DD8);
+				if (editEnc && !IsBadReadPtr(editEnc, 0x208) && !IsBadWritePtr(editEnc, 0x208)) {
+					DWORD op = 0;
+					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(editEnc, transformed);
+						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
+					}
+				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-		// Populate the visible fgui edit via WM_CHAR so the fgui login button's
-		// local gate sees a non-empty field. This is NOT SendInput — just a
-		// direct HWND message. The fgui edit XORs each char internally with the
-		// game's own key, and its sync populates dlg+0x13BD0 on focus change.
-		// Do NOT write to the edit's CEncryptData at *(dlg+0x13DD8) — the WM_CHAR
-		// handler would append to it, resulting in doubled content.
-		if (passwordEdit && IsWindow(passwordEdit))
-		{
-			SetFocus(passwordEdit);
-			Sleep(30);
-			SendMessageA(passwordEdit, EM_SETSEL, 0, -1);
-			SendMessageA(passwordEdit, WM_CLEAR, 0, 0);
-			Sleep(30);
-			for (const char* p = g_activePassword; *p; ++p)
-			{
-				SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 0);
-				Sleep(30);
-			}
-			Sleep(50);
-		}
 
 		Sleep(30);
 
