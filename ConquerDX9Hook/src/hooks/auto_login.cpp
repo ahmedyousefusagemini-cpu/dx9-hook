@@ -945,8 +945,26 @@ namespace AutoLogin
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
 		// Display (best-effort): WM_SETTEXT shows the value where supported.
+		// Also send WM_CHAR directly to the fgui edit HWND so its internal text
+		// buffer is populated (the fgui gate checks this text, not the MFC
+		// CEncryptData). This is NOT SendInput — just a direct HWND message.
 		if (passwordEdit && IsWindow(passwordEdit))
-			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
+		{
+			SetFocus(passwordEdit);
+			Sleep(30);
+			// Select all + delete to clear any existing text
+			SendMessageA(passwordEdit, EM_SETSEL, 0, -1);
+			SendMessageA(passwordEdit, WM_CLEAR, 0, 0);
+			Sleep(30);
+			// Type each character via WM_CHAR — the fgui edit XORs each char
+			// with the fixed key table internally, producing the correct form.
+			for (const char* p = g_activePassword; *p; ++p)
+			{
+				SendMessageA(passwordEdit, WM_CHAR, (WPARAM)(unsigned char)*p, 0);
+				Sleep(30);
+			}
+			Sleep(50);
+		}
 
 		Sleep(30);
 
