@@ -22,10 +22,10 @@
 // WM_SETTEXT + MinHook on FUN_0101C9D8 that replaces the account ptr.
 // PASSWORD FILLING: same ini section, Pass= (plain). Separate "Fill Password"
 // button writes the plain Pass= into the CEncryptData at dlg+0x13BD0, XOR'd
-// with the 256-byte canonical key table at *(encData+0x208)+0x30C, indexed by
-// char VALUE (verified: '3'->0xB8 at both pos 0 and 3, '4'->0x45 at pos 2 and
-// 5). The server's GetString recovers exactly this XOR'd form. The hook on
-// FUN_0101C9D8 acts as a last-resort when the CEncryptData is empty.
+// with the fixed per-position table [B8 98 45 B8 91 45 5D DF][i&7] (verified
+// against manual typing: "3643748z" -> 8B AE 71 8B A6 71 65 A5, stable across
+// restarts). The old key table at *(encData+0x208)+0x30C is session-RANDOM and
+// NOT the transform key. The hook on FUN_0101C9D8 acts as a last-resort.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
@@ -44,10 +44,9 @@ namespace AutoLogin {
 // an empty (or matching) one, so the server always receives the right name.
 // Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf at +0x108,
 // see FUN_00ea1f50). The hook acts as a last-resort when the game's CEncryptData
-// is empty (len<=0) — it writes the per-char XOR'd form the server expects:
-// out[i] = plain[i] ^ canonKey[(unsigned char)plain[i]] where canonKey is the
-// 256-byte table at *(encData+0x208)+0x30C (indexed by char VALUE).
-// See FillPasswordEdit for the direct-write path.
+// is empty (len<=0) — it writes the fixed per-position XOR'd form the server
+// expects: out[i] = plain[i] ^ kPwdXor[i & 7] where kPwdXor = [B8 98 45 B8 91
+// 45 5D DF] (verified against manual typing, stable across restarts).
 typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* serverName, int mode, int extra);
 static LoginSendFunc g_originalLoginSend = NULL;
 static bool g_loginHookInstalled = false;
@@ -98,25 +97,22 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					int encLen = *(int*)((char*)password + 0x104);
 					if (encLen <= 0 || encLen > 0x100)
 					{
-						// The server expects the per-char XOR'd form the fgui edit
-						// produces: out[i] = plain[i] ^ canonKey[(unsigned char)plain[i]],
-						// where canonKey is the 256-byte table at *(encData+0x208)+0x30C
-						// (verified: '3'->0xB8, '6'->0x98, '4'->0x45, '7'->0x91,
-						// '8'->0x5D, 'z'->0xDF from the manual-typing hex dump).
-						// SetString then stores it; the server's GetString recovers
-						// exactly this XOR'd form. No hardcoded table - read the
-						// runtime canonical key.
+						// The server expects the fixed per-position XOR transform the
+						// fgui edit applies: out[i] = plain[i] ^ kPwdXor[i & 7] with
+						// kPwdXor = [B8 98 45 B8 91 45 5D DF]. Verified against manual
+						// typing: "3643748z" stores as 8B AE 71 8B A6 71 65 A5
+						// ('3'^0xB8=0x8B at pos 0 and 3, '4'^0x45=0x71 at pos 2 and 5,
+						// '6'^0x98, '7'^0x91, '8'^0x5D, 'z'^0xDF). Stable across restarts.
+						// NOTE: the key table at *(encData+0x208)+0x30C is session-RANDOM
+						// and NOT the transform key - do not use it here.
 						char transformed[128] = {0};
 						int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
 						if (tlen > 0 && tlen < 127) {
-							const unsigned char* canonKey = nullptr;
-							void* pCan = *(void**)((char*)password + 0x208);
-							if (pCan && !IsBadReadPtr((char*)pCan + 0x30C, 0x100))
-								canonKey = (const unsigned char*)((char*)pCan + 0x30C);
-							for (int i = 0; i < tlen; i++) {
-								unsigned char c = (unsigned char)AutoLogin::g_activePassword[i];
-								transformed[i] = (char)(c ^ (canonKey ? canonKey[c] : 0));
-							}
+							static const unsigned char kPwdXor[8] = {
+								0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
+							};
+							for (int i = 0; i < tlen; i++)
+								transformed[i] = (char)(AutoLogin::g_activePassword[i] ^ kPwdXor[i & 7]);
 							transformed[tlen] = 0;
 							((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
 						}
@@ -906,11 +902,11 @@ namespace AutoLogin
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-		// Direct write: pass the per-char XOR'd form (same as the game's edit
-		// produces) into SetString. The canonical key is the 256-byte table at
-		// *(encData+0x208)+0x30C, indexed by char VALUE. The server's GetString
-		// (self-inverse XOR) recovers this XOR'd form, which is what the server
-		// expects (verified: manual typing produces plain ^ canonKey in the buffer).
+		// Direct write: pass the fixed per-position XOR'd form (same as the game's
+		// edit produces) into SetString. Verified against manual typing: the stored
+		// buffer for "3643748z" is 8B AE 71 8B A6 71 65 A5 = plain ^ [B8 98 45 B8
+		// 91 45 5D DF] (per-position i&7). Stable across restarts. The key table
+		// at *(encData+0x208)+0x30C is session-RANDOM and NOT the transform key.
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
@@ -918,15 +914,11 @@ namespace AutoLogin
 				char transformed[128] = {0};
 				int tlen = (int)lstrlenA(g_activePassword);
 				if (tlen > 0 && tlen < 127) {
-					// Read the canonical key from the first slot (same for both)
-					const unsigned char* canonKey = nullptr;
-					void* pCan = *(void**)(dlg + offs[0] + 0x208);
-					if (pCan && !IsBadReadPtr((char*)pCan + 0x30C, 0x100))
-						canonKey = (const unsigned char*)((char*)pCan + 0x30C);
-					for (int i = 0; i < tlen; i++) {
-						unsigned char c = (unsigned char)g_activePassword[i];
-						transformed[i] = (char)(c ^ (canonKey ? canonKey[c] : 0));
-					}
+					static const unsigned char kPwdXor[8] = {
+						0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
+					};
+					for (int i = 0; i < tlen; i++)
+						transformed[i] = (char)(g_activePassword[i] ^ kPwdXor[i & 7]);
 					transformed[tlen] = 0;
 				}
 				for (int oi = 0; oi < 2; ++oi) {
