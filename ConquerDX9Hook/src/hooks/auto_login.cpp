@@ -1519,6 +1519,26 @@ void RenderAutoLoginInterface()
 							}
 							hex1[hpos] = 0;
 							ImGui::Text("Hex 0x13BD0: %s", hex1);
+							// Raw buffer bytes AFTER the password length (null terminator
+							// and beyond) — shows what the packet would carry past len.
+							{
+								char raw1[128] = {0};
+								int rpos = 0;
+								int start = (lenBD0 > 0 && lenBD0 < 0x100) ? lenBD0 : 0;
+								int end = start + 8;
+								if (end > 0x100) end = 0x100;
+								if (start < 0x100) {
+									char* rawBuf = dlgDbg + 0x13BD0 + 0x108;
+									for (int i = start; i < end && rpos < (int)sizeof(raw1) - 4; i++) {
+										unsigned char c = (unsigned char)rawBuf[i];
+										raw1[rpos++] = kHex[c >> 4];
+										raw1[rpos++] = kHex[c & 0xF];
+										raw1[rpos++] = ' ';
+									}
+									raw1[rpos] = 0;
+									ImGui::Text("Raw after len (%d): %s", start, raw1);
+								}
+							}
 						}
 						if (ps2 && !IsBadReadPtr(ps2, 1)) {
 							char tmp2[32] = {0}; strncpy_s(tmp2, sizeof(tmp2), ps2, _TRUNCATE);
@@ -1536,6 +1556,25 @@ void RenderAutoLoginInterface()
 							}
 							hex2[hpos2] = 0;
 							ImGui::Text("Hex 0x13980: %s", hex2);
+							// Raw buffer bytes AFTER the password length
+							{
+								char raw2[128] = {0};
+								int rpos2 = 0;
+								int start2 = (len980 > 0 && len980 < 0x100) ? len980 : 0;
+								int end2 = start2 + 8;
+								if (end2 > 0x100) end2 = 0x100;
+								if (start2 < 0x100) {
+									char* rawBuf2 = dlgDbg + 0x13980 + 0x108;
+									for (int i = start2; i < end2 && rpos2 < (int)sizeof(raw2) - 4; i++) {
+										unsigned char c = (unsigned char)rawBuf2[i];
+										raw2[rpos2++] = kHex2[c >> 4];
+										raw2[rpos2++] = kHex2[c & 0xF];
+										raw2[rpos2++] = ' ';
+									}
+									raw2[rpos2] = 0;
+									ImGui::Text("Raw after len (%d): %s", start2, raw2);
+								}
+							}
 						}
 						// cleanup std::string dtor (call 0x00420847 on out1/out2 if needed, but we leak small)
 					} __except(EXCEPTION_EXECUTE_HANDLER) {}
