@@ -910,7 +910,6 @@ namespace AutoLogin
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
-				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				char transformed[128] = {0};
 				int tlen = (int)lstrlenA(g_activePassword);
 				if (tlen > 0 && tlen < 127) {
@@ -921,6 +920,19 @@ namespace AutoLogin
 						transformed[i] = (char)(g_activePassword[i] ^ kPwdXor[i & 7]);
 					transformed[tlen] = 0;
 				}
+				// First, populate the FGUI edit's own CEncryptData so the fgui
+				// login button gate sees a non-empty field and allows the packet
+				// to be sent. The edit CEncryptData is at *(dlg+0x13DD8).
+				void* editEnc = *(void**)(dlg + 0x13DD8);
+				if (editEnc && !IsBadReadPtr(editEnc, 0x208) && !IsBadWritePtr(editEnc, 0x208)) {
+					DWORD op = 0;
+					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(editEnc, transformed);
+						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
+					}
+				}
+				// Then write to the login CEncryptData slots the handler reads.
+				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offs[oi];
 					DWORD op = 0;
