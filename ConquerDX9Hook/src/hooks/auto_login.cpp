@@ -1321,6 +1321,14 @@ namespace AutoLogin
 	}
 }
 
+// Copies the Auto Login debug tree text to the OS clipboard. ImGui captures
+// every Text call rendered after this in the same frame (the debug section
+// follows the button) and flushes to the clipboard at end of frame.
+void CopyDebugLogToClipboard()
+{
+	ImGui::LogToClipboard();
+}
+
 // Free wrapper so imgui_interface.cpp can run the per-frame clicker.
 void ApplyAutoLoginState()
 {
@@ -1434,6 +1442,10 @@ void RenderAutoLoginInterface()
 
 	if (ImGui::TreeNode("Auto Login Debug"))
 	{
+		if (ImGui::SmallButton("Copy Log"))
+		{
+			CopyDebugLogToClipboard();
+		}
 		ImGui::Text("Dialog: 0x%08X  Button: 0x%08X",
 			(unsigned int)AutoLogin::g_cachedDialog,
 			(unsigned int)AutoLogin::g_cachedButton);
