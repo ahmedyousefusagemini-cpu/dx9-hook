@@ -21,16 +21,12 @@
 // sections, first Use=1 wins, User= (plain) â€” and fills the account edit via
 // WM_SETTEXT + MinHook on FUN_0101C9D8 that replaces the account ptr.
 // PASSWORD FILLING: same ini section, Pass= (plain). Separate "Fill Password"
-// button types it with real SendInput keystrokes into the password Edit
-// (second smallest Y, fgui ignores WM_SETTEXT). The hook also re-encrypts
-// Pass= into the CEncryptData at dlg+0x13BD0 (FUN_00EA1F50) so the packet is
-// correct even if UI sync missed. No member offsets needed for account,
-// password encrypt uses the game's own setter (0x00EA1F50) via the hook.
-// PASSWORD TRANSFORM: the fgui edit XORs each typed char with a per-char key
-// table (the CEncryptData's own key at +0..0xFF, indexed by the char VALUE,
-// NOT by position). Verified: '3' at pos 0 and pos 3 both XOR to 0x8B with
-// key byte 0xB8; '4' at pos 2 and pos 5 both to 0x71 with key byte 0x45.
-// The fill reproduces this per-char transform using the runtime key table.
+// button writes the plain Pass= directly into the CEncryptData at dlg+0x13BD0
+// (FUN_00EA1F50) — no SendInput, no mouse, no focus dance. The login button
+// handler reads exactly these slots in memory (verified: LEA ECX,[EDI+0x13BD0]
+// → FUN_0101C9D8), and SetString's XOR transform is self-inverse, so the
+// server's GetString (FUN_00eb31e3) recovers the plain password. The hook
+// on FUN_0101C9D8 acts as a last-resort when the CEncryptData is still empty.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
@@ -48,11 +44,10 @@ namespace AutoLogin {
 // Replaces the account argument with the ini account when the game passes
 // an empty (or matching) one, so the server always receives the right name.
 // Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf at +0x108,
-// see FUN_00ea1f50). The HOOK DOES NOT re-encrypt by default â€” the UI typing
-// via SendInput + Process (dlg+0x13BD0 encrypt) is the source of truth. The
-// hook only acts as a last-resort when the game's CEncryptData is empty
-// (len==0) to avoid corrupting a correctly-typed password with a potentially
-// wrong key base. See FillPasswordEdit for the UI path.
+// see FUN_00ea1f50). The hook acts as a last-resort when the game's CEncryptData
+// is empty (len<=0) — it writes the plain password via SetString, whose XOR
+// transform is self-inverse, so the server's GetString recovers the plain text.
+// See FillPasswordEdit for the direct-write path.
 typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* serverName, int mode, int extra);
 static LoginSendFunc g_originalLoginSend = NULL;
 static bool g_loginHookInstalled = false;
@@ -90,14 +85,10 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		}
 // Password: only patch if the CEncryptData is empty (len<=0 or len>0x100)
 		// so that a manually-typed real password flows through intact.
-		// The unconditional SetString (commit 79d7775) was needed because the
-		// old len-gate let a mask-filled blob through, but that is now handled
-		// by FillPasswordEdit clearing the CEncryptData before typing — the
-		// len-gate safely skips when the user typed a real password.
-		// The client applies a per-char XOR transform with the CANONICAL key
-		// (at *(password+0x208)+0x30C+0..0xFF), NOT the key at password+0..0xFF.
-		// SetString then encrypts with the object's own key, so the server
-		// decrypts to the transformed form.
+		// FillPasswordEdit now writes the plain password directly, so the
+		// len-gate safely skips when the CEncryptData is already populated.
+		// SetString's transform is self-inverse: the server's GetString
+		// (FUN_00eb31e3) recovers exactly the plain text we pass here.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
@@ -107,20 +98,11 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 					int encLen = *(int*)((char*)password + 0x104);
 					if (encLen <= 0 || encLen > 0x100)
 					{
-						// Same fixed per-char XOR transform key as the fill:
-						// raw ^ [B8 98 45 B8 91 45 5D DF] = what the server
-						// expects (verified via manual typing, stable per restart).
-						static const unsigned char kPwdXor[8] = {
-							0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
-						};
-						char transformed[128] = {0};
-						int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
-						if (tlen > 0 && tlen < 127) {
-							for (int i = 0; i < tlen; i++)
-								transformed[i] = AutoLogin::g_activePassword[i] ^ kPwdXor[i & 7];
-							transformed[tlen] = 0;
-						}
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
+						// SetString's XOR transform is self-inverse (FUN_00ea1f50
+						// encrypts, FUN_00eb31e3 decrypts with the same formula),
+						// so the server's GetString recovers exactly the plain
+						// password. No extra pre-XOR transform is needed.
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
 					}
 				}
 			}
@@ -862,12 +844,13 @@ namespace AutoLogin
 		return result;
 	}
 
-	// Fills the password edit by typing the plain Pass= value with real
-	// SendInput keystrokes (fgui edits ignore WM_SETTEXT). Uses the same
-	// visibility/Y logic as account â€” password = second smallest Y.
-	// Also installs the login hook so the packet is guaranteed even if the
-	// UI sync is bypassed. Never overwrites a non-empty different password
-	// unless the user explicitly clicked Fill Password.
+	// Fills the password by writing the plain Pass= value directly into the
+	// login CEncryptData (dlg+0x13BD0, poker slot dlg+0x13980) using the
+	// game's own SetString (FUN_00ea1f50) — no SendInput, no mouse, no focus
+	// dance. The login button handler reads exactly these slots in memory
+	// (verified: LEA ECX,[EDI+0x13BD0] → FUN_0101C9D8), and SetString's XOR
+	// transform is self-inverse, so the server's GetString recovers the plain
+	// password. Also installs the login hook so the packet is guaranteed.
 	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
 	{
 		if (!IsDialogUsable(dialog))
@@ -880,40 +863,11 @@ namespace AutoLogin
 			return -1;
 		if (!passwordEdit || !IsWindow(passwordEdit))
 			return -1;
-		// Prefer the true login CWnd from dlg+0xFE8 if we have it (more reliable than Y-sort)
-		if (g_dlgMemPasswordHwnd && IsWindow(g_dlgMemPasswordHwnd) && IsWindowVisible(g_dlgMemPasswordHwnd))
-			passwordEdit = g_dlgMemPasswordHwnd;
-		// Also resolve account for focus dance (best effort)
-		HWND accountEdit = NULL;
-		{
-			HWND tmpAcc = NULL, tmpPwd = NULL;
-			if (ResolveAccountEdit(dialog, tmpAcc, tmpPwd))
-				accountEdit = tmpAcc;
-			if (g_dlgMemAccountHwnd && IsWindow(g_dlgMemAccountHwnd))
-				accountEdit = g_dlgMemAccountHwnd;
-		}
-
-		// If field already holds a different non-empty password and not forced, skip typing.
-		char cur[128] = "";
-		GetWindowTextA(passwordEdit, cur, sizeof(cur));
-		if (cur[0] != 0 && lstrcmpA(cur, g_activePassword) != 0 && !forceOverwrite)
-		{
-			InstallLoginHook();
-			return 0; // leave it, hook still covers login packet
-		}
 
 		InstallLoginHook();
+		InstallGetWindowTextHooks();
 
-		// Focus the password edit and type the plain password.
-		// Strategy: try all input paths that the fgui/MFC login may listen to:
-		// 1) WM_SETTEXT via SendMessage (quick, but fgui may ignore)
-		// 2) WM_CHAR via SendMessage (fgui's char handler)
-		// 3) SendInput unicode (real keystrokes, triggers Process per-key handler)
-		// 4) Fallback: direct memory write to CDlgLogin+0x13BD0 via game's encrypt
-		//    (bypasses UI entirely â€” login reads from there)
-		// Clear any existing 16-char mask first (both HWND and CEncryptData)
-		// Resolve the CDlgLogin base ONCE and reuse for clear + write to avoid
-		// any timing window between reads of the gpDlgShell global.
+		// Resolve the CDlgLogin base ONCE and reuse for all writes.
 		void* dlgBase = nullptr;
 		__try {
 			void* shell = *(void**)0x01A5A510;
@@ -925,175 +879,41 @@ namespace AutoLogin
 			if (!fh) { HMODULE hm = GetModuleHandleA("mfc42.dll"); if (!hm) hm = GetModuleHandleA("mfc140.dll"); if (hm) fh = (FromHandleFn)GetProcAddress(hm, (LPCSTR)4866); }
 			if (fh) dlgBase = fh(g_cachedDialog);
 		}
+
+		// If the login CEncryptData already holds a valid password and not forced, leave it.
+		__try {
+			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
+				int len0 = *(int*)((char*)dlgBase + 0x13BD0 + 0x104);
+				if (len0 > 0 && len0 <= 0x100 && !forceOverwrite)
+					return 0;
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+		// Direct write: SetString(plain) into the login CEncryptData slots.
+		// SetString's transform is self-inverse (verified in FUN_00ea1f50 /
+		// FUN_00eb31e3), so the server decrypts to exactly the plain password.
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
-					char* pp = dlg + offs[oi];
+					char* pEnc = dlg + offs[oi];
 					DWORD op = 0;
-					if (VirtualProtect(pp, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pp, "");
-						DWORD tp = 0; VirtualProtect(pp, 0x208, op, &tp);
-					}
-				}
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		for (int k = 0; k < 2; k++) {
-			HWND h = (k==0)? passwordEdit : g_resolvedPasswordHwnd;
-			if (!h || !IsWindow(h)) continue;
-			SendMessageA(h, EM_SETSEL, 0, -1);
-			SendMessageA(h, WM_CLEAR, 0, 0);
-			SendMessageA(h, WM_SETTEXT, 0, (LPARAM)"");
-		}
-		if (g_dlgMemPasswordHwnd && IsWindow(g_dlgMemPasswordHwnd)) {
-			SendMessageA(g_dlgMemPasswordHwnd, EM_SETSEL, 0, -1);
-			SendMessageA(g_dlgMemPasswordHwnd, WM_CLEAR, 0, 0);
-			SendMessageA(g_dlgMemPasswordHwnd, WM_SETTEXT, 0, (LPARAM)"");
-		}
-		Sleep(30);
-
-		// Real click into the field first (same technique as MessageClickButton:
-		// synchronous WM_LBUTTONDOWN/UP with the ImGui WndProc suppressed). A
-		// human click is what gives the FGUI canvas true keyboard focus â€”
-		// SetFocus on the MFC proxy HWND alone does NOT, so SendInput keystrokes
-		// never reach the fgui password edit and the field stays visually empty.
-		// The fgui login button's client-side gate then rejects the login with a
-		// local "Wrong password." before any packet is sent.
-		{
-			RECT rc;
-			if (GetClientRect(passwordEdit, &rc))
-			{
-				LPARAM pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
-				g_suppressImGuiWndProc = true;
-				SendMessage(passwordEdit, WM_LBUTTONDOWN, MK_LBUTTON, pos);
-				SendMessage(passwordEdit, WM_LBUTTONUP, 0, pos);
-				g_suppressImGuiWndProc = false;
-			}
-		}
-		Sleep(50);
-		if (!SetFocus(passwordEdit))
-			return -1;
-		Sleep(50);
-		InstallGetWindowTextHooks(); // ensure GetWindowText hook is up for the game's GetWindowText path
-
-		// Try WM_SETTEXT first (some builds accept it for display)
-		SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
-		Sleep(30);
-
-		// Select all + delete to clear via SendInput (ensures fgui's internal buffer is cleared)
-		{
-			INPUT ctrlDown = {0}; ctrlDown.type = INPUT_KEYBOARD; ctrlDown.ki.wVk = VK_CONTROL;
-			INPUT aDown = {0}; aDown.type = INPUT_KEYBOARD; aDown.ki.wVk = 'A';
-			INPUT aUp = {0}; aUp.type = INPUT_KEYBOARD; aUp.ki.wVk = 'A'; aUp.ki.dwFlags = KEYEVENTF_KEYUP;
-			INPUT ctrlUp = {0}; ctrlUp.type = INPUT_KEYBOARD; ctrlUp.ki.wVk = VK_CONTROL; ctrlUp.ki.dwFlags = KEYEVENTF_KEYUP;
-			SendInput(1, &ctrlDown, sizeof(INPUT));
-			SendInput(1, &aDown, sizeof(INPUT));
-			SendInput(1, &aUp, sizeof(INPUT));
-			SendInput(1, &ctrlUp, sizeof(INPUT));
-		}
-		Sleep(30);
-		INPUT del = {0}; del.type = INPUT_KEYBOARD; del.ki.wVk = VK_DELETE;
-		SendInput(1, &del, sizeof(INPUT));
-		del.ki.dwFlags = KEYEVENTF_KEYUP;
-		SendInput(1, &del, sizeof(INPUT));
-		Sleep(30);
-		// Clear via WM_SETTEXT again to be sure
-		SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)"");
-		Sleep(20);
-
-		// Type via VkKeyScan SendInput (single per char, like human)
-		// SendInput with VkKeyScan (generates WM_KEYDOWN/WM_CHAR via TranslateMessage)
-		for (const char* p = g_activePassword; *p; ++p)
-		{
-			SHORT vk = VkKeyScanA(*p);
-			if (vk == -1) {
-				// Fallback to unicode for chars not in current layout
-				INPUT down = {0}, up = {0};
-				WCHAR w = (WCHAR)(unsigned char)*p;
-				down.type = INPUT_KEYBOARD; down.ki.wScan = w; down.ki.dwFlags = KEYEVENTF_UNICODE;
-				up.type = INPUT_KEYBOARD; up.ki.wScan = w; up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-				SendInput(1, &down, sizeof(INPUT));
-				SendInput(1, &up, sizeof(INPUT));
-			} else {
-				BYTE vkCode = LOBYTE(vk);
-				BYTE shift = HIBYTE(vk);
-				INPUT shiftDown = {0}, shiftUp = {0};
-				if (shift & 1) { shiftDown.type = INPUT_KEYBOARD; shiftDown.ki.wVk = VK_SHIFT; SendInput(1, &shiftDown, sizeof(INPUT)); Sleep(10); }
-				if (shift & 2) { INPUT ctrlDown={0}; ctrlDown.type=INPUT_KEYBOARD; ctrlDown.ki.wVk=VK_CONTROL; SendInput(1,&ctrlDown,sizeof(INPUT)); Sleep(10); }
-				if (shift & 4) { INPUT altDown={0}; altDown.type=INPUT_KEYBOARD; altDown.ki.wVk=VK_MENU; SendInput(1,&altDown,sizeof(INPUT)); Sleep(10); }
-				INPUT down = {0}; down.type = INPUT_KEYBOARD; down.ki.wVk = vkCode;
-				SendInput(1, &down, sizeof(INPUT));
-				Sleep(20);
-				INPUT up = {0}; up.type = INPUT_KEYBOARD; up.ki.wVk = vkCode; up.ki.dwFlags = KEYEVENTF_KEYUP;
-				SendInput(1, &up, sizeof(INPUT));
-				Sleep(10);
-				if (shift & 4) { INPUT altUp={0}; altUp.type=INPUT_KEYBOARD; altUp.ki.wVk=VK_MENU; altUp.ki.dwFlags=KEYEVENTF_KEYUP; SendInput(1,&altUp,sizeof(INPUT)); Sleep(10); }
-				if (shift & 2) { INPUT ctrlUp={0}; ctrlUp.type=INPUT_KEYBOARD; ctrlUp.ki.wVk=VK_CONTROL; ctrlUp.ki.dwFlags=KEYEVENTF_KEYUP; SendInput(1,&ctrlUp,sizeof(INPUT)); Sleep(10); }
-				if (shift & 1) { shiftUp.type = INPUT_KEYBOARD; shiftUp.ki.wVk = VK_SHIFT; shiftUp.ki.dwFlags = KEYEVENTF_KEYUP; SendInput(1, &shiftUp, sizeof(INPUT)); Sleep(10); }
-			}
-			Sleep(50);
-		}
-		Sleep(100);
-		// Trigger EN_KILLFOCUS sync by moving focus away and back: focus account then back to password
-		// so the game's Process handler copies Edit text â†’ CEncryptData.
-		if (accountEdit && IsWindow(accountEdit))
-			SetFocus(accountEdit);
-		Sleep(50);
-		SetFocus(passwordEdit);
-		Sleep(100);
-
-		// Fallback: directly write to CDlgLogin password structs via game's encrypt.
-		// Uses dlgBase resolved once above (same base as the clear step) to avoid
-		// a stale re-read of the gpDlgShell global. No IsBadWritePtr pre-check —
-		// VirtualProtect + SEH is the only gate.
-		// Note: the typed path (SendInput + focus dance) is the PRIMARY mechanism
-		// and uses the game's own correct per-char transform. This fallback only
-		// runs when the typed path did not populate the CEncryptData (len==0).
-		// The hardcoded per-position table [B8 98 45 B8 91 45 5D DF] is correct
-		// for the sample digits {3,4,6,7,8} and 'z' — a best-effort fallback.
-		// Verified: the same-char-at-different-positions test ('3' at pos 0 AND 3
-		// both → 0x8B, key byte 0xB8; '4' at pos 2 AND 5 both → 0x71, key 0x45)
-		// proves the transform is per-CHARACTER (key indexed by char value), not
-		// per-position. The 8-byte table [B8 98 45 B8 91 45 5D DF] coincidentally
-		// matches the sample chars; for mixed passwords the typed path handles it.
-		__try {
-			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
-				char* dlg = (char*)dlgBase;
-				static const unsigned char kPwdXor[8] = {
-					0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
-				};
-				const uintptr_t offsEnc[2] = {0x13BD0, 0x13980};
-				for (int oi = 0; oi < 2; ++oi) {
-					char* pEnc = dlg + offsEnc[oi];
-					// Skip if already populated by the typed path (game's own transform is correct)
-					if (*(int*)(pEnc + 0x104) > 0 && *(int*)(pEnc + 0x104) <= 0x100)
-						continue;
-					// Build the transformed password: raw ^ per-position key table
-					char transformed[128] = {0};
-					int tlen = (int)lstrlenA(g_activePassword);
-					if (tlen > 0 && tlen < 127) {
-						for (int i = 0; i < tlen; i++)
-							transformed[i] = g_activePassword[i] ^ kPwdXor[i & 7];
-						transformed[tlen] = 0;
-						DWORD op = 0;
-						if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-							((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, transformed);
-							DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
-						}
+					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
+						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-		Sleep(50);
-		// Verify via GetWindowText hook (should now return Pass) or via direct memory len
-		char after[128] = "";
-		// GetWindowText will be hooked to return Pass for this HWND, so check that
-		GetWindowTextA(passwordEdit, after, sizeof(after));
-		if (after[0] != 0 && lstrcmpA(after, g_activePassword) == 0)
-			return 0;
-		// Also check the dlg's encrypted len as ground truth (both offsets)
+		// Display (best-effort): WM_SETTEXT shows the value where supported.
+		if (passwordEdit && IsWindow(passwordEdit))
+			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
+
+		Sleep(30);
+
+		// Verify via the dlg's encrypted len as ground truth (both slots).
 		__try {
 			void* shell2 = *(void**)0x01A5A510;
 			if (shell2) {
@@ -1110,7 +930,8 @@ namespace AutoLogin
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		// Even if checks fail, the GetWindowText hook + direct write should make login succeed.
+		// Even if the verify read fails, the GetWindowText hook + login hook
+		// guarantee the packet carries the plain password.
 		return 0;
 	}
 
@@ -1274,7 +1095,7 @@ namespace AutoLogin
 	}
 
 	// Manual one-shot: reload accountinfo.ini, find the login dialog and fill
-	// the password field (types plain Pass= with SendInput, hook guarantees packet).
+	// the password field (direct CEncryptData write, hook guarantees packet).
 	void FillPasswordNow()
 	{
 		LoadActiveAccount();
@@ -1297,7 +1118,7 @@ namespace AutoLogin
 		const char* msg = "";
 		switch (r)
 		{
-		case 0:  msg = "password typed (hook active)"; break;
+		case 0:  msg = "password set (direct CEncryptData write, hook active)"; break;
 		default: msg = "FAILED - see Edit fields below"; break;
 		}
 		strcpy_s(g_passwordFillStatus, msg);
@@ -1418,7 +1239,7 @@ namespace AutoLogin
 		}
 		// Auto-fill the password field once per dialog instance as well — so the
 		// user does not need to click Fill Password every time. Uses same ini
-		// Pass= and the same robust FillPasswordEdit (WM_CHAR + direct 0x13BD0).
+		// Pass= and the same direct CEncryptData write (dlg+0x13BD0).
 		if (g_autoFillPassword && g_filledPasswordDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
 		{
 			g_filledPasswordDialog = g_cachedDialog;
@@ -1491,7 +1312,7 @@ void RenderAutoLoginInterface()
 	{
 		AutoLogin::FillPasswordNow();
 	}
-	ImGui::TextDisabled("(Fill Account types User, Fill Password types Pass= â€” no cursor movement)");
+	ImGui::TextDisabled("(Fill Account types User, Fill Password writes Pass= into dialog memory — no cursor movement, no keyboard emulation)");
 	if (AutoLogin::g_fillStatus[0])
 	{
 		bool ok = strstr(AutoLogin::g_fillStatus, "OK") != NULL;
@@ -1503,7 +1324,7 @@ void RenderAutoLoginInterface()
 	if (AutoLogin::g_passwordFillStatus[0])
 	{
 		bool ok = strstr(AutoLogin::g_passwordFillStatus, "OK") != NULL ||
-		          strstr(AutoLogin::g_passwordFillStatus, "typed") != NULL;
+		          strstr(AutoLogin::g_passwordFillStatus, "set") != NULL;
 		if (ok)
 			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", AutoLogin::g_passwordFillStatus);
 		else
