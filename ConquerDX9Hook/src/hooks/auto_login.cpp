@@ -1076,8 +1076,10 @@ namespace AutoLogin
 		// Method 3 = explicit direct FUN_LoginButtonHandler call (bypasses the
 		// fgui client-side field gate). All other methods use the button click,
 		// which is the previously-working behavior.
+		// When a password is filled via CEncryptData write, the fgui gate rejects
+		// the empty EditBox locally — use DirectLoginCall to bypass the gate.
 		bool ok = false;
-		if (g_clickMethod == 3)
+		if (g_clickMethod == 3 || g_activePassword[0])
 			ok = DirectLoginCall();
 		else if (button)
 			ok = ClickButtonMethod(button);
