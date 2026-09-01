@@ -853,12 +853,13 @@ namespace AutoLogin
 	}
 
 	// Fills the password by writing the plain Pass= value directly into the
-	// login CEncryptData (dlg+0x13BD0, poker slot dlg+0x13980) using the
-	// game's own SetString (FUN_00ea20f0) — no SendInput, no mouse, no focus
-	// dance. The login button handler reads exactly these slots in memory
-	// (verified: LEA ECX,[EDI+0x13BD0] → FUN_0101CB78), and SetString's XOR
-	// transform is self-inverse, so the server's GetString recovers the plain
-	// password. Also installs the login hook so the packet is guaranteed.
+	// login CEncryptData (dlg+0x13BD0, poker slot dlg+0x13980, fgui edit at
+	// *(dlg+0x13DD8)+0x30C) using the PER-CHAR XOR transform the server
+	// accepts — NOT SetString (FUN_00ea20f0), which uses a position-based
+	// formula the server can't decode (verified: manual typing "3643748z" ->
+	// blob 04 A4 CD 04 C7 CD CF 97; same char -> same key byte, so
+	// enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]] with the session key
+	// table at the CEncryptData +0..0xFF read at runtime).
 	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
 	{
 		if (!IsDialogUsable(dialog))
