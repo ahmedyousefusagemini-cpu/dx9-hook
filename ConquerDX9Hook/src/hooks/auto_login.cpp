@@ -932,13 +932,18 @@ namespace AutoLogin
 						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
-				// Also write to the fgui password edit's own CEncryptData at *(dlg+0x13DD8).
-				// The fgui EnterGame button reads the password from HERE, not from 0x13BD0.
-				// (debug: EditCEnc ptr=0x... len=0 confirms it's empty after our fill).
+				// Also write to the fgui password edit's own CEncryptData at
+				// *(dlg+0x13DD8)+0x30C. The fgui EnterGame button reads the
+				// password from HERE, not from 0x13BD0 (debug: EditCEnc len=0
+				// confirms it's empty after our fill → server gets empty pwd).
+				// Use the game's own edit-sync FUN_00607cd5(editCEnc, dlg+0x13BD0)
+				// — it does ADD ECX,0x30C then GetString(0x13BD0)→SetString(dest),
+				// exactly what the game does when the password edit loses focus.
 				void* editCEnc = *(void**)(dlg + 0x13DD8);
-				if (editCEnc && !IsBadReadPtr(editCEnc, 0x208) && !IsBadWritePtr(editCEnc, 0x208))
+				if (editCEnc && !IsBadReadPtr(editCEnc, 0x400))
 				{
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(editCEnc, g_activePassword);
+					typedef void (__thiscall* EditSyncFn)(void* editCEnc, void* src);
+					((EditSyncFn)0x00607CD5)(editCEnc, dlg + 0x13BD0);
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
