@@ -898,43 +898,35 @@ namespace AutoLogin
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-		// Populate the visible EditBox text via WM_SETTEXT. The fgui GTextInput
-		// (with setPassword) does its OWN encryption into its CEncryptData at
-		// *(dlg+0x13DD8)+0x30C — debug showed EditCEnc blob CHANGES to the game's
-		// own value after WM_SETTEXT (09 84 21 87... in the failing run, not our
-		// manually-computed A0 D5 8C...). So: set the text, let the game encrypt,
-		// then COPY the game-generated blob from the fgui edit into the MFC slots
-		// the login handler reads (0x13BD0 normal, 0x13980 poker/reconnect).
-		if (passwordEdit && IsWindow(passwordEdit))
-		{
-			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
-		}
-
-		Sleep(50);
-
+		// Write the password via the game's OWN SetString (FUN_00EA20F0) into the
+		// MFC slots the login handler reads. Ghidra verified: the game itself
+		// calls SetString(dlg+0x13BD0, plaintext) at 0x0089c61d when the password
+		// edit changes. Manual typing (which logs in) produces Blob 0x13BD0
+		// 50 69 4E BD DA 3A 55 51 for "3643748z" — the SetString position-based
+		// transform with 0x13BD0's own session key table (+0..0xFF). Our earlier
+		// SetString attempt failed only because the ACCOUNT string was empty then;
+		// FillAccountEdit now writes dlg+0x13B88, so the packet is complete.
 		__try {
-			void* shellC = *(void**)0x01A5A510;
-			if (shellC) {
-				char* dlgC = (char*)shellC + 0x39B948;
-				void* editCEncC = *(void**)(dlgC + 0x13DD8);
-				if (editCEncC && !IsBadReadPtr((char*)editCEncC + 0x30C, 0x208)) {
-					char* srcEnc = (char*)editCEncC + 0x30C;
-					int srcLen = *(int*)(srcEnc + 0x104);
-					if (srcLen > 0 && srcLen <= 0x100) {
-						const uintptr_t offs[2] = {0x13BD0, 0x13980};
-						for (int oi = 0; oi < 2; ++oi) {
-							char* pEnc = dlgC + offs[oi];
-							DWORD op = 0;
-							if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-								*(int*)(pEnc + 0x104) = srcLen;
-								memcpy(pEnc + 0x108, srcEnc + 0x108, srcLen + 1);
-								DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
-							}
-						}
+			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
+				char* dlg = (char*)dlgBase;
+				const uintptr_t offs[2] = {0x13BD0, 0x13980};
+				for (int oi = 0; oi < 2; ++oi) {
+					char* pEnc = dlg + offs[oi];
+					DWORD op = 0;
+					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
+						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+		// Also populate the visible EditBox text so the fgui gate sees a
+		// non-empty field (same as FillAccountEdit).
+		if (passwordEdit && IsWindow(passwordEdit))
+		{
+			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
+		}
 
 		Sleep(30);
 
