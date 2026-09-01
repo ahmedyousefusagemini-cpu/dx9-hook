@@ -1517,11 +1517,14 @@ void RenderAutoLoginInterface()
 						char out1[32] = {0}, out2[32] = {0};
 						((GetEncStrFn)0x00EB3383)(dlgDbg + 0x13BD0, out1);
 						((GetEncStrFn)0x00EB3383)(dlgDbg + 0x13980, out2);
-						// std::string layout: if *(int*)(out+0x14) <=15, str at out, else *(char**)out
-						int sz1 = *(int*)(out1 + 0x14);
-						char* ps1 = (sz1 <= 15) ? out1 : *(char**)out1;
-						int sz2 = *(int*)(out2 + 0x14);
-						char* ps2 = (sz2 <= 15) ? out2 : *(char**)out2;
+						// std::string layout: cap at +0x14 (<=15 → SSO inline at +0),
+						// size at +0x10. Use cap for the inline check, size for display.
+						int cap1 = *(int*)(out1 + 0x14);
+						char* ps1 = (cap1 <= 15) ? out1 : *(char**)out1;
+						int sz1 = *(int*)(out1 + 0x10);
+						int cap2 = *(int*)(out2 + 0x14);
+						char* ps2 = (cap2 <= 15) ? out2 : *(char**)out2;
+						int sz2 = *(int*)(out2 + 0x10);
 						if (ps1 && !IsBadReadPtr(ps1, 1)) {
 							char tmp1[32] = {0}; strncpy_s(tmp1, sizeof(tmp1), ps1, _TRUNCATE);
 							ImGui::Text("Dec 0x13BD0: \"%s\" (len=%d)", tmp1, sz1);
@@ -1530,15 +1533,19 @@ void RenderAutoLoginInterface()
 							__try {
 								void* editCEnc = *(void**)(dlgDbg + 0x13DD8);
 								if (editCEnc && !IsBadReadPtr(editCEnc, 0x208)) {
-									int editLen = *(int*)((char*)editCEnc + 0x104);
+									// The fgui edit's real CEncryptData is at +0x30C
+									// (FUN_00607cd5 does ADD ECX,0x30C before using it).
+									char* editEnc = (char*)editCEnc + 0x30C;
+									int editLen = *(int*)(editEnc + 0x104);
 									char editOut[32] = {0};
-									((GetEncStrFn)0x00EB3383)(editCEnc, editOut);
+									((GetEncStrFn)0x00EB3383)(editEnc, editOut);
 									int esz = *(int*)(editOut + 0x14);
+									int esize = *(int*)(editOut + 0x10);
 									char* eps = (esz <= 15) ? editOut : *(char**)editOut;
 									if (eps && !IsBadReadPtr(eps, 1)) {
 										char etmp[32] = {0}; strncpy_s(etmp, sizeof(etmp), eps, _TRUNCATE);
 										ImGui::Text("EditCEnc ptr=0x%08X len=%d GS: \"%s\" (len=%d)",
-											(unsigned int)editCEnc, editLen, etmp, esz);
+											(unsigned int)editCEnc, editLen, etmp, esize);
 										char ehex[128] = {0};
 										static const char kHexE[] = "0123456789ABCDEF";
 										int edlen = (editLen > 0 && editLen < 16) ? editLen : (int)strlen(etmp);
@@ -1633,15 +1640,16 @@ void RenderAutoLoginInterface()
 					// Show account std::string at 0x13B88 for sanity
 					char accBuf[64] = {0};
 					char* accPtr = dlgDbg + 0x13B88;
-					if (!IsBadReadPtr(accPtr + 0x14, 4)) {
-						int accSize = *(int*)(accPtr + 0x14);
+					if (!IsBadReadPtr(accPtr + 0x10, 8)) {
+						int accSize = *(int*)(accPtr + 0x10);
+						int accCap = *(int*)(accPtr + 0x14);
 						if (accSize >= 0 && accSize < 64) {
 							char* accStr = accPtr;
-							if (accSize > 0xF) accStr = *(char**)accPtr;
+							if (accCap > 0xF) accStr = *(char**)accPtr;
 							if (!IsBadReadPtr(accStr, accSize)) {
 								memcpy(accBuf, accStr, accSize);
 								accBuf[accSize] = 0;
-								ImGui::Text("DlgMem account: \"%s\" (len=%d)", accBuf, accSize);
+								ImGui::Text("DlgMem account: \"%s\" (len=%d cap=%d)", accBuf, accSize, accCap);
 							}
 						}
 					}
