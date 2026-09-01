@@ -4,6 +4,41 @@
 gold/items, XP + skill bars fill normally). See the "WORKING STATE" section below for
 the final solution; the detailed research follows.
 
+> **2026-09-01: CDlgLogin EN_SETFOCUS / EN_KILLFOCUS handlers located and named.**
+> The user asked specifically about `CDlgLogin::OnEnSetfocusEditPwd`. The string
+> `CDlgLogin::OnEnSetfocusEditPwd` @ `0x016042c4` is a **MSVC unhandled-exception
+> function name** (the third arg pushed into the catch trampoline at `0x0088cf10`).
+> It names the function whose try-block throws — and the try-block body itself IS
+> the function, not a wrapper. The catch trampolines in `0x0088cdx..0x0088cfx` each
+> have the pattern `PUSH <line>; PUSH <funcNameStr>; PUSH <ThrowInfo>; CALL
+> __CxxFrameHandler3; ADD ESP,0xc; MOV EAX,<fallthrough>; RET` — the `MOV EAX`
+> falls through into the body that set the throw context.
+>
+> The four CDlgLogin edit-handlers (all `__fastcall(this)`, body 41 bytes):
+>
+> | Address | Logical name (MSVC string) | Body |
+> |---|---|---|
+> | `0x0088cdcf` | `CDlgLogin::OnEnKillfocusEditAccount` (str `0x016042e4`) | if `*(this+0x13DD8)!=0` then `FUN_006102f6()` |
+> | `0x0088ce15` | `CDlgLogin::OnEnKillfocusEditPwd` (str `0x01604308`) | if `*(this+0x13DD8)!=0` then `FUN_006102f6()` |
+> | `0x0088cea1` | `CDlgLogin::OnEnSetfocusEditAccount` (str `0x016042a0`) | if `*(this+0x13DD8)!=0` then `FUN_005eb941()` |
+> | `0x0088cee7` | `CDlgLogin::OnEnSetfocusEditPwd` (str `0x016042c4`) | if `*(this+0x13DD8)!=0` then `FUN_005eb941()` |
+>
+> `FUN_006102f6` is a one-liner that calls `FUN_006102e8` — vtable indirect on
+> `param_1+8` vfunc[0x20] (offset 0x20 = index 8). Standard MFC `KillFocus` pattern.
+> `FUN_005eb941` is `vptr = *(param_1+0x34); (*vptr->vfunc[0x1c])(vptr)` — the
+> standard MFC `SetFocus` pattern on a child HWND wrapper.
+>
+> **The user's hypothesis was wrong:** `OnEnSetfocusEditPwd` does **NOT** call
+> `CEncryptData::SetString` (`FUN_00EA1F50`) on the fgui edit CEncryptData at
+> `*(this+0x13DD8)+0x30C`. It just calls `SetFocus` on the underlying edit HWND.
+> No plaintext sync, no encryption — the handler is purely a focus forwarder. The
+> CEncryptData sync (`FUN_00607cd5 → CEncryptData::SetString @ 0x00EA1F50`) runs in
+> `CDlgLogin::Process` (`FUN_0089C013`), triggered by every keystroke / focus change
+> via the fgui edit notification flow.
+>
+> Ghidra: I renamed all 4 handlers in the database to `CDlgLogin__OnEn*` (per Ghidra's
+> PascalCase rule, `__` becomes illegal but Ghidra accepted with a warning). Saved.
+
 Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll imported).
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 

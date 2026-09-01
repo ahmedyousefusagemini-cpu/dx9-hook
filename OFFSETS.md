@@ -718,6 +718,10 @@ themed chrome (`Login_xOrangeBtn`/`Login_xRedBtn` @ `0x015598F8`/`0x01559940`).
 | dispatcher call site | `0x00A5B90E` | `LEA ECX,[EBX+0x39B948]; CALL FUN_LoginButtonHandler` — the fgui button click route |
 | `FUN_008A965F` | `0x008A965F` | the server-select-first variant (called instead when the client must pick a server before login) |
 | `FUN_0089C013` | `0x0089C013` | `CDlgLogin::Process` (per-frame input/focus handling; identifies the edits via `dlg+0xCD0`/`+0xFE8`/`+0x1300` CWnd members) |
+| `CDlgLogin::OnEnSetfocusEditPwd` | `0x0088CEE7` | EN_SETFOCUS on password edit — `__fastcall(this)`; if `*(this+0x13DD8)!=0` then vtable-SetFocus on `*(*(this+0x13DD8)+0x34)`. **Does NOT call CEncryptData::SetString** — just forwards focus to the underlying edit HWND. (string `0x016042c4`, throw name in catch @ `0x0088cf10`) |
+| `CDlgLogin::OnEnSetfocusEditAccount` | `0x0088CEA1` | EN_SETFOCUS on account edit — same shape, calls vtable-SetFocus via `FUN_005eb941`. (string `0x016042a0`, throw name in catch @ `0x0088ceca`) |
+| `CDlgLogin::OnEnKillfocusEditPwd` | `0x0088CE15` | EN_KILLFOCUS on password edit — same shape, calls vtable-`vfunc[0x20]` via `FUN_006102f6 → 0x006102e8`. (string `0x01604308`) |
+| `CDlgLogin::OnEnKillfocusEditAccount` | `0x0088CDCF` | EN_KILLFOCUS on account edit — same shape as KillPwd. (string `0x016042e4`) |
 | `login_xzk` fgui window | `0x01603D80` | shown via `FUN_00875E43`, hidden via `FUN_008A79AE` |
 
 **⚠️ The login button is an fgui control, NOT a standard MFC button.** Live test:
