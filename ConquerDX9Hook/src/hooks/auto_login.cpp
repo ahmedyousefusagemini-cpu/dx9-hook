@@ -1063,6 +1063,27 @@ namespace AutoLogin
 			InstallGetWindowTextHooks();
 		}
 
+		// Re-apply the password blob RIGHT before clicking — the server's session
+		// key seed (CMsgEncryptCode) may arrive AFTER FillPasswordEdit ran, making
+		// 0x13BD0's key table stale. By SetString-ing at click time, we use the
+		// current seeded key table (matching what the server expects).
+		__try {
+			void* shell = *(void**)0x01A5A510;
+			if (shell && g_activePassword[0]) {
+				char* dlg = (char*)shell + 0x39B948;
+				typedef void (__thiscall* SetEncStrFn)(void*, const char*);
+				const uintptr_t offs[2] = {0x13BD0, 0x13980};
+				for (int oi = 0; oi < 2; ++oi) {
+					void* pEnc = dlg + offs[oi];
+					DWORD op = 0;
+					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStrFn)0x00EA20F0)(pEnc, g_activePassword);
+						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+					}
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
