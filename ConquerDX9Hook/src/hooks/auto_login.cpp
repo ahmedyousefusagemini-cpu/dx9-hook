@@ -1052,12 +1052,15 @@ namespace AutoLogin
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
 		bool ok = false;
-		// Try DirectLoginCall first (bypasses the fgui client-side field gate).
-		// Fall back to button click if the direct call fails (e.g. shell not ready).
-		if (g_clickMethod == 3 || g_activePassword[0])
-			ok = DirectLoginCall();
-		if (!ok && button)
+		// The REAL button click is the proven-working path (the fgui gate reads
+		// the visible edits which we already populated via WM_SETTEXT + the
+		// GetWindowText hooks). Prefer it over DirectLoginCall — calling the
+		// handler directly hits the reconnect gate (mode 1) that sends an empty
+		// QR packet. Only method 3 explicitly wants the direct call.
+		if (button && g_clickMethod != 3)
 			ok = ClickButtonMethod(button);
+		if (!ok && (g_clickMethod == 3 || g_activePassword[0]))
+			ok = DirectLoginCall();
 
 		if (ok)
 		{
