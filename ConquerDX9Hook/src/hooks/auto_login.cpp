@@ -897,37 +897,48 @@ namespace AutoLogin
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-		// Direct write: pass the plain password into SetString on the login
-		// CEncryptData. SetString uses the CEncryptData's OWN key table at +0..0xFF
-		// (which is filled with the session key by the game) to transform the input.
-		// The server's GetString with the same key recovers the XOR'd form.
-		// The key table changes per session (verified: Raw after len byte differs
-		// between sessions), so we MUST NOT hardcode a fixed XOR table.
+		// Direct write: per-char XOR transform, NOT SetString.
+		// Verified from the game's own typed blob ("3643748z" typed manually →
+		// 04 A4 CD 04 C7 CD CF 97): enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]]
+		// where keyT is the CEncryptData's OWN 256-byte key table at +0..0xFF
+		// (the session key the server shares). Same char at different positions
+		// yields the same key byte (key['3']=0x37, key['4']=0xF9), so the table
+		// is indexed by CHARACTER VALUE, not position. SetString (FUN_00ea20f0)
+		// uses a different position-based formula — the server rejects it.
+		// The key table is session-specific (changes per restart), so read it at
+		// runtime from the target CEncryptData.
+		auto WritePwdBlob = [](char* pEnc, const char* plain) {
+			const unsigned char* keyT = (const unsigned char*)pEnc;
+			unsigned char* buf = (unsigned char*)(pEnc + 0x108);
+			int len = (int)strlen(plain);
+			for (int i = 0; i < len; i++)
+				buf[i] = (unsigned char)plain[i] ^ keyT[(unsigned char)plain[i]];
+			buf[len] = 0;
+			*(int*)(pEnc + 0x104) = len;
+		};
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
-				// Write to MFC handler slots (0x13BD0 = normal, 0x13980 = poker/reconnect).
+				// MFC handler slots (0x13BD0 = normal, 0x13980 = poker/reconnect).
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offs[oi];
 					DWORD op = 0;
 					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
+						WritePwdBlob(pEnc, g_activePassword);
 						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
-				// Also write to the fgui password edit's own CEncryptData at
-				// *(dlg+0x13DD8)+0x30C. The fgui EnterGame button reads the
-				// password from HERE, not from 0x13BD0 (debug: EditCEnc len=0
-				// confirms it's empty after our fill → server gets empty pwd).
-				// Use the game's own edit-sync FUN_00607cd5(editCEnc, dlg+0x13BD0)
-				// — it does ADD ECX,0x30C then GetString(0x13BD0)→SetString(dest),
-				// exactly what the game does when the password edit loses focus.
+				// Also write the fgui password edit's own CEncryptData at
+				// *(dlg+0x13DD8)+0x30C (the fgui EnterGame button reads from HERE).
 				void* editCEnc = *(void**)(dlg + 0x13DD8);
-				if (editCEnc && !IsBadReadPtr(editCEnc, 0x400))
-				{
-					typedef void (__thiscall* EditSyncFn)(void* editCEnc, void* src);
-					((EditSyncFn)0x00607CD5)(editCEnc, dlg + 0x13BD0);
+				if (editCEnc && !IsBadReadPtr(editCEnc, 0x400)) {
+					char* editEnc = (char*)editCEnc + 0x30C;
+					DWORD op = 0;
+					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						WritePwdBlob(editEnc, g_activePassword);
+						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
+					}
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -1464,8 +1475,6 @@ void RenderAutoLoginInterface()
 		}
 		__try {
 			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
-			// +0x39B948 reads unrelated heap (crash + bogus login fields).
 			void* shellDbg = *(void**)0x01A5A510;
 			if (shellDbg) {
 				char* dlgDbg = (char*)shellDbg + 0x39B948;
@@ -1474,7 +1483,56 @@ void RenderAutoLoginInterface()
 					int len980 = *(int*)(dlgDbg + 0x13980 + 0x104);
 					char flag13620 = *(char*)(dlgDbg + 0x13620);
 					ImGui::Text("EncLens: 0x13BD0=%d 0x13980=%d flag13620=%d", lenBD0, len980, (int)flag13620);
-					// Show the canonical transform key (first 8 bytes) for verification
+
+					// Raw blob bytes (what the packet actually carries):
+					// the CEncryptData buffer at +0x108 for len bytes.
+					char raw1[128] = {0}, raw2[128] = {0};
+					{
+						static const char kHex[] = "0123456789ABCDEF";
+						int rp = 0;
+						char* rawBuf = dlgDbg + 0x13BD0 + 0x108;
+						int lim = (lenBD0 > 0 && lenBD0 <= 16) ? lenBD0 : 0;
+						for (int i = 0; i < lim && rp < (int)sizeof(raw1) - 4; i++) {
+							unsigned char c = (unsigned char)rawBuf[i];
+							raw1[rp++] = kHex[c >> 4]; raw1[rp++] = kHex[c & 0xF]; raw1[rp++] = ' ';
+						}
+					}
+					{
+						static const char kHex[] = "0123456789ABCDEF";
+						int rp = 0;
+						char* rawBuf = dlgDbg + 0x13980 + 0x108;
+						int lim = (len980 > 0 && len980 <= 16) ? len980 : 0;
+						for (int i = 0; i < lim && rp < (int)sizeof(raw2) - 4; i++) {
+							unsigned char c = (unsigned char)rawBuf[i];
+							raw2[rp++] = kHex[c >> 4]; raw2[rp++] = kHex[c & 0xF]; raw2[rp++] = ' ';
+						}
+					}
+					ImGui::Text("Blob 0x13BD0: %s", raw1);
+					ImGui::Text("Blob 0x13980: %s", raw2);
+
+					// The FGUI password edit's own CEncryptData at *(dlg+0x13DD8)+0x30C.
+					__try {
+						void* editCEnc = *(void**)(dlgDbg + 0x13DD8);
+						if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
+							char* editEnc = (char*)editCEnc + 0x30C;
+							int editLen = *(int*)(editEnc + 0x104);
+							char eraw[128] = {0};
+							static const char kHexE[] = "0123456789ABCDEF";
+							int rp = 0;
+							char* rawBufE = editEnc + 0x108;
+							int lim = (editLen > 0 && editLen <= 16) ? editLen : 0;
+							for (int i = 0; i < lim && rp < (int)sizeof(eraw) - 4; i++) {
+								unsigned char c = (unsigned char)rawBufE[i];
+								eraw[rp++] = kHexE[c >> 4]; eraw[rp++] = kHexE[c & 0xF]; eraw[rp++] = ' ';
+							}
+							ImGui::Text("EditCEnc ptr=0x%08X len=%d Blob: %s",
+								(unsigned int)editCEnc, editLen, eraw);
+						} else {
+							ImGui::Text("EditCEnc: (unreadable)");
+						}
+					} __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+					// Show the session key table (first 8 bytes) for verification.
 					__try {
 						void* pCanDbg = *(void**)(dlgDbg + 0x13DD8);
 						if (pCanDbg && !IsBadReadPtr((char*)pCanDbg + 0x30C, 0x100)) {
@@ -1485,139 +1543,29 @@ void RenderAutoLoginInterface()
 								unsigned char c = (unsigned char)((char*)pCanDbg + 0x30C)[i];
 								ckey[cp++] = kHexc[c >> 4]; ckey[cp++] = kHexc[c & 0xF]; ckey[cp++] = ' ';
 							}
-							ckey[cp] = 0;
 							ImGui::Text("CanonKey: %s", ckey);
-						} else {
-							ImGui::Text("CanonKey: (unreadable)");
 						}
 					} __except(EXCEPTION_EXECUTE_HANDLER) {}
-					// Decrypted preview via 00EB3383 (CEncryptData::GetString)
-					__try {
-						typedef void (__thiscall *GetEncStrFn)(void*, void*);
-						char out1[32] = {0}, out2[32] = {0};
-						((GetEncStrFn)0x00EB3383)(dlgDbg + 0x13BD0, out1);
-						((GetEncStrFn)0x00EB3383)(dlgDbg + 0x13980, out2);
-						// std::string layout: cap at +0x14 (<=15 → SSO inline at +0),
-						// size at +0x10. Use cap for the inline check, size for display.
-						int cap1 = *(int*)(out1 + 0x14);
-						char* ps1 = (cap1 <= 15) ? out1 : *(char**)out1;
-						int sz1 = *(int*)(out1 + 0x10);
-						int cap2 = *(int*)(out2 + 0x14);
-						char* ps2 = (cap2 <= 15) ? out2 : *(char**)out2;
-						int sz2 = *(int*)(out2 + 0x10);
-						if (ps1 && !IsBadReadPtr(ps1, 1)) {
-							char tmp1[32] = {0}; strncpy_s(tmp1, sizeof(tmp1), ps1, _TRUNCATE);
-							ImGui::Text("Dec 0x13BD0: \"%s\" (len=%d)", tmp1, sz1);
-							// The FGUI edit's own CEncryptData at *(dlg+0x13DD8) — the
-							// fgui EnterGame button reads the password from HERE.
-							__try {
-								void* editCEnc = *(void**)(dlgDbg + 0x13DD8);
-								if (editCEnc && !IsBadReadPtr(editCEnc, 0x208)) {
-									// The fgui edit's real CEncryptData is at +0x30C
-									// (FUN_00607cd5 does ADD ECX,0x30C before using it).
-									char* editEnc = (char*)editCEnc + 0x30C;
-									int editLen = *(int*)(editEnc + 0x104);
-									char editOut[32] = {0};
-									((GetEncStrFn)0x00EB3383)(editEnc, editOut);
-									int esz = *(int*)(editOut + 0x14);
-									int esize = *(int*)(editOut + 0x10);
-									char* eps = (esz <= 15) ? editOut : *(char**)editOut;
-									if (eps && !IsBadReadPtr(eps, 1)) {
-										char etmp[32] = {0}; strncpy_s(etmp, sizeof(etmp), eps, _TRUNCATE);
-										ImGui::Text("EditCEnc ptr=0x%08X len=%d GS: \"%s\" (len=%d)",
-											(unsigned int)editCEnc, editLen, etmp, esize);
-										char ehex[128] = {0};
-										static const char kHexE[] = "0123456789ABCDEF";
-										int edlen = (editLen > 0 && editLen < 16) ? editLen : (int)strlen(etmp);
-										if (edlen > 16) edlen = 16;
-										int ehpos = 0;
-										for (int i = 0; i < edlen; i++) {
-											unsigned char c = (unsigned char)eps[i];
-											ehex[ehpos++] = kHexE[c >> 4];
-											ehex[ehpos++] = kHexE[c & 0xF];
-											ehex[ehpos++] = ' ';
-										}
-										ehex[ehpos] = 0;
-										ImGui::Text("EditCEnc Hex: %s", ehex);
-									}
-								} else {
-									ImGui::Text("EditCEnc: (unreadable)");
-								}
-							} __except(EXCEPTION_EXECUTE_HANDLER) {}
-							// Hex dump of the actual decrypted bytes
-							char hex1[128] = {0};
-							static const char kHex[] = "0123456789ABCDEF";
-							int dlen = (lenBD0 > 0 && lenBD0 < 16) ? lenBD0 : (int)strlen(tmp1);
-							if (dlen > 16) dlen = 16;
-							int hpos = 0;
-							for (int i = 0; i < dlen; i++) {
-								unsigned char c = (unsigned char)ps1[i];
-								hex1[hpos++] = kHex[c >> 4];
-								hex1[hpos++] = kHex[c & 0xF];
-								hex1[hpos++] = ' ';
-							}
-							hex1[hpos] = 0;
-							ImGui::Text("Hex 0x13BD0: %s", hex1);
-							// Raw buffer bytes AFTER the password length (null terminator
-							// and beyond) — shows what the packet would carry past len.
-							{
-								char raw1[128] = {0};
-								int rpos = 0;
-								int start = (lenBD0 > 0 && lenBD0 < 0x100) ? lenBD0 : 0;
-								int end = start + 8;
-								if (end > 0x100) end = 0x100;
-								if (start < 0x100) {
-									char* rawBuf = dlgDbg + 0x13BD0 + 0x108;
-									for (int i = start; i < end && rpos < (int)sizeof(raw1) - 4; i++) {
-										unsigned char c = (unsigned char)rawBuf[i];
-										raw1[rpos++] = kHex[c >> 4];
-										raw1[rpos++] = kHex[c & 0xF];
-										raw1[rpos++] = ' ';
-									}
-									raw1[rpos] = 0;
-									ImGui::Text("Raw after len (%d): %s", start, raw1);
-								}
-							}
+
+					// Expected blob: enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]]
+					// (per-char XOR, the transform the server accepts — verified by
+					// manual typing: '3643748z' -> 04 A4 CD 04 C7 CD CF 97).
+					if (AutoLogin::g_activePassword[0]) {
+						char exp[128] = {0};
+						static const char kHexx[] = "0123456789ABCDEF";
+						int rp = 0;
+						const unsigned char* keyT = (const unsigned char*)(dlgDbg + 0x13BD0);
+						const char* pw = AutoLogin::g_activePassword;
+						int plen = (int)strlen(pw);
+						if (plen > 16) plen = 16;
+						for (int i = 0; i < plen && rp < (int)sizeof(exp) - 4; i++) {
+							unsigned char c = (unsigned char)pw[i] ^ keyT[(unsigned char)pw[i]];
+							exp[rp++] = kHexx[c >> 4]; exp[rp++] = kHexx[c & 0xF]; exp[rp++] = ' ';
 						}
-						if (ps2 && !IsBadReadPtr(ps2, 1)) {
-							char tmp2[32] = {0}; strncpy_s(tmp2, sizeof(tmp2), ps2, _TRUNCATE);
-							ImGui::Text("Dec 0x13980: \"%s\" (len=%d)", tmp2, sz2);
-							char hex2[128] = {0};
-							static const char kHex2[] = "0123456789ABCDEF";
-							int dlen2 = (len980 > 0 && len980 < 16) ? len980 : (int)strlen(tmp2);
-							if (dlen2 > 16) dlen2 = 16;
-							int hpos2 = 0;
-							for (int i = 0; i < dlen2; i++) {
-								unsigned char c = (unsigned char)ps2[i];
-								hex2[hpos2++] = kHex2[c >> 4];
-								hex2[hpos2++] = kHex2[c & 0xF];
-								hex2[hpos2++] = ' ';
-							}
-							hex2[hpos2] = 0;
-							ImGui::Text("Hex 0x13980: %s", hex2);
-							// Raw buffer bytes AFTER the password length
-							{
-								char raw2[128] = {0};
-								int rpos2 = 0;
-								int start2 = (len980 > 0 && len980 < 0x100) ? len980 : 0;
-								int end2 = start2 + 8;
-								if (end2 > 0x100) end2 = 0x100;
-								if (start2 < 0x100) {
-									char* rawBuf2 = dlgDbg + 0x13980 + 0x108;
-									for (int i = start2; i < end2 && rpos2 < (int)sizeof(raw2) - 4; i++) {
-										unsigned char c = (unsigned char)rawBuf2[i];
-										raw2[rpos2++] = kHex2[c >> 4];
-										raw2[rpos2++] = kHex2[c & 0xF];
-										raw2[rpos2++] = ' ';
-									}
-									raw2[rpos2] = 0;
-									ImGui::Text("Raw after len (%d): %s", start2, raw2);
-								}
-							}
-						}
-						// cleanup std::string dtor (call 0x00420847 on out1/out2 if needed, but we leak small)
-					} __except(EXCEPTION_EXECUTE_HANDLER) {}
-					// Show account std::string at 0x13B88 for sanity
+						ImGui::Text("Expected : %s", exp);
+					}
+
+					// Show account std::string at 0x13B88.
 					char accBuf[64] = {0};
 					char* accPtr = dlgDbg + 0x13B88;
 					if (!IsBadReadPtr(accPtr + 0x10, 8)) {
@@ -1636,76 +1584,13 @@ void RenderAutoLoginInterface()
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		ImGui::TextDisabled("accountinfo.ini is next to the game exe");
-		ImGui::TextDisabled("Button found = the MFC login dialog is up");
-
+		// Edit fields summary (compact, without the per-edit pin buttons).
 		if (AutoLogin::g_editListCount > 0)
 		{
-			ImGui::Text("Edit fields (pin with acc/pwd, auto = top/second Y):");
-			ImGui::TextDisabled("Current: account idx=%d  password idx=%d", AutoLogin::g_accountEditIndex, AutoLogin::g_passwordEditIndex);
-			for (int i = 0; i < AutoLogin::g_editListCount; i++)
-			{
-				const AutoLogin::EditInfo& ei = AutoLogin::g_edits[i];
-				ImGui::PushID(1000 + i);
-				const char* tag = "";
-				if (i == AutoLogin::g_accountEditIndex && i == AutoLogin::g_passwordEditIndex) tag = "  <== ACC+PWD";
-				else if (i == AutoLogin::g_accountEditIndex) tag = "  <== ACCOUNT";
-				else if (i == AutoLogin::g_passwordEditIndex) tag = "  <== PASSWORD";
-				ImGui::Text("  #%02d y=%-5d 0x%08X \"%s\"%s",
-					i, ei.y, (unsigned int)ei.hwnd,
-					ei.text[0] ? ei.text : "(empty)",
-					tag);
-				ImGui::SameLine();
-				if (ImGui::SmallButton("acc"))
-				{
-					AutoLogin::g_accountEditIndex = i;
-				}
-				ImGui::SameLine();
-				if (ImGui::SmallButton("pwd"))
-				{
-					AutoLogin::g_passwordEditIndex = i;
-				}
-				ImGui::SameLine();
-				if (ImGui::SmallButton("auto"))
-				{
-					AutoLogin::g_accountEditIndex = -1;
-					AutoLogin::g_passwordEditIndex = -1;
-				}
-				ImGui::PopID();
-			}
-			ImGui::TextDisabled("Tip: if Fill Password types into wrong box (see 6 edits), pin pwd index here then retry Fill Password");
-		}
-
-		ImGui::InputInt("Button ID override (0=auto)", &AutoLogin::g_buttonIdOverride);
-		ImGui::TextDisabled("Pin the exact login button: set its CtrlID from the list below");
-
-		if (AutoLogin::g_buttonListCount > 0)
-		{
-			ImGui::Text("All buttons:");
-			for (int i = 0; i < AutoLogin::g_buttonListCount; i++)
-			{
-				const AutoLogin::BtnInfo& bi = AutoLogin::g_buttons[i];
-				ImGui::PushID(i);
-				ImGui::Text("  #%02d 0x%08X id=%-5u \"%s\"",
-					i, (unsigned int)bi.hwnd, bi.id, bi.text[0] ? bi.text : "(no text)");
-				ImGui::SameLine();
-				if (ImGui::SmallButton("use"))
-				{
-					AutoLogin::g_buttonIdOverride = (int)bi.id;
-					AutoLogin::g_cachedButton = bi.hwnd;
-				}
-				ImGui::SameLine();
-				if (ImGui::SmallButton("click"))
-				{
-					AutoLogin::g_loginCompleted = false;
-					AutoLogin::g_cachedButton = bi.hwnd;
-					AutoLogin::g_clickInProgress = true;
-					AutoLogin::ClickButtonMethod(bi.hwnd);
-					AutoLogin::g_clickInProgress = false;
-					AutoLogin::g_clickCount++;
-				}
-				ImGui::PopID();
-			}
+			ImGui::Text("Edits: %d (acc idx=%d pwd idx=%d)",
+				AutoLogin::g_editListCount,
+				AutoLogin::g_accountEditIndex,
+				AutoLogin::g_passwordEditIndex);
 		}
 		ImGui::TreePop();
 	}
