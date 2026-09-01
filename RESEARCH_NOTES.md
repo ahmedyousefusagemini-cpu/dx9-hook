@@ -4,6 +4,81 @@
 gold/items, XP + skill bars fill normally). See the "WORKING STATE" section below for
 the final solution; the detailed research follows.
 
+> **2026-09-01: CEncryptData constructor found and verified.** The user asked
+> for the constructor that seeds the per-instance 256-byte key table at `+0..+0xFF`.
+>
+> **The user's hint was wrong on two points:** the destructor they pointed at
+> (`FUN_00ea1f0d`) is **not** CEncryptData — it's the EH destructor of an
+> unrelated class with 5 `std::string` sub-objects at offsets `+0x18, +0x3c,
+> +0x54, +0x78, +0x90`. CEncryptData is a POD-ish struct (no `std::string`,
+> no virtual destructor) with the layout `+0..+0xFF` key[256], `+0x100`
+> nEncLen, `+0x104` nLen, `+0x108..+0x207` encBuf[256]. The compiler emits
+> no destructor at all for it (it lives in `.rdata` or as a sub-object and
+> just gets discarded at process exit).
+>
+> The real constructor is `CEncryptData::CEncryptData` at **`0x00e9cc3f`**.
+> It's a __fastcall function that takes `this = ECX` and:
+>
+> 1. **REP STOSD 0x40 dwords** → zero-fills `this+0..0xFF` (the key table).
+> 2. Loop 256x: `GetGameRandomByte(0xff, 0)` → `this+0x108+i`. Fills `encBuf`
+>    with random bytes and null-terminates at `+0x108`.
+> 3. Generates 16 random `DWORD`s on the stack via `GetGameRandomByte(0xff, 0)`
+>    (4 calls each, shifted/ORed into one int).
+> 4. **`FUN_00ed3cd1(this, localBuf, 0x10)`** — copies 0x40 dwords from
+>    `localBuf` (mod 16) into `this+0`, i.e. **overwrites the key table** with
+>    the random data (16 unique seeds × 16 reps each = 256 bytes).
+> 5. `*(this+0x100) = 0; *(this+0x104) = 0;` (nEncLen = nLen = 0).
+> 6. Calls `CEncryptData::SetString(&DAT_014f7b14)` — `&DAT_014f7b14` is the
+>    address of a `0` DWORD being treated as a string (`strlen` returns 0),
+>    so the encryption loop doesn't run. Effectively a no-op for this instance.
+>
+> The only verified caller is **`CDlgLogin::CDlgLogin` @ `0x0086bdb5`**, at
+> `0x0086c0d4` with `ECX = EBX+0x13bd0` (the CEncryptData sub-object inside
+> CDlgLogin, i.e. `dlg->m_pEncryptData`). CDlgLogin ctor in turn is called
+> from `CMyShellDlg::CMyShellDlg` @ `0x00a03e44` (`local_8 = 0x57`).
+>
+> **Randomness is DETERMINISTIC** (not per-process). The randomness source
+> is `GetGameRandomByte(max, reseed)` @ `0x00ece5fc`:
+>
+> ```c
+> if (reseed) DAT_019ebaac = timeGetTime();
+> DAT_019ebaac = (DAT_019ebaac * 0x355d + 0x17061b) % 0x6cf39b;
+> return DAT_019ebaac / (0x6cf39b / max);
+> ```
+>
+> The constructor calls it **only with `reseed=0`** (continuation mode).
+> `DAT_019ebaac` initial value is `0x0e89` (=3721) at `.data` segment load
+> (verified via `read_memory`). The only `GetGameRandomByte(x, 1)` reseed
+> happens LATER in `CDlgLogin::CDlgLogin` at `0x0086c2c6` — after the
+> CEncryptData ctor finishes. So the key table for the first CEncryptData
+> per process is **the same every run** (modulo any earlier reseed by other
+> callers, and there are none — `GetGameRandomByte` only has 2 callers:
+> `CEncryptData::CEncryptData` and `CDlgLogin::CDlgLogin`).
+>
+> Conclusion for the hook: the key table is essentially a fixed compile-time
+> table per build (the 16 random seed DWORDs are deterministic; the 256-byte
+> layout is fixed from them). If the client gets a build update, the 16 seed
+> DWORDs change (since `DAT_019ebaac` is in `.data` and gets relocated), but
+> the byte values of `this+0..0xFF` for a freshly-constructed CEncryptData
+> are stable per build — just refind by reading `read_memory` from the first
+> 256 bytes of any CEncryptData instance.
+>
+> Renames applied in Ghidra:
+> - `FUN_00e9cc3f` → `CEncryptData::CEncryptData`
+> - `FUN_00ea20f0` → `CEncryptData::SetString` (was already known)
+> - `FUN_00eb3383` → `CEncryptData::GetString` (was already known)
+> - `FUN_00eafae0` → `CEncryptData::GetEncLen` (returns `*(this+0x100)`)
+> - `FUN_00eafa6c` → `CEncryptData::GetEncBuf` (returns `this+0x108`)
+> - `FUN_00ed3655` → `CEncryptData::SetEncLen` (writes `*(this+0x100) = arg`)
+> - `FUN_0086bdb5` → `CDlgLogin::CDlgLogin` (verified by call site pattern)
+> - `FUN_00ece5fc` → `GetGameRandomByte`
+> Saved.
+>
+> Note: a plate comment was added to `FUN_00ea1f0d` clarifying it is NOT
+> CEncryptData's destructor (it belongs to a different class with 5
+> std::string members). If you see `FUN_00ea1f0d` referenced as
+> CEncryptData anywhere in the codebase, it's a misattribution.
+>
 > **2026-09-01: CDlgLogin EN_SETFOCUS / EN_KILLFOCUS handlers located and named.**
 > The user asked specifically about `CDlgLogin::OnEnSetfocusEditPwd`. The string
 > `CDlgLogin::OnEnSetfocusEditPwd` @ `0x016042c4` is a **MSVC unhandled-exception

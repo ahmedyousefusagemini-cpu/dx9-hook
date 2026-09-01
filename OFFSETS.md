@@ -63,6 +63,8 @@ Ghidra on the 7952 build (AOB signature, xref or decompile).
 | `0x0101C9D8` | `0x0101CB78` | login-packet sender `login(account, pwd, serverName, mode, extra)` (auto_login) |
 | `0x00EA1F50` | `0x00EA20F0` | `CEncryptData::SetString` (auto_login) |
 | `0x00EB31E3` | `0x00EB3383` | `CEncryptData::GetString` (auto_login debug) |
+| — | `0x00E9CC3F` | `CEncryptData::CEncryptData` — new finding. Constructor seeds `this+0..0xFF` key table from LCG via `GetGameRandomByte(0xff,0)`. Layout: `+0..+0xFF` key[256], `+0x100` nEncLen, `+0x104` nLen, `+0x108..+0x207` encBuf[256]. Deterministic per-build (uses `DAT_019ebaac` seed=0x0e89 from `.data`). Only verified caller is `CDlgLogin::CDlgLogin` @ `0x0086bdb5` calling it at `0x0086c0d4` with `ECX = EBX+0x13bd0`. The destructor `FUN_00ea1f0d` previously misattributed to CEncryptData belongs to a different class with 5 `std::string` sub-objects. |
+| — | `0x00ECE5FC` | `GetGameRandomByte(max, reseed)` — the LCG used by CEncryptData ctor. `state = (state * 0x355d + 0x17061b) % 0x6cf39b; return state / (0x6cf39b / max)`. `reseed=1` → `state = timeGetTime()`. Global state at `0x019ebaac` (initial value `0x0e89`). |
 
 Client-side field offsets unchanged and still verified: `client+0x5385`
 (auto-battle byte), `client+0xaec` (XP bar 0–100), `client+0x268` (my id),
