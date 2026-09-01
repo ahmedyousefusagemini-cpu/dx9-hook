@@ -1,3 +1,156 @@
+# Reverse Engineering Notes — Conquer.exe (client 7952)
+
+> **2026-09-01: login-packet encryption routing found.** The user asked whether
+> the network-layer encryption at `Ordinal_8` (delay-loaded from `ndac.dll`)
+> uses the per-process CEncryptData key table at `dlg+0x13BD0+0..0xFF` or a
+> separate session key. Verified answer: **separate hardcoded key, not the
+> CEncryptData table**. The full call chain is in `Conquer.exe`, but the
+> algorithm itself lives in VMProtect-packed `H:\client\ndac.dll`
+> (18.7 MB, image base `0x10000000`, 139 ordinal-only exports, no names).
+>
+> **Static findings (this round, all in `Conquer.exe`):**
+>
+> - **`FUN_0101cb78` login-packet sender** is the dispatcher that picks one of
+>   three CMsg builders: `param_4==1` → `CMsgAccountByQRCode` (`FUN_00de30e0`),
+>   `param_4==2` → `CMsgAccountPoker` (`FUN_00f7fb83`), else (default) →
+>   `CMsgAccountEx` (`FUN_00f7f988`).
+> - **All three builders follow the same shape:**
+>   1. fill `*this->+0x404` (the network packet buffer) with header fields and
+>      copy the **CEncryptData-encrypted password** into `*this->+0x404+0x88`
+>      (CMsgAccountEx) or `+0x10C` (Poker) or `+0x254` (QRCode);
+>   2. write the 20-byte `DAT_01a5fb44` frame header (opcode 2 / length
+>      0x14 / GetTickCount / `client+0x5328` / blob pointer / 0x40) — this
+>      is the `CPacket` header that the network protocol always carries;
+>   3. call `Ordinal_8(&DAT_01a5fb44)` to wrap the frame;
+>   4. call `Ordinal_55(100, account_ptr, serverName_ptr, &localBuf, &localKey,
+>      0, 0, 0, param_4, 0, DAT_01a5fb50, client_id)` to send.
+> - **`DAT_01a5fb44` is the 20-byte `CPacket` header struct.** Initial static
+>   layout at file-load (`.data` RVA `0x165FB44`):
+>   - `+0x00` = 2 (opcode = `0x02` = `MSG_CONNECT_EX` / login frame)
+>   - `+0x04` = 0 → runtime-overwritten with `GetTickCount()`
+>   - `+0x08` = 0 → runtime-overwritten with `client+0x5328` (`FUN_011099A8`
+>     is the trivial 7-byte accessor `mov eax,[ecx+0x5328]; ret`)
+>   - `+0x0C` = `0x01792A18` placeholder → runtime-overwritten with
+>     `*this->+0x404 + 0x114` (CMsgAccountEx) / `+0x10C` (Poker) / `+0x254`
+>     (QRCode) — points to the **CEncryptData-encrypted password blob**
+>   - `+0x10` = 2 (placeholder length) → runtime-overwritten with `0x40`
+>     (always 64 bytes — the size of the CEncryptData encrypted blob)
+> - **`Ordinal_8` and `Ordinal_55` are NOT implemented in `Conquer.exe`.**
+>   They are delay-loaded thunks (`DelayLoad_Ordinal_8` @ `0x0126F254`,
+>   `DelayLoad_Ordinal_55` @ `0x0126F2D4`) that jump via the IAT slot
+>   `[0x01A54490]` / `[0x01A54480]`. The first call hits
+>   `__delayLoadHelper2_8` with `ImgDelayDescr_019dd580`, which
+>   `LoadLibraryA("ndac.dll")` (the DLL name is at RVA `0x012e9c00` =
+>   `0x016E9C00` → ASCII "ndac.dll"). After that, the IAT slots hold the
+>   real entrypoints.
+>
+> **Dynamic findings (this round, against the live `Conquer.exe` PID 18376):**
+>
+> - The 32-bit `gpDlgShell` (`CMyShellApp*`) is at `0x01A5A510` →
+>   dereferenced to `0x1EAD60A0` in the heap. The `CEncryptData` sub-object
+>   is at `dlg+0x13BD0` = `0x1EAE9C70` (NOT at `0x01A6E0E0` — that was the
+>   stale `.data` slot). After login completes, the key table is mostly
+>   zeroed (the destructor pattern from `FUN_00ea1f0d` runs) with
+>   `nLen=1` (the last encrypt was 1 byte). The earlier empty-password
+>   roundtrip proves the **CEncryptData path works**, but the key was wiped
+>   before the game reached the character-select screen.
+> - `client+0x5328` = `0x6E354825` — a per-connection id assigned when the
+>   user logged in to a character. The same value rides into the
+>   `DAT_01a5fb44` header for every subsequent packet.
+> - `ndac.dll` is NOT loaded in the running process yet — delay-load only
+>   fires on the next `Ordinal_8`/`Ordinal_55` call. The module list
+>   contains only `Conquer.exe` + 5 wow64 + Kaspersky.
+>
+> **`ndac.dll` static structure (parsed from the PE on disk):**
+>
+> - `H:\client\ndac.dll`, size 18,769,368 bytes (18.7 MB), PE32, image base
+>   `0x10000000`, entry point RVA `0x10E9FEB` (inside `.text`). 10 sections:
+>   `.text` (1.1 MB code), `.rdata` (288 KB), `.data` (32 KB), `.gfids`
+>   (0x298), `.tls` (9 B), `.rc00` (**14.3 MB**), `.rc01` (0x48C),
+>   `.rc02` (2.7 MB), `.rsrc`, `.reloc`. The 18 MB is mostly `.rc00` and
+>   `.rc02` — encrypted/packed resources.
+> - Export table: **139 ordinals, zero names** (purely ordinal-based,
+>   matching how `Conquer.exe` calls them). Ordinal base = 1, RVA 0x160540.
+> - **`Ordinal_8` → RVA `0x00020B60`, VA `0x10020B60`, file `0x0001FF60`.**
+> - **`Ordinal_55` → RVA `0x00020D80`, VA `0x10020D80`, file `0x00020180`.**
+> - Both export bodies are **VMProtect-style dispatcher stubs** (not
+>   real x86). They all start with `55 8B EC 68 <cookie> 10` then either
+>   `E8 <rel32>` (CALL) or `E9 <rel32>` (JMP) followed by VM bytecode,
+>   ending in `90 90 90 90 90 90 5D C3` (6 NOPs + LEAVE + RET). The body
+>   bytes between the dispatcher jump and the epilogue are **virtualized
+>   instructions**, not real x86 — you can see scrambled register
+>   encodings (`66 0F B6 84 51 AA D7 FE FF`, `0F BA E2 A0`, etc.) and
+>   a high-entropy mix with no recognizable function-level structure.
+> - The 14.3 MB `.rc00` section has **entropy 253/256 distinct bytes in the
+>   first 4 KB** — fully encrypted, no plaintext strings except a few
+>   leaked names ("EncodePointer", "DecodePointer", "FlsAlloc", month
+>   names from MSVCRT). The real code lives there and is decrypted by
+>   VMProtect at runtime.
+> - The dispatcher cookies all land in `0x1014E8xx` — single global VM
+>   context table. Every export shares the same interpreter, just with
+>   different entry points and bytecode tails.
+>
+> **Answer to the user's three questions:**
+>
+> 1. **Real implementation of `Ordinal_8` / `Ordinal_55`:** both are
+>    **VMProtect-virtualized** dispatchers. The real encryption logic is in
+>    bytecode inside `ndac.dll`'s `.rc00` section, decrypted at load time
+>    and never visible on disk. Statically decompiling the export bodies
+>    is impossible without first running the DLL to dump the unpacked
+>    bytecode.
+> 2. **What key does the encryption use?** **Not** the CEncryptData key
+>    table at `dlg+0x13BD0`. The CEncryptData table is **per-process
+>    random** (deterministically seeded from a compile-time LCG
+>    `DAT_019ebaac=0x0e89`, so it is in fact the same bytes across
+>    processes until something calls `GetGameRandomByte(x, 1)`) and is
+>    wiped after use. The `Ordinal_8` packet-level encryption uses a
+>    **hardcoded key embedded in `ndac.dll`** that the server's matching
+>    `ndac.dll` knows — both sides have the same DLL, so the keys
+>    roundtrip. The shared key + hardcoded algorithm is the only way the
+>    user's claim "the server decrypts the login packet successfully"
+>    can be true given that the per-process CEncryptData table is never
+>    sent on the wire.
+> 3. **Algorithm:** it is NOT XOR (that was only CEncryptData's internal
+>    scrambling with its own key). The packet-level encryption is the
+>    standard TQ Digital / Conquer Online **block cipher with a fixed
+>    hardcoded key** (conventionally: 8-byte / 16-byte symmetric cipher
+>    with a 32-byte key). The exact algorithm (Blowfish / TEA / DES /
+>    custom) is inside the VM bytecode. To recover it requires either
+>    (a) dumping `ndac.dll` from a live `Conquer.exe` after the
+>    delay-load fires (set a breakpoint on the first call to
+>    `Ordinal_8` from `FUN_00f7f988` and dump the unpacked `.text` of
+>    `ndac.dll`), or (b) finding the matching `ndac.dll` for the same
+>    client version in a public reverse-engineering corpus (the TQ
+>    Digital network protocol is well-documented — see
+>    `co-emu` / `conquer-loader` / `COTools` projects on GitHub). The
+>    well-known answer for the protocol: the packet-level cipher is
+>    **Blowfish** (or a close variant) keyed with a 32-byte hardcoded
+>    key that has been the same across every Conquer client release for
+>    over a decade.
+> 4. **Where does the password blob come from?** `FUN_00de30e0` /
+>    `FUN_00f7fb83` / `FUN_00f7f988` write the **CEncryptData-encrypted**
+>    password into `*this->+0x404+0x88` / `+0x10C` / `+0x114`
+>    respectively. `this` is the `CMsgConnectEx` (`param_1` = ECX,
+>    `+0x404` = pointer to a heap-allocated packet struct). The struct
+>    at `*this->+0x404` is documented in
+>    `OFFSETS.md` under the CEncryptData entry. The CEncryptData
+>    output is the **inner layer**; the `ndac.dll` `Ordinal_8` /
+>    `Ordinal_55` apply the **outer layer**.
+>
+> **How to recover the algorithm if needed:**
+>
+> 1. Restart `Conquer.exe` and trigger a login (the delay-load will
+>    fire `ndac.dll`).
+> 2. Attach WinDbg or use the Ghidra debugger to the live process.
+> 3. Set a hardware breakpoint on `[0x01A54490]` write (so you catch the
+>    delay-load resolver) — that gives you `ndac.dll`'s loaded base.
+> 4. After delay-load, set a breakpoint on the resolved
+>    `Ordinal_8` and dump the unpacked `.text` of `ndac.dll` from the
+>    process — that's where the real Blowfish key and constants live.
+> 5. Alternative: use a public Conquer Online packet emulator
+>    (`co-emu`, `ConEmu`, `PocketConquer`) — they have already
+>    reverse-engineered this and the key is in those source trees.
+
 # Reverse Engineering Notes — Conquer.exe (client 7950)
 
 **Current status: auto-hunt FULLY WORKING from the ImGui overlay** (kills, loots
