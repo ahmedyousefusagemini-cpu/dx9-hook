@@ -833,6 +833,35 @@ namespace AutoLogin
 		// Install the MinHook on FUN_0101CB78 if not done yet.
 		InstallLoginHook();
 
+		// Write the account into the CDlgLogin std::string at dlg+0x13B88 —
+		// the login handler FUN_008a8fca reads the account from HERE
+		// (debug: "DlgMem account: \"\"" when missing → server gets empty).
+		// MSVC x86 std::string: union{char buf[16]; char* ptr} at +0,
+		// size at +0x10, capacity at +0x14. SSO (cap<=15) stores inline.
+		__try {
+			void* shell = *(void**)0x01A5A510;
+			if (shell) {
+				char* dlgA = (char*)shell + 0x39B948;
+				if (!IsBadReadPtr(dlgA, 0x1400)) {
+					char* accStr = dlgA + 0x13B88;
+					int cap = *(int*)(accStr + 0x14);
+					int alen = (int)strlen(g_activeAccount);
+					if (alen < 16 && cap <= 15) {
+						// SSO inline write
+						memcpy(accStr, g_activeAccount, alen + 1);
+						*(int*)(accStr + 0x10) = alen;
+					} else if (cap > 15) {
+						// heap-backed: write through the pointer
+						char* heap = *(char**)accStr;
+						if (!IsBadWritePtr(heap, alen + 1)) {
+							memcpy(heap, g_activeAccount, alen + 1);
+							*(int*)(accStr + 0x10) = alen;
+						}
+					}
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+
 		// Move focus to the password field (user can type there).
 		if (result >= 0 && passwordEdit && IsWindow(passwordEdit))
 			SetFocus(passwordEdit);
@@ -893,6 +922,7 @@ namespace AutoLogin
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
+				// Write to MFC handler slots (0x13BD0 = normal, 0x13980 = poker/reconnect).
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offs[oi];
@@ -901,6 +931,14 @@ namespace AutoLogin
 						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
 						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
+				}
+				// Also write to the fgui password edit's own CEncryptData at *(dlg+0x13DD8).
+				// The fgui EnterGame button reads the password from HERE, not from 0x13BD0.
+				// (debug: EditCEnc ptr=0x... len=0 confirms it's empty after our fill).
+				void* editCEnc = *(void**)(dlg + 0x13DD8);
+				if (editCEnc && !IsBadReadPtr(editCEnc, 0x208) && !IsBadWritePtr(editCEnc, 0x208))
+				{
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(editCEnc, g_activePassword);
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
