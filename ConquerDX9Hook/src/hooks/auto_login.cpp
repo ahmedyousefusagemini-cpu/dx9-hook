@@ -898,66 +898,43 @@ namespace AutoLogin
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-		// Direct write: per-char XOR transform, NOT SetString.
-		// Verified from the game's own typed blob ("3643748z" typed manually →
-		// 04 A4 CD 04 C7 CD CF 97 in BOTH 0x13BD0 and the fgui edit):
-		// enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]], a 256-byte table
-		// indexed by CHARACTER VALUE. Same char at different positions yields the
-		// same key byte (key['3']=0x37, key['4']=0xF9) — table indexed by char,
-		// not position. SetString (FUN_00ea20f0) uses a position formula — the
-		// server rejects it.
-		// The key table lives in the FGUI password edit's CEncryptData at
-		// *(dlg+0x13DD8)+0x30C (CanonKey). The MFC slot 0x13BD0's own +0..0xFF is
-		// NOT the session table (our fill with it produced 8C 72... ≠ the edit's
-		// AA 5B...), so we read keyT from the edit and write the SAME blob into
-		// all three slots — exactly what the game does on manual typing.
-		auto WritePwdBlob = [](char* pEnc, const unsigned char* keyT, const char* plain) {
-			unsigned char* buf = (unsigned char*)(pEnc + 0x108);
-			int len = (int)strlen(plain);
-			for (int i = 0; i < len; i++)
-				buf[i] = (unsigned char)plain[i] ^ keyT[(unsigned char)plain[i]];
-			buf[len] = 0;
-			*(int*)(pEnc + 0x104) = len;
-		};
-		__try {
-			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
-				char* dlg = (char*)dlgBase;
-				// The authoritative session key table = the fgui edit's
-				// CEncryptData at *(dlg+0x13DD8)+0x30C.
-				const unsigned char* keyT = (const unsigned char*)(dlg + 0x13BD0); // fallback
-				void* editCEnc = *(void**)(dlg + 0x13DD8);
-				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x100))
-					keyT = (const unsigned char*)((char*)editCEnc + 0x30C);
-				// MFC handler slots (0x13BD0 = normal, 0x13980 = poker/reconnect).
-				const uintptr_t offs[2] = {0x13BD0, 0x13980};
-				for (int oi = 0; oi < 2; ++oi) {
-					char* pEnc = dlg + offs[oi];
-					DWORD op = 0;
-					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						WritePwdBlob(pEnc, keyT, g_activePassword);
-						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
-					}
-				}
-				// Also write the fgui password edit's own CEncryptData at
-				// *(dlg+0x13DD8)+0x30C (the fgui EnterGame button reads from HERE).
-				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
-					char* editEnc = (char*)editCEnc + 0x30C;
-					DWORD op = 0;
-					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						WritePwdBlob(editEnc, keyT, g_activePassword);
-						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
-					}
-				}
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-		// Populate the visible EditBox text via WM_SETTEXT (same as FillAccountEdit).
-		// The cocos EditBox gate rejects empty fields; the account fill already proves
-		// WM_SETTEXT works for display. The actual packet reads dlg+0x13BD0 (our write).
+		// Populate the visible EditBox text via WM_SETTEXT. The fgui GTextInput
+		// (with setPassword) does its OWN encryption into its CEncryptData at
+		// *(dlg+0x13DD8)+0x30C — debug showed EditCEnc blob CHANGES to the game's
+		// own value after WM_SETTEXT (09 84 21 87... in the failing run, not our
+		// manually-computed A0 D5 8C...). So: set the text, let the game encrypt,
+		// then COPY the game-generated blob from the fgui edit into the MFC slots
+		// the login handler reads (0x13BD0 normal, 0x13980 poker/reconnect).
 		if (passwordEdit && IsWindow(passwordEdit))
 		{
 			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
 		}
+
+		Sleep(50);
+
+		__try {
+			void* shellC = *(void**)0x01A5A510;
+			if (shellC) {
+				char* dlgC = (char*)shellC + 0x39B948;
+				void* editCEncC = *(void**)(dlgC + 0x13DD8);
+				if (editCEncC && !IsBadReadPtr((char*)editCEncC + 0x30C, 0x208)) {
+					char* srcEnc = (char*)editCEncC + 0x30C;
+					int srcLen = *(int*)(srcEnc + 0x104);
+					if (srcLen > 0 && srcLen <= 0x100) {
+						const uintptr_t offs[2] = {0x13BD0, 0x13980};
+						for (int oi = 0; oi < 2; ++oi) {
+							char* pEnc = dlgC + offs[oi];
+							DWORD op = 0;
+							if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+								*(int*)(pEnc + 0x104) = srcLen;
+								memcpy(pEnc + 0x108, srcEnc + 0x108, srcLen + 1);
+								DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+							}
+						}
+					}
+				}
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
 		Sleep(30);
 
@@ -1555,27 +1532,13 @@ void RenderAutoLoginInterface()
 						}
 					} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-					// Expected blob: enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]]
-					// using the SAME session key table the game uses (the fgui edit's
-					// CEncryptData at *(dlg+0x13DD8)+0x30C, falling back to 0x13BD0).
-					if (AutoLogin::g_activePassword[0]) {
-						const unsigned char* expKey = (const unsigned char*)(dlgDbg + 0x13BD0);
-						__try {
-							void* ec = *(void**)(dlgDbg + 0x13DD8);
-							if (ec && !IsBadReadPtr((char*)ec + 0x30C, 0x100))
-								expKey = (const unsigned char*)((char*)ec + 0x30C);
-						} __except(EXCEPTION_EXECUTE_HANDLER) {}
-						char exp[128] = {0};
-						static const char kHexx[] = "0123456789ABCDEF";
-						int rp = 0;
-						const char* pw = AutoLogin::g_activePassword;
-						int plen = (int)strlen(pw);
-						if (plen > 16) plen = 16;
-						for (int i = 0; i < plen && rp < (int)sizeof(exp) - 4; i++) {
-							unsigned char c = (unsigned char)pw[i] ^ expKey[(unsigned char)pw[i]];
-							exp[rp++] = kHexx[c >> 4]; exp[rp++] = kHexx[c & 0xF]; exp[rp++] = ' ';
-						}
-						ImGui::Text("Expected : %s", exp);
+					// Check: Blob 0x13BD0 should match the fgui edit's blob (the game's own
+					// encryption, which is the ground truth after WM_SETTEXT).
+					{
+						bool match = (lenBD0 == editLen && lenBD0 > 0 &&
+							memcmp(dlgDbg + 0x13BD0 + 0x108, (char*)(*(void**)(dlgDbg + 0x13DD8)) + 0x30C + 0x108, lenBD0) == 0);
+						ImGui::TextColored(match ? ImVec4(0,1,0,1) : ImVec4(1,0.3f,0,1),
+							match ? "Blob match OK" : "Blob MISMATCH");
 					}
 
 					// Show account std::string at 0x13B88.
