@@ -78,17 +78,16 @@ static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
-// Always inject account/password when available — the handler may take
-		// the reconnect path (mode 1, QR) or the normal path (mode 0). When our
-		// credentials were injected, force mode 0 (CMsgAccountEx) so the server
-		// processes the account/password instead of an empty QR/reconnect blob.
+// Always inject our account/password when available — the game may pass a
+		// stale/empty account from the dialog's std::string (debug: DlgMem account
+		// was ""). Unconditionally replace the account so the server sees the
+		// correct ini account. The handler may take the reconnect path (mode 1,
+		// QR) or the normal path (mode 0); force mode 0 (CMsgAccountEx) when our
+		// password was injected so the server processes the credentials.
 		bool injected = false;
 		{
 			if (AutoLogin::g_activeAccount[0])
-			{
-				if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
-					account = AutoLogin::g_activeAccount;
-			}
+				account = AutoLogin::g_activeAccount;
 			if (AutoLogin::g_activePassword[0] && password)
 			{
 				__try
@@ -833,9 +832,11 @@ namespace AutoLogin
 		// Install the MinHook on FUN_0101CB78 if not done yet.
 		InstallLoginHook();
 
-		// Write the account into the CDlgLogin std::string at dlg+0x13B88 —
-		// the login handler FUN_008a8fca reads the account from HERE
-		// (debug: "DlgMem account: \"\"" when missing → server gets empty).
+		// Write the account into the CDlgLogin std::string at dlg+0x13B88
+		// (normal path) and dlg+0x13938 (reconnect path). The login handler
+		// FUN_008a8fca reads account from 0x13B88, but the reconnect gate
+		// (virtual at dlg+0xdc68) diverts to FUN_008a965f which reads from
+		// 0x13938 instead. Fill both to cover all paths.
 		// MSVC x86 std::string: union{char buf[16]; char* ptr} at +0,
 		// size at +0x10, capacity at +0x14. SSO (cap<=15) stores inline.
 		__try {
@@ -843,19 +844,22 @@ namespace AutoLogin
 			if (shell) {
 				char* dlgA = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlgA, 0x1400)) {
-					char* accStr = dlgA + 0x13B88;
-					int cap = *(int*)(accStr + 0x14);
-					int alen = (int)strlen(g_activeAccount);
-					if (alen < 16 && cap <= 15) {
-						// SSO inline write
-						memcpy(accStr, g_activeAccount, alen + 1);
-						*(int*)(accStr + 0x10) = alen;
-					} else if (cap > 15) {
-						// heap-backed: write through the pointer
-						char* heap = *(char**)accStr;
-						if (!IsBadWritePtr(heap, alen + 1)) {
-							memcpy(heap, g_activeAccount, alen + 1);
+					const uintptr_t accOffs[2] = {0x13B88, 0x13938};
+					for (int oi = 0; oi < 2; ++oi) {
+						char* accStr = dlgA + accOffs[oi];
+						int cap = *(int*)(accStr + 0x14);
+						int alen = (int)strlen(g_activeAccount);
+						if (alen < 16 && cap <= 15) {
+							// SSO inline write
+							memcpy(accStr, g_activeAccount, alen + 1);
 							*(int*)(accStr + 0x10) = alen;
+						} else if (cap > 15) {
+							// heap-backed: write through the pointer
+							char* heap = *(char**)accStr;
+							if (!IsBadWritePtr(heap, alen + 1)) {
+								memcpy(heap, g_activeAccount, alen + 1);
+								*(int*)(accStr + 0x10) = alen;
+							}
 						}
 					}
 				}
