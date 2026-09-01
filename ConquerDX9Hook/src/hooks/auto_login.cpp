@@ -900,16 +900,18 @@ namespace AutoLogin
 
 		// Direct write: per-char XOR transform, NOT SetString.
 		// Verified from the game's own typed blob ("3643748z" typed manually →
-		// 04 A4 CD 04 C7 CD CF 97): enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]]
-		// where keyT is the CEncryptData's OWN 256-byte key table at +0..0xFF
-		// (the session key the server shares). Same char at different positions
-		// yields the same key byte (key['3']=0x37, key['4']=0xF9), so the table
-		// is indexed by CHARACTER VALUE, not position. SetString (FUN_00ea20f0)
-		// uses a different position-based formula — the server rejects it.
-		// The key table is session-specific (changes per restart), so read it at
-		// runtime from the target CEncryptData.
-		auto WritePwdBlob = [](char* pEnc, const char* plain) {
-			const unsigned char* keyT = (const unsigned char*)pEnc;
+		// 04 A4 CD 04 C7 CD CF 97 in BOTH 0x13BD0 and the fgui edit):
+		// enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]], a 256-byte table
+		// indexed by CHARACTER VALUE. Same char at different positions yields the
+		// same key byte (key['3']=0x37, key['4']=0xF9) — table indexed by char,
+		// not position. SetString (FUN_00ea20f0) uses a position formula — the
+		// server rejects it.
+		// The key table lives in the FGUI password edit's CEncryptData at
+		// *(dlg+0x13DD8)+0x30C (CanonKey). The MFC slot 0x13BD0's own +0..0xFF is
+		// NOT the session table (our fill with it produced 8C 72... ≠ the edit's
+		// AA 5B...), so we read keyT from the edit and write the SAME blob into
+		// all three slots — exactly what the game does on manual typing.
+		auto WritePwdBlob = [](char* pEnc, const unsigned char* keyT, const char* plain) {
 			unsigned char* buf = (unsigned char*)(pEnc + 0x108);
 			int len = (int)strlen(plain);
 			for (int i = 0; i < len; i++)
@@ -920,24 +922,29 @@ namespace AutoLogin
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
+				// The authoritative session key table = the fgui edit's
+				// CEncryptData at *(dlg+0x13DD8)+0x30C.
+				const unsigned char* keyT = (const unsigned char*)(dlg + 0x13BD0); // fallback
+				void* editCEnc = *(void**)(dlg + 0x13DD8);
+				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x100))
+					keyT = (const unsigned char*)((char*)editCEnc + 0x30C);
 				// MFC handler slots (0x13BD0 = normal, 0x13980 = poker/reconnect).
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offs[oi];
 					DWORD op = 0;
 					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						WritePwdBlob(pEnc, g_activePassword);
+						WritePwdBlob(pEnc, keyT, g_activePassword);
 						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
 				// Also write the fgui password edit's own CEncryptData at
 				// *(dlg+0x13DD8)+0x30C (the fgui EnterGame button reads from HERE).
-				void* editCEnc = *(void**)(dlg + 0x13DD8);
-				if (editCEnc && !IsBadReadPtr(editCEnc, 0x400)) {
+				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
 					char* editEnc = (char*)editCEnc + 0x30C;
 					DWORD op = 0;
 					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						WritePwdBlob(editEnc, g_activePassword);
+						WritePwdBlob(editEnc, keyT, g_activePassword);
 						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
 					}
 				}
@@ -1549,18 +1556,23 @@ void RenderAutoLoginInterface()
 					} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
 					// Expected blob: enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]]
-					// (per-char XOR, the transform the server accepts — verified by
-					// manual typing: '3643748z' -> 04 A4 CD 04 C7 CD CF 97).
+					// using the SAME session key table the game uses (the fgui edit's
+					// CEncryptData at *(dlg+0x13DD8)+0x30C, falling back to 0x13BD0).
 					if (AutoLogin::g_activePassword[0]) {
+						const unsigned char* expKey = (const unsigned char*)(dlgDbg + 0x13BD0);
+						__try {
+							void* ec = *(void**)(dlgDbg + 0x13DD8);
+							if (ec && !IsBadReadPtr((char*)ec + 0x30C, 0x100))
+								expKey = (const unsigned char*)((char*)ec + 0x30C);
+						} __except(EXCEPTION_EXECUTE_HANDLER) {}
 						char exp[128] = {0};
 						static const char kHexx[] = "0123456789ABCDEF";
 						int rp = 0;
-						const unsigned char* keyT = (const unsigned char*)(dlgDbg + 0x13BD0);
 						const char* pw = AutoLogin::g_activePassword;
 						int plen = (int)strlen(pw);
 						if (plen > 16) plen = 16;
 						for (int i = 0; i < plen && rp < (int)sizeof(exp) - 4; i++) {
-							unsigned char c = (unsigned char)pw[i] ^ keyT[(unsigned char)pw[i]];
+							unsigned char c = (unsigned char)pw[i] ^ expKey[(unsigned char)pw[i]];
 							exp[rp++] = kHexx[c >> 4]; exp[rp++] = kHexx[c & 0xF]; exp[rp++] = ' ';
 						}
 						ImGui::Text("Expected : %s", exp);
