@@ -40,13 +40,16 @@ namespace AutoLogin {
 }
 
 // MinHook target: FUN_0101CB78 (cdecl) - the login packet sender.
-// Replaces the account argument with the ini account when the game passes
-// an empty (or matching) one, so the server always receives the right name.
-// Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf at +0x108,
-// see FUN_00ea20f0). The hook acts as a last-resort when the game's CEncryptData
-// is empty (len<=0) — it writes the fixed per-position XOR'd form the server
-// expects: out[i] = plain[i] ^ kPwdXor[i & 7] where kPwdXor = [B8 98 45 B8 91
-// 45 5D DF] (verified against manual typing, stable across restarts).
+// Guarantees the ini account/password reach the server regardless of which
+// path the handler takes (normal mode 0 or reconnect mode 1). The handler
+// may take the reconnect path (FUN_008a965f) when the game's auto-login flag
+// is set — this uses dlg+0x13938 account and dlg+0x13980 password with mode 1.
+// The hook forces mode 0 (CMsgAccountEx) so the server processes credentials.
+// Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf
+// at +0x108, see FUN_00ea20f0). SetString uses the CEncryptData's OWN key
+// table at +0..0xFF (the session key) to transform — the server's GetString
+// with the same key recovers the XOR'd form. The session key changes per
+// session, so we must NOT hardcode a fixed XOR table.
 typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* serverName, int mode, int extra);
 static LoginSendFunc g_originalLoginSend = NULL;
 static bool g_loginHookInstalled = false;
@@ -75,31 +78,33 @@ static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
-	if (mode == 0)
-	{
-		if (AutoLogin::g_activeAccount[0])
+// Always inject account/password when available — the handler may take
+		// the reconnect path (mode 1, QR) or the normal path (mode 0). When our
+		// credentials were injected, force mode 0 (CMsgAccountEx) so the server
+		// processes the account/password instead of an empty QR/reconnect blob.
+		bool injected = false;
 		{
-			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
-				account = AutoLogin::g_activeAccount;
-		}
-// Password: always inject our password when g_activePassword is set.
-		// SetString uses the CEncryptData's OWN key table at +0..0xFF (the session
-		// key) to transform — the server's GetString with the same key recovers
-		// the XOR'd form. The session key changes per session, so we MUST NOT
-		// hardcode a fixed XOR table — pass plain and let SetString use the key.
-		if (AutoLogin::g_activePassword[0] && password)
-		{
-			__try
+			if (AutoLogin::g_activeAccount[0])
 			{
-				if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
-				{
-					((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
-				}
+				if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
+					account = AutoLogin::g_activeAccount;
 			}
-			__except (EXCEPTION_EXECUTE_HANDLER) {}
+			if (AutoLogin::g_activePassword[0] && password)
+			{
+				__try
+				{
+					if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
+					{
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+						injected = true;
+					}
+				}
+				__except (EXCEPTION_EXECUTE_HANDLER) {}
+			}
+			if (injected)
+				mode = 0;  // normal account/password login
 		}
-	}
-	return g_originalLoginSend(account, password, serverName, mode, extra);
+		return g_originalLoginSend(account, password, serverName, mode, extra);
 }
 
 static bool InstallLoginHook()
@@ -1046,15 +1051,12 @@ namespace AutoLogin
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
-		// Method 3 = explicit direct FUN_LoginButtonHandler call (bypasses the
-		// fgui client-side field gate). All other methods use the button click,
-		// which is the previously-working behavior.
-		// When a password is filled via CEncryptData write, the fgui gate rejects
-		// the empty EditBox locally — use DirectLoginCall to bypass the gate.
 		bool ok = false;
+		// Try DirectLoginCall first (bypasses the fgui client-side field gate).
+		// Fall back to button click if the direct call fails (e.g. shell not ready).
 		if (g_clickMethod == 3 || g_activePassword[0])
 			ok = DirectLoginCall();
-		else if (button)
+		if (!ok && button)
 			ok = ClickButtonMethod(button);
 
 		if (ok)
@@ -1304,7 +1306,7 @@ void RenderAutoLoginInterface()
 	ImGui::Separator();
 
 	// Manual single-click - works without enabling the auto loop.
-	if (ImGui::Button("Click Login Now"))
+	if (ImGui::Button("Log In"))
 	{
 		AutoLogin::g_loginCompleted = false;
 		AutoLogin::ClickLoginOnce();

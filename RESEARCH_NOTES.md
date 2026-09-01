@@ -8,6 +8,31 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
+> **2026-09-01: fix "Log In" button not working — reconnect gate in FUN_008a8fca.**
+> The overlay "Log In" button (ex-"Click Login Now") called ClickLoginOnce →
+> DirectLoginCall → FUN_008a8fca (login button handler). This handler has a
+> reconnect gate at the top: a virtual call at `dlg+0xdc68` (vtable+0x80).
+> When it returns non-zero AND `client+0x5428 == 0`, the gate takes the
+> reconnect path (FUN_008a965f) which calls FUN_0101cb78 with **mode=1** (QR)
+> using account at `dlg+0x13938` and password at `dlg+0x13980`. The old
+> HookedLoginSend only injected credentials for `mode==0`, so the reconnect
+> path sent an empty packet → login silently failed.
+>
+> **Fix:**
+> 1. HookedLoginSend now injects account/password for ALL modes, and forces
+>    mode=0 (CMsgAccountEx) when credentials were injected — covers both the
+>    normal path (mode 0, dlg+0x13B88/0x13BD0) and the reconnect path
+>    (mode 1, dlg+0x13938/0x13980).
+> 2. ClickLoginOnce falls back to ClickButtonMethod(button) when
+>    DirectLoginCall fails, rather than giving up.
+> 3. Renamed overlay button to "Log In" to match game label.
+>
+> Ghidra verification: FUN_008a8fca at 0x008A8FCA confirmed as the login
+> button handler (called by the game at 0x00a5b8f5 with `LEA ECX,[EBX+0x39b948]`
+> → `CALL 0x008a8fca`). CDlgLogin offset +0x39B948 from gpDlgShell
+> (0x01A5A510) verified. Virtual at dlg+0xdc68 vtable+0x80 is the reconnect
+> auto-login flag; client+0x5428 is the poker-mode byte.
+
 > **2026-09-01: client recompiled (version 7952).** All hook modules
 > re-pointed at the new build via Ghidra MCP. Full migration table in OFFSETS.md.
 > This recompile was mostly a uniform **+0x1A0 shift**: the code regions
