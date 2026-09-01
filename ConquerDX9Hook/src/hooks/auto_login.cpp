@@ -78,43 +78,12 @@ static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
-// LAST-RESORT injection only. The game may take the reconnect path (mode 1)
-		// or the normal path (mode 0); both funnel here. We inject ONLY when the
-		// game's own fields are EMPTY (user did not type / auto-fill failed) so a
-		// manually-entered account/password is NEVER overwritten — overwriting it
-		// with the ini values was exactly what made the server reject manual
-		// logins ("invalid username or password"). If we did inject, force mode 0
-		// (CMsgAccountEx) so the server processes the credentials.
-		bool injected = false;
-		{
-			if (AutoLogin::g_activeAccount[0])
-			{
-				if (!account || !account[0])
-				{
-					account = AutoLogin::g_activeAccount;
-					injected = true;
-				}
-			}
-			if (AutoLogin::g_activePassword[0] && password)
-			{
-				__try
-				{
-					if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
-					{
-						int plen = *(int*)((char*)password + 0x104);  // CEncryptData len
-						if (plen <= 0)  // empty → the user did not type a password
-						{
-							((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
-							injected = true;
-						}
-					}
-				}
-				__except (EXCEPTION_EXECUTE_HANDLER) {}
-			}
-			if (injected)
-				mode = 0;  // normal account/password login
-		}
-		return g_originalLoginSend(account, password, serverName, mode, extra);
+	// Pure pass-through. FillAccountEdit / FillPasswordEdit already wrote the
+	// correct credentials into all dialog slots (0x13B88/0x13938 for account,
+	// 0x13BD0/0x13980 for password, fgui edit via FUN_00607cd5). We do NOT
+	// inject anything — doing so overwrites manually-entered values and causes
+	// server rejection ("invalid username or password").
+	return g_originalLoginSend(account, password, serverName, mode, extra);
 }
 
 static bool InstallLoginHook()
