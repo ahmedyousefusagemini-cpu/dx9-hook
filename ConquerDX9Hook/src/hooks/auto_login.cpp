@@ -78,24 +78,35 @@ static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
-// Always inject our account/password when available — the game may pass a
-		// stale/empty account from the dialog's std::string (debug: DlgMem account
-		// was ""). Unconditionally replace the account so the server sees the
-		// correct ini account. The handler may take the reconnect path (mode 1,
-		// QR) or the normal path (mode 0); force mode 0 (CMsgAccountEx) when our
-		// password was injected so the server processes the credentials.
+// LAST-RESORT injection only. The game may take the reconnect path (mode 1)
+		// or the normal path (mode 0); both funnel here. We inject ONLY when the
+		// game's own fields are EMPTY (user did not type / auto-fill failed) so a
+		// manually-entered account/password is NEVER overwritten — overwriting it
+		// with the ini values was exactly what made the server reject manual
+		// logins ("invalid username or password"). If we did inject, force mode 0
+		// (CMsgAccountEx) so the server processes the credentials.
 		bool injected = false;
 		{
 			if (AutoLogin::g_activeAccount[0])
-				account = AutoLogin::g_activeAccount;
+			{
+				if (!account || !account[0])
+				{
+					account = AutoLogin::g_activeAccount;
+					injected = true;
+				}
+			}
 			if (AutoLogin::g_activePassword[0] && password)
 			{
 				__try
 				{
 					if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
 					{
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
-						injected = true;
+						int plen = *(int*)((char*)password + 0x104);  // CEncryptData len
+						if (plen <= 0)  // empty → the user did not type a password
+						{
+							((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
+							injected = true;
+						}
 					}
 				}
 				__except (EXCEPTION_EXECUTE_HANDLER) {}
