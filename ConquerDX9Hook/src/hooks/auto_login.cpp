@@ -82,35 +82,18 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			if (!account || !account[0] || lstrcmpA(account, AutoLogin::g_activeAccount) == 0)
 				account = AutoLogin::g_activeAccount;
 		}
-// Password: always inject our transformed password when g_activePassword is set.
-		// The game may pass a CEncryptData built from the EditBox text (empty if not
-		// typed), so we overwrite unconditionally — the manual path never needs to
-		// "flow through intact" since we're auto-filling anyway.
+// Password: always inject our password when g_activePassword is set.
+		// SetString uses the CEncryptData's OWN key table at +0..0xFF (the session
+		// key) to transform — the server's GetString with the same key recovers
+		// the XOR'd form. The session key changes per session, so we MUST NOT
+		// hardcode a fixed XOR table — pass plain and let SetString use the key.
 		if (AutoLogin::g_activePassword[0] && password)
 		{
 			__try
 			{
 				if (!IsBadReadPtr(password, 0x208) && !IsBadWritePtr(password, 0x208))
 				{
-					// The server expects the fixed per-position XOR transform the
-					// fgui edit applies: out[i] = plain[i] ^ kPwdXor[i & 7] with
-					// kPwdXor = [B8 98 45 B8 91 45 5D DF]. Verified against manual
-					// typing: "3643748z" stores as 8B AE 71 8B A6 71 65 A5
-					// ('3'^0xB8=0x8B at pos 0 and 3, '4'^0x45=0x71 at pos 2 and 5,
-					// '6'^0x98, '7'^0x91, '8'^0x5D, 'z'^0xDF). Stable across restarts.
-					// NOTE: the key table at *(encData+0x208)+0x30C is session-RANDOM
-					// and NOT the transform key - do not use it here.
-					char transformed[128] = {0};
-					int tlen = (int)lstrlenA(AutoLogin::g_activePassword);
-					if (tlen > 0 && tlen < 127) {
-						static const unsigned char kPwdXor[8] = {
-							0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
-						};
-						for (int i = 0; i < tlen; i++)
-							transformed[i] = (char)(AutoLogin::g_activePassword[i] ^ kPwdXor[i & 7]);
-						transformed[tlen] = 0;
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, transformed);
-					}
+					((SetEncStringFunc)SET_ENC_STRING_ADDR)(password, AutoLogin::g_activePassword);
 				}
 			}
 			__except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -896,31 +879,21 @@ namespace AutoLogin
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-		// Direct write: pass the fixed per-position XOR'd form (same as the game's
-		// edit produces) into SetString. Verified against manual typing: the stored
-		// buffer for "3643748z" is 8B AE 71 8B A6 71 65 A5 = plain ^ [B8 98 45 B8
-		// 91 45 5D DF] (per-position i&7). Stable across restarts. The key table
-		// at *(encData+0x208)+0x30C is session-RANDOM and NOT the transform key.
+		// Direct write: pass the plain password into SetString on the login
+		// CEncryptData. SetString uses the CEncryptData's OWN key table at +0..0xFF
+		// (which is filled with the session key by the game) to transform the input.
+		// The server's GetString with the same key recovers the XOR'd form.
+		// The key table changes per session (verified: Raw after len byte differs
+		// between sessions), so we MUST NOT hardcode a fixed XOR table.
 		__try {
 			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
 				char* dlg = (char*)dlgBase;
-				char transformed[128] = {0};
-				int tlen = (int)lstrlenA(g_activePassword);
-				if (tlen > 0 && tlen < 127) {
-					static const unsigned char kPwdXor[8] = {
-						0xB8, 0x98, 0x45, 0xB8, 0x91, 0x45, 0x5D, 0xDF
-					};
-					for (int i = 0; i < tlen; i++)
-						transformed[i] = (char)(g_activePassword[i] ^ kPwdXor[i & 7]);
-					transformed[tlen] = 0;
-				}
-				// Write to the login CEncryptData slots the handler reads.
 				const uintptr_t offs[2] = {0x13BD0, 0x13980};
 				for (int oi = 0; oi < 2; ++oi) {
 					char* pEnc = dlg + offs[oi];
 					DWORD op = 0;
 					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, transformed);
+						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
 						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
 					}
 				}
