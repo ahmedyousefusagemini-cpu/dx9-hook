@@ -1524,15 +1524,6 @@ void RenderAutoLoginInterface()
 						}
 					} __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-					// Check: Blob 0x13BD0 should match the fgui edit's blob (the game's own
-					// encryption, which is the ground truth after WM_SETTEXT).
-					{
-						bool match = (lenBD0 == editLen && lenBD0 > 0 &&
-							memcmp(dlgDbg + 0x13BD0 + 0x108, (char*)(*(void**)(dlgDbg + 0x13DD8)) + 0x30C + 0x108, lenBD0) == 0);
-						ImGui::TextColored(match ? ImVec4(0,1,0,1) : ImVec4(1,0.3f,0,1),
-							match ? "Blob match OK" : "Blob MISMATCH");
-					}
-
 					// Show account std::string at 0x13B88.
 					char accBuf[64] = {0};
 					char* accPtr = dlgDbg + 0x13B88;
