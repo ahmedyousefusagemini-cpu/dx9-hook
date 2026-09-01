@@ -10,14 +10,14 @@
 extern unsigned int GetXpBarValue();
 
 // ============================================================================
-// Auto Gear Swap - Conquer.exe client 7937 (image base 0x400000)
+// Auto Gear Swap - Conquer.exe client 7952 (image base 0x400000)
 // ----------------------------------------------------------------------------
 // The client has a native "switch to alternate equipment" feature (the fgui
 // swap button, STR_SWAP_SUB_WEAPONBTNTIP). Reverse-engineered chain:
 //
 //   Swapuse_SwapmainbBtn click
 //     -> 0x00A58AA8  (button dispatcher: MOV ECX,EAX after FUN_0043e581)
-//     -> FUN_00FF2B8E  CMyHero::SwapEquipMode  (heroitem.cpp)
+//     -> FUN_00FF2D2E  CMyHero::SwapEquipMode  (heroitem.cpp)
 //          this = FUN_0043e581() -> DAT_01a549a0 (CMyHero singleton)
 //          equip mode flag at hero+0x193C: 0 = main, 1 = alternate
 //          if (mode == 0) send CMsgItem{action=0x2D}  (0x97B)  // swap to ALT
@@ -27,7 +27,7 @@ extern unsigned int GetXpBarValue();
 //     -> server replies; inbound CMsgItem::Process (FUN_00F0959C) re-renders
 //        all 8 equipment slots (FUN_00ff1eff clear + FUN_00ff49c4 set pairs).
 //
-// So the complete native swap = FUN_00FF2B8E(hero) - exactly what the button
+// So the complete native swap = FUN_00FF2D2E(hero) - exactly what the button
 // runs. This module wears ALT while the XP pop is on screen and switches back
 // to MAIN the moment the pop goes away (the skill activation consumes it):
 //
@@ -51,13 +51,13 @@ extern unsigned int GetXpBarValue();
 
 namespace GearSwap
 {
-	// --- game constants (client 7950) --------------------------------------
+	// --- game constants (client 7952) --------------------------------------
 	const uintptr_t HERO_GLOBAL_ADDRESS = 0x01A549A0;  // DAT_01a549a0 - CMyHero*
-	const uintptr_t SWAP_FUNC           = 0x00FF2B8E;  // FUN_00ff2b8e - CMyHero::SwapEquipMode
+	const uintptr_t SWAP_FUNC           = 0x00FF2D2E;  // FUN_00ff2d2e - CMyHero::SwapEquipMode
 	const size_t    EQUIP_MODE_OFFSET   = 0x193C;      // 0 = main, 1 = alternate
 
 	// The hero's 576-bit status bitfield. The game's own ChkStatus
-	// (FUN_00F1B838: ADD ECX,0x138) reads it from DAT_01a549a0+0x138, and the
+	// (FUN_00F1B9D8: ADD ECX,0x138) reads it from DAT_01a549a0+0x138, and the
 	// bit layout (from FUN_00D4ED8E) is: bit (id & 63) of 64-bit word (id >> 6),
 	// i.e. ((unsigned long long*)(hero+0x138))[id >> 6] >> (id & 63).
 	const size_t STATUS_BITFIELD_OFFSET = 0x138;
@@ -172,7 +172,7 @@ namespace GearSwap
 	const size_t HWND_OFFSET = 0x20;   // CWnd::m_hWnd (ground-truth visibility check)
 
 	// Secondary gate: the game's own ChkStatus mirror. Statuses live in
-	// the 576-bit bitfield at hero+0x138 (FUN_00F1B838 = C3DUser::ChkStatus:
+	// the 576-bit bitfield at hero+0x138 (FUN_00F1B9D8 = C3DUser::ChkStatus:
 	// ADD ECX,0x138; bit layout per FUN_00D4ED8E: bit (id&63) of word (id>>6)).
 	// Not the live pop trigger in this build (verified empirically) - kept as
 	// a configurable fallback for servers that DO set a status on the pop.
@@ -255,7 +255,7 @@ namespace GearSwap
 		g_lastResultTick = GetTickCount();
 	}
 
-	// The native swap: FUN_00FF2B8E(ECX = hero), no stack args. Sends the
+	// The native swap: FUN_00FF2D2E(ECX = hero), no stack args. Sends the
 	// right CMsgItem action (0x2D to ALT / 0x2C to MAIN) + equip refresh.
 	void SendNativeSwap(int hero)
 	{

@@ -15,19 +15,19 @@ extern bool IsXpIconVisible();
 extern void EnsureXpIconHookInstalled();
 
 // ============================================================================
-// XP Skills - Conquer.exe client 7950 (image base 0x400000)
+// XP Skills - Conquer.exe client 7952 (image base 0x400000)
 // ----------------------------------------------------------------------------
 // 1) "Allow XP skills while hunting" - removes the client block
 //    "[System] Unable to use XP skills when auto-fighting"
-//    (string key STR_CANNOT_USE_XP_WHEN_HANGUP @ 0x01744044).
-//    Three gates, all driven by IsHunting (FUN_01117c44):
-//      - FUN_01116f1a charges the 0-100 XP bar (client+0xaec) only when not
-//        hunting - JNZ @ 0x01116F39: 75 49 -> 90 90.
-//      - FUN_011b39c9 (use skill on target): if hunting AND the current skill
+//    (string key STR_CANNOT_USE_XP_WHEN_HANGUP @ 0x01744054).
+//    Three gates, all driven by IsHunting (FUN_01117de4):
+//      - FUN_011170ba charges the 0-100 XP bar (client+0xaec) only when not
+//        hunting - JNZ @ 0x011170D9: 75 49 -> 90 90.
+//      - FUN_011b3b69 (use skill on target): if hunting AND the current skill
 //        is XP-type ([0x00D96E6C(client)+0x30] == 1) it shows the string and
-//        bails - JNZ @ 0x011B3CE6: 75 4B -> EB 4B.
-//      - FUN_011b502c (use skill at position): identical block -
-//        JNZ @ 0x011B5658: 75 3C -> EB 3C.
+//        bails - JNZ @ 0x011B3E86: 75 4B -> EB 4B.
+//      - FUN_011b51cc (use skill at position): identical block -
+//        JNZ @ 0x011B57F8: 75 3C -> EB 3C.
 //
 // 2) "Auto XP skill when bar is full" (v3) - pops the character's XP skill(s)
 //    (Superman / Fatal Strike / any class, MULTIPLE per character) as the bar
@@ -36,7 +36,7 @@ extern void EnsureXpIconHookInstalled();
 //    Detection = enumerate the learned-magic list directly (no id guessing):
 //      - vector at client+0x1D88 (begin) / client+0x1D8C (end), 8-byte
 //        entries, entry[0] = learned-magic record ptr (from the client's own
-//        use-skill lookup FUN_011b39c9).
+//        use-skill lookup FUN_011b3b69).
 //      - record + 0x70 = its magic-info struct (0x00D96E6C = this + 0x70;
 //        the lookup compares info+0x5C against the id - CMP at 0x011B3D42).
 //      - info+0x5C = magic type id, info+0x30 = 1 for XP-type skills (same
@@ -45,7 +45,7 @@ extern void EnsureXpIconHookInstalled();
 //        fires; when present in the list it goes first.
 //
 //    Activation mirrors the icon handler / dispatcher exactly:
-//        FUN_011b39c9  __thiscall(ECX = client, magicId, selfUid, 0, 1)
+//        FUN_011b3b69  __thiscall(ECX = client, magicId, selfUid, 0, 1)
 //      selfUid = *(uint*)(client + 0x268).
 //
 //    Fire control: one pop per fill - after firing we wait for the icon to
@@ -62,7 +62,7 @@ extern void EnsureXpIconHookInstalled();
 //    (icon still up) retries every 5s.
 //
 //    The use-skill gates above are already patched by (1), and the
-//    FUN_011b39c9 gate reads the CURRENT skill's +0x30 (the attack skill
+//    FUN_011b3b69 gate reads the CURRENT skill's +0x30 (the attack skill
 //    while hunting), so the pop works during auto-hunt either way. Server
 //    unaffected: the 0x855 packet stays withheld.
 // ============================================================================
@@ -70,14 +70,14 @@ extern void EnsureXpIconHookInstalled();
 namespace XpSkill
 {
 	// --- Gate patch sites (feature 1) ---
-	const uintptr_t XP_FILL_GATE_ADDRESS      = 0x01116F39;  // FUN_01116f1a - JNZ skip-fill
-	const uintptr_t USE_TARGET_GATE_ADDRESS   = 0x011B3CE6;  // FUN_011b39c9 - JNZ skip-block
-	const uintptr_t USE_POSITION_GATE_ADDRESS = 0x011B5658;  // FUN_011b502c - JNZ skip-block
+	const uintptr_t XP_FILL_GATE_ADDRESS      = 0x011170D9;  // FUN_011170d9 - JNZ skip-fill
+	const uintptr_t USE_TARGET_GATE_ADDRESS   = 0x011B3E86;  // FUN_011b3b69 - JNZ skip-block
+	const uintptr_t USE_POSITION_GATE_ADDRESS = 0x011B57F8;  // FUN_011b51cc - JNZ skip-block
 
 	// --- Addresses (feature 2) ---
 	const uintptr_t CLIENT_GLOBAL_ADDRESS    = 0x01A549A0;  // DAT_01a549a0 - client object*
 	const uintptr_t MANAGER_GLOBAL_ADDRESS   = 0x01A55220;  // DAT_01a55220 - CAutoHangUpMgr*
-	const uintptr_t USE_SKILL_ON_TARGET_FUNC = 0x011B39C9;  // FUN_011b39c9
+	const uintptr_t USE_SKILL_ON_TARGET_FUNC = 0x011B3B69;  // FUN_011b3b69
 
 	const size_t CLIENT_XP_BAR_OFFSET          = 0xaec;   // 0-100, full at 100
 	const size_t CLIENT_SELF_UID_OFFSET        = 0x268;   // own role/UID
@@ -215,7 +215,7 @@ namespace XpSkill
 		return client != 0 && !IsBadReadPtr((const void*)(client + CLIENT_XP_BAR_OFFSET), 4);
 	}
 
-	// Mirrors the game's is-hunting check (FUN_01117c44) with plain reads.
+	// Mirrors the game's is-hunting check (FUN_01117de4) with plain reads.
 	bool IsHunting()
 	{
 		int client = GetClientObject();
@@ -330,7 +330,7 @@ namespace XpSkill
 	}
 
 	// Exactly what the XP icon handler / dispatcher run:
-	//   FUN_011b39c9 __thiscall(ECX = client, magicId, targetUid, 0, 1)
+	//   FUN_011b3b69 __thiscall(ECX = client, magicId, targetUid, 0, 1)
 	void FireMagic(int client, unsigned int magicId)
 	{
 		unsigned int selfUid = GetSelfUid(client);

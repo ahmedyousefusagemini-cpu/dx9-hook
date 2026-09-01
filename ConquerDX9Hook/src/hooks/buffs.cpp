@@ -13,25 +13,25 @@
 extern bool GetLastXpFire(unsigned int* outMagicId, unsigned int* outDurationSec, unsigned long* outTick);
 
 // ============================================================================
-// Character Buffs / Status overlay - Conquer.exe client 7937 (base 0x400000)
+// Character Buffs / Status overlay - Conquer.exe client 7952 (base 0x400000)
 // ----------------------------------------------------------------------------
 // The client calls character buffs "StatusIcons" and tracks them in a
 // 576-bit bitfield on the C3DUser (my character). All verified in Ghidra:
 //
-//   FUN_00eedd80 (C3DUser::AddStatus)  : ADD ECX,0x138; call bitfield setter
-//   FUN_00ef25c5 (C3DUser::ClearStatus): ADD ECX,0x138; call bitfield clear
-//   FUN_00f1b838 (C3DUser::ChkStatus)  : ADD ECX,0x138; call bitfield tester
-//   FUN_00eedda0 (AddStatus pair)      : same set on a second bitfield +0x1c8
+//   FUN_00eee7ed (C3DUser::AddStatus)  : ADD ECX,0x138; call bitfield setter
+//   FUN_00ef3031 (C3DUser::ClearStatus): ADD ECX,0x138; call bitfield clear
+//   FUN_00f1b9d8 (C3DUser::ChkStatus)  : ADD ECX,0x138; call bitfield tester
+//   FUN_00eee80c (AddStatus pair)      : same set on a second bitfield +0x1c8
 //   FUN_00a73b8e (core setter/tester)  : bit = (id%64) of 64-bit word
 //                                        bitfield + (id/64)*8
 //
 //   => active statuses = 72 bytes of bit flags at C3DUser+0x138 (576 bits).
 //
-// Remaining time: the server-driven apply chokepoint is FUN_00e49bd7
-//   (called by the MsgUserAttrib processor FUN_01041965 as
-//    e49ac2(mgr, statusId, displayType, seconds, flag, extra)).
+// Remaining time: the server-driven apply chokepoint is FUN_00e49d77
+//   (called by the MsgUserAttrib processor FUN_010410dc as
+//    e49d77(mgr, statusId, displayType, seconds, flag, extra)).
 //   It refreshes the icon timer (icon+0x2c = total seconds; icons are
-//   0xac-byte allocs from 0x01260c5e). We MinHook e49ac2 and capture
+//   0xac-byte allocs from 0x01260c5e). We MinHook e49d77 and capture
 //   endMs = now + seconds*1000 per status id.
 //
 // Buff names: the client's language table ini/Cn_Res.ini (GBK) holds the
@@ -54,7 +54,7 @@ namespace Buffs
 	// ---- configuration -----------------------------------------------------
 	bool g_buffsEnabled = true;
 
-	// ---- game constants (client 7950) --------------------------------------
+	// ---- game constants (client 7952) --------------------------------------
 	const uintptr_t CLIENT_GLOBAL_ADDRESS = 0x01A549A0;  // DAT_01a549a0 - client object*
 	const size_t    CLIENT_MY_ID_OFFSET   = 0x268;       // my entity id (variant A match)
 	const size_t    USER_ID_OFFSET        = 0x54;        // role id (variant A)
@@ -78,16 +78,16 @@ namespace Buffs
 	const size_t    ICON_DEF_PTR    = 0xa8;
 	const size_t    ICON_STRUCT_SIZE = 0xac;
 
-	// FUN_00e49bd7 - the server-driven status apply chokepoint:
+	// FUN_00e49d77 - the server-driven status apply chokepoint:
 	//   void __thiscall(mgr, statusId, displayType, seconds, flag, extra)
 	// Prologue sanity bytes: 6A 1C B8 ?? ?? ?? ?? E8 (EH prolog).
-	const uintptr_t STATUS_APPLY_FUNC = 0x00E49BD7;
+	const uintptr_t STATUS_APPLY_FUNC = 0x00E49D77;
 
 	// FUN_00a73b8e - the core 64-bit bitfield set/clear that every status
 	// funnels through (AddStatus/ClearStatus AND the XP-skill bit-only path).
 	// XP skills set their bit WITHOUT creating a status icon, so this hook is
 	// the only way the overlay sees their activation (the icon vectors + the
-	// FUN_00e49bd7 hook never fire for them).
+	// FUN_00e49d77 hook never fire for them).
 	const uintptr_t STATUS_BITSET_FUNC = 0x00A73B8E;
 
 	// ---- runtime state -----------------------------------------------------
@@ -110,7 +110,7 @@ namespace Buffs
 	// Per-status buff duration (seconds) registered from XP/magic data
 	// (magic-info +0x60). The core bit-set hook uses it to synthesize a
 	// countdown for icon-less statuses (XP skills) that the icon vectors and
-	// FUN_00e49bd7 never report.
+	// FUN_00e49d77 never report.
 	unsigned int g_statusDurationSec[STATUS_MAX_ID] = {};
 	bool g_bitHookInstalled = false;
 	int g_bitHookStatus = -1;     // last MH_STATUS of the bitset-hook installer (debug)
@@ -557,7 +557,7 @@ namespace Buffs
 
 	// ---- per-frame poll ----------------------------------------------------
 
-	// Mirrors the game's ChkStatus (FUN_00f1b838): bit (id%64) of the 64-bit
+	// Mirrors the game's ChkStatus (FUN_00f1b9d8): bit (id%64) of the 64-bit
 	// word at bitfield + (id/64)*8.
 	static bool TestStatusBit(const unsigned char* bits, int id)
 	{
@@ -596,7 +596,7 @@ namespace Buffs
 		GetMyUserObject();
 
 		// The game's own ChkStatus reads the status bitfield from
-		// DAT_01a549a0+0x138 - FUN_00F1B838 is C3DUser::ChkStatus (ADD
+		// DAT_01a549a0+0x138 - FUN_00F1B9D8 is C3DUser::ChkStatus (ADD
 		// ECX,0x138) and every call site passes FUN_0043E581() = DAT_01a549a0.
 		// The +0x98 chain tail is a DIFFERENT object on some builds, so the
 		// statuses must be mirrored from exactly the field the game checks.

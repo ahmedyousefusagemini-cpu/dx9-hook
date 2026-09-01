@@ -4,13 +4,13 @@
 #include "imgui.h"
 
 // ============================================================================
-// Auto Hunt (CAutoHangUpMgr) - Conquer.exe client 7937 (image base 0x400000)
+// Auto Hunt (CAutoHangUpMgr) - Conquer.exe client 7952 (image base 0x400000)
 // ----------------------------------------------------------------------------
 // The auto-hunt BEHAVIOR is client-driven: every frame the hunt brain
-// (FUN_00f556fc) reads local game state and issues walk/attack calls. It only
-// runs while  FUN_01117c44 == (client+0x5385 != 0 && mgr+0x11 != 0).
+// (FUN_00f5589c) reads local game state and issues walk/attack calls. It only
+// runs while  FUN_01117de4 == (client+0x5385 != 0 && mgr+0x11 != 0).
 //
-// The in-game toggle (FUN_00bd8025) only sends the 0x855 "CMsgHangUp" notify
+// The in-game toggle (FUN_00bd8035) only sends the 0x855 "CMsgHangUp" notify
 // packet - it never writes either client-side flag. Worse, telling the server
 // "I'm auto-hunting" makes it handle XP/loot differently (the user observed the
 // XP bar resetting to zero). Since the hunting is client-driven, this feature
@@ -27,8 +27,8 @@
 // brain's own helpers:
 //   - player pos : FUN_00debdb2 walks the client's +0x98 chain to the role,
 //                  (the obfuscated X/Y secure-pointer decode) /64.
-//   - walk to x,y: FUN_00f49497(mgr, x, y, radius)  (__thiscall, ECX=mgr).
-//   - monster?   : FUN_00f4412c(mgr, &pair)  (__thiscall) pair[0]==0 => clear.
+//   - walk to x,y: FUN_00f49637(mgr, x, y, radius)  (__thiscall, ECX=mgr).
+//   - monster?   : FUN_00f442cc(mgr, &pair)  (__thiscall) pair[0]==0 => clear.
 //   - home anchor: mgr+0x20/+0x24 - where the brain returns when there's no
 //                  target; we point it at the current waypoint.
 // ============================================================================
@@ -41,8 +41,8 @@ namespace AutoHunt
 	const uintptr_t MANAGER_ACCESSOR_FUNC  = 0x00482805;  // FUN_00482805 - get/lazy-create mgr
 
 	// Waypoint primitives (the brain's own helpers).
-	const uintptr_t WALK_FUNC        = 0x00F49497;  // FUN_00f49497(mgr, x, y, radius)
-	const uintptr_t FIND_TARGET_FUNC = 0x00F4412C;  // FUN_00f4412c(mgr, &outPair)
+	const uintptr_t WALK_FUNC        = 0x00F49637;  // FUN_00f49637(mgr, x, y, radius)
+	const uintptr_t FIND_TARGET_FUNC = 0x00F442CC;  // FUN_00f442cc(mgr, &outPair)
 
 	const size_t CLIENT_AUTO_BATTLE_BYTE_OFFSET = 0x5385;  // client auto-battle byte
 	const size_t CLIENT_HUNT_GATE_OFFSET        = 0x1da0;  // brain gate (client-side hunt flag)
@@ -57,7 +57,7 @@ namespace AutoHunt
 	const size_t MANAGER_TIMESTAMP_OFFSET    = 0x14;  // timeGetTime() of last toggle
 	const size_t MANAGER_ANCHOR_X_OFFSET     = 0x20;  // walk-back/home anchor X
 	const size_t MANAGER_ANCHOR_Y_OFFSET     = 0x24;  // walk-back/home anchor Y
-	const size_t MANAGER_TARGET_X_OFFSET     = 0x4;   // brain's attack-target X (FUN_00f556fc)
+	const size_t MANAGER_TARGET_X_OFFSET     = 0x4;   // brain's attack-target X (FUN_00f5589c)
 	const size_t MANAGER_STRUCT_SIZE         = 0x44;
 
 	// User intent - whether the hunt brain should be engaged.
@@ -121,7 +121,7 @@ namespace AutoHunt
 	}
 
 	// True while the brain is attacking a monster in range: the hunt brain
-	// (FUN_00f556fc) writes mgr+4 = attack-position X (a small tile value)
+	// (FUN_00f5589c) writes mgr+4 = attack-position X (a small tile value)
 	// when it decides to attack in place and zeroes it when the target is out
 	// of range (walk branch). During looting the brain instead writes mgr+4 =
 	// loot pointer (heap address) - excluded by the range check so looting
@@ -149,7 +149,7 @@ namespace AutoHunt
 		return client != 0 && !IsBadReadPtr((const void*)(client + CLIENT_AUTO_BATTLE_BYTE_OFFSET), 1);
 	}
 
-	// Mirrors the game's own is-hunting check (FUN_01117c44):
+	// Mirrors the game's own is-hunting check (FUN_01117de4):
 	// client+0x5385 != 0 && mgr+0x11 != 0.
 	bool IsHunting()
 	{

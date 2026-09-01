@@ -1,13 +1,13 @@
-# RE Offsets & Signatures — Conquer.exe (client 7950)
+# RE Offsets & Signatures — Conquer.exe (client 7952)
 
 Durable reverse-engineering reference for the auto-hunt / VIP / speed work. **Absolute
 addresses shift on every recompile** — the byte signatures (AOB) and the unique
 string/RTTI anchors below are what let you re-locate each value after a binary
 update.
 
-Image base for all addresses below: `0x00400000`. Build analyzed: client 7950.
+Image base for all addresses below: `0x00400000`. Build analyzed: client 7952.
 
-> **2026-08-27: client recompiled (new build, version 7950).** All addresses still
+> **2026-09-01: client recompiled (new build, version 7952).** All addresses still
 > used by the overlay were re-located and VERIFIED against the new binary via
 > Ghidra (AOB / xref / decompile). The old → new migration table is in the next
 > section. The older tables further down still list previous-build addresses
@@ -16,7 +16,63 @@ Image base for all addresses below: `0x00400000`. Build analyzed: client 7950.
 
 ---
 
-## 2026-08-27 (7950) — verified old → new address table
+## 2026-09-01 (7952) — verified old → new address table
+
+This recompile is mostly a **uniform +0x1A0 shift** for the code regions the
+overlay touches (0x00F4/0x00F1/0x00FF/0x00E4/0x00EE/0x00EF/0x010B/0x0111/0x011B/
+0x0101/0x00EA), while the globals, accessors, and the 0x00D9/0x00DE/0x00A7/
+0x00AE/0x016F/0x0174 regions did NOT move. All entries below re-verified in
+Ghidra on the 7952 build (AOB signature, xref or decompile).
+
+| Old (7950 build) | New (7952 build) | What |
+|---|---|---|
+| `0x01A549A0` | `0x01A549A0` | client / CMyHero object global (read by `FUN_0043e581`) — unchanged |
+| `0x01A55220` | `0x01A55220` | CAutoHangUpMgr singleton global (read by `FUN_00482805`) — unchanged |
+| `0x01A58FE0` | `0x01A58FE0` | CUserAttribMgr singleton global (read by `FUN_00832a5d`) — unchanged |
+| `0x01A5EE04` | `0x01A5EE04` | hunt brain tick global (read+write only in the brain) — unchanged |
+| `0x01A5A510` | `0x01A5A510` | CMyShellApp / gpDlgShell global (auto_login) — unchanged |
+| `0x0043E581` | `0x0043E581` | client accessor (unchanged) |
+| `0x00482805` | `0x00482805` | manager accessor (unchanged) |
+| `0x00832A5D` | `0x00832A5D` | CUserAttribMgr accessor (unchanged) |
+| `0x008A8FCA` | `0x008A8FCA` | `FUN_LoginButtonHandler` (auto_login) — unchanged |
+| `0x00BD8035` | `0x00BD8035` | auto-hunt toggle handler (PUSH 0; CALL mgr-accessor; MOV ECX,EAX; CALL) — unchanged |
+| `0x00F31335` | `0x00F314D5` | toggle impl `Toggle(mgr, flag)` (called by the toggle handler) |
+| `0x00F556FC` | `0x00F5589C` | per-frame hunt brain |
+| `0x00F49497` | `0x00F49637` | walk-to-coord (brain helper, called by the brain with radius 4) |
+| `0x00F4412C` | `0x00F442CC` | find-target (brain helper, writes `{id,dist}` pair) |
+| `0x01117C44` | `0x01117DE4` | is-hunting check (`client+0x5385 && mgr+0x11`) |
+| `0x01116C70` | `0x01116E10` | auto-battle byte getter (`8A 81 85 53 00 00 C3`) |
+| `0x00D3313A` | `0x00D3313A` | my-role list match (thunk `ADD ECX,0x78; JMP`) — unchanged |
+| `0x010B148B` | `0x010B162B` | action-interval virtual (vtable check) |
+| `0x00DE93F2` | `0x00DE93F2` | master interval computation — unchanged |
+| `0x016F9E84` | `0x016F9E84` | speed cap table (13 dwords `{100..200}`) — unchanged |
+| `0x01116F39` | `0x011170D9` | XP-fill gate (`75 49` → `90 90`; inside FUN_011170ba) |
+| `0x011B3CE6` | `0x011B3E86` | use-skill-on-target gate (`75 4B` → `EB 4B`; inside FUN_011b3b69) |
+| `0x011B5658` | `0x011B57F8` | use-skill-at-position gate (`75 3C` → `EB 3C`; inside FUN_011b51cc) |
+| `0x011B39C9` | `0x011B3B69` | use skill on target (callable: `__thiscall(client, magicId, selfUid, 0, 1)`) |
+| `0x011B502C` | `0x011B51CC` | use skill at position |
+| `0x01744044` | `0x01744054` | string `STR_CANNOT_USE_XP_WHEN_HANGUP` |
+| `0x00D96E6C` | `0x00D96E6C` | magic-info getter (this + 0x70) — unchanged |
+| `0x00E49BD7` | `0x00E49D77` | status apply chokepoint (`6A 1C B8` prologue, 6-arg thiscall, RET 0x14) |
+| `0x00A73B8E` | `0x00A73B8E` | status bitfield core set/clear (`__thiscall(bitfield, id, set)`) — unchanged |
+| `0x00EEE64D` | `0x00EEE7ED` | `C3DUser::AddStatus` (`ADD ECX,0x138`; calls `0x00a73b8e`) |
+| `0x00EF2E91` | `0x00EF3031` | `C3DUser::ClearStatus` |
+| `0x00F1B838` | `0x00F1B9D8` | `C3DUser::ChkStatus` (`ADD ECX,0x138; JMP bit-tester`) |
+| `0x00FF2B8E` | `0x00FF2D2E` | `CMyHero::SwapEquipMode` (reads `hero+0x193C`, sends 0x2C/0x2D + 0x198) |
+| `0x00AE6208` | `0x00AE6208` | XP-pop panel show/hide setter (`MOV [ECX+0xAC8],AL / RET 4`) — unchanged |
+| `0x0101C9D8` | `0x0101CB78` | login-packet sender `login(account, pwd, serverName, mode, extra)` (auto_login) |
+| `0x00EA1F50` | `0x00EA20F0` | `CEncryptData::SetString` (auto_login) |
+| `0x00EB31E3` | `0x00EB3383` | `CEncryptData::GetString` (auto_login debug) |
+
+Client-side field offsets unchanged and still verified: `client+0x5385`
+(auto-battle byte), `client+0xaec` (XP bar 0–100), `client+0x268` (my id),
+`mgr+0x11` (hunting flag), `mgr+0x04` (attack-target X / loot ptr),
+`hero+0x193C` (equip mode), `role+0x44/+0x48/+0xc0` (speed paths),
+`status bitfield at client+0x138` (576 bits).
+
+---
+
+## 7952 AOB signatures — the re-find map
 
 All entries below were re-verified in Ghidra on the 7950 build (AOB signature,
 xref check or decompile). This is a full recompile: per-region shifts are not
@@ -64,40 +120,42 @@ Client-side field offsets unchanged and still verified: `client+0x5385`
 
 ---
 
-## 7950 AOB signatures — the re-find map
+## 7952 AOB signatures — the re-find map
 
 Scan the NEW binary for these byte signatures (`??` = wildcard byte) to
-re-locate every anchor after the next recompile. Addresses are the 7950 build.
+re-locate every anchor after the next recompile. Addresses are the 7952 build
+(most code regions shifted +0x1A0 from 7950; the 0x00D9/0x00DE/0x00A7/0x00AE/
+0x016F/0x0174 regions and all globals/accessors did not move).
 Ordered by reliability (unique first); a "disambiguate" note explains how to
 pick the right match when a signature is not unique.
 
-| # | What | 7950 address | AOB signature (bytes) |
+| # | What | 7952 address | AOB signature (bytes) |
 |---|---|---|---|
-| 1 | auto-battle byte getter (`MOV AL,[ECX+0x5385]; RET`) | `0x01116C70` | `8A 81 85 53 00 00 C3` — **unique** |
+| 1 | auto-battle byte getter (`MOV AL,[ECX+0x5385]; RET`) | `0x01116E10` | `8A 81 85 53 00 00 C3` — **unique** |
 | 2 | magic-info getter (`LEA EAX,[ECX+0x70]; RET`) | `0x00D96E6C` | `8D 41 70 C3` — **unique** |
 | 3 | XP-pop panel show/hide setter (`MOV [ECX+0xAC8],AL; RET 4`) | `0x00AE6208` | `55 8B EC 8A 45 08 88 81 C8 0A 00 00 5D C2 04 00` — **unique** |
-| 4 | use-skill-at-position gate (JNZ over the XP-block; pushes `STR_CANNOT_USE_XP_WHEN_HANGUP` @ the address below) | `0x011B5658` | `75 3C 68 44 40 74 01` — **unique** (string address embedded) |
-| 5 | use-skill-on-target gate (same block) | `0x011B3CE6` | `75 4B 68 44 40 74 01` — **unique** (string address embedded) |
-| 6 | status apply chokepoint prologue + icon-vector init | `0x00E49BD7` | `6A 1C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 8D 45 08 8D 73 D0` |
+| 4 | use-skill-at-position gate (JNZ over the XP-block; pushes `STR_CANNOT_USE_XP_WHEN_HANGUP` @ the address below) | `0x011B57F8` | `75 3C 68 ?? ?? ?? ?? 8B` — string address changed to `0x01744054` |
+| 5 | use-skill-on-target gate (same block) | `0x011B3E86` | `75 4B 68 ?? ?? ?? ?? 8B` — string address changed to `0x01744054` |
+| 6 | status apply chokepoint prologue + icon-vector init | `0x00E49D77` | `6A 1C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 8D 45 08 8D 73 D0` |
 | 7 | status bitset core (BTS/AND 64-bit word, `CMP EDI,0x240`) | `0x00A73B8E` | `55 8B EC 53 56 57 8B 7D 08 8B F1 81 FF 40 02 00 00 73 48 33 C9 8B C7 83 E0 3F` |
-| 8 | `C3DUser::AddStatus` (`CMP [EBP+8],0x23F; PUSH 1`) | `0x00EEE64D` | `55 8B EC 81 7D 08 3F 02 00 00 77 10 6A 01 FF 75 08 83 C1 38` |
-| 9 | `C3DUser::ClearStatus` (same, `PUSH 0`) | `0x00EF2E91` | `55 8B EC 81 7D 08 3F 02 00 00 77 10 6A 00 FF 75 08 83 C1 38` |
-| 10 | `C3DUser::ChkStatus` (`ADD ECX,0x138; JMP bit-tester`) | `0x00F1B838` | `55 8B EC 81 7D 08 3F 02 00 00 77 0C 81 C1 38 01 00 00 5D E9` |
+| 8 | `C3DUser::AddStatus` (`CMP [EBP+8],0x23F; PUSH 1`) | `0x00EEE7ED` | `55 8B EC 81 7D 08 3F 02 00 00 77 10 6A 01 FF 75 08 83 C1 38` |
+| 9 | `C3DUser::ClearStatus` (same, `PUSH 0`) | `0x00EF3031` | `55 8B EC 81 7D 08 3F 02 00 00 77 10 6A 00 FF 75 08 83 C1 38` |
+| 10 | `C3DUser::ChkStatus` (`ADD ECX,0x138; JMP bit-tester`) | `0x00F1B9D8` | `55 8B EC 81 7D 08 3F 02 00 00 77 0C 81 C1 38 01 00 00 5D E9` |
 | 11 | toggle handler (auto-hunt notify) | `0x00BD8035` | `6A 00 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? C3` — matches many; disambiguate: the CALL target reads the manager global (see #14) |
-| 12 | toggle impl `Toggle(mgr, flag)` (`PUSH 0x414` prologue) | `0x00F31335` | `68 14 04 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F1 80 7D 08 00 75 08` |
-| 13 | per-frame hunt brain | `0x00F556FC` | `6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 ?? E8` — the 3rd call is the is-hunting check (see #16); disambiguate from the dozens of `6A 2C B8` prologues by it |
+| 12 | toggle impl `Toggle(mgr, flag)` (`PUSH 0x414` prologue) | `0x00F314D5` | `68 14 04 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F1 80 7D 08 00 75 08` |
+| 13 | per-frame hunt brain | `0x00F5589C` | `6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 ?? E8` — the 3rd call is the is-hunting check (see #16); disambiguate from the dozens of `6A 2C B8` prologues by it |
 | 14 | client accessor (reads `DAT_01a549a0`) | `0x0043E581` | `83 3D ?? ?? ?? ?? 00 75 05 E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? C3` — **hundreds of matches**; disambiguate: only the CLIENT accessor's 2nd dword (after `83 3D`) equals the global that `auto_hunt`/`xp_skill`/`buffs` read at runtime; it is the one at `FUN_0043e581` in this build |
 | 15 | manager accessor (reads `DAT_01a55220`) | `0x00482805` | `83 3D ?? ?? ?? ?? 00 75 05 E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? C3` — same shape as #14; disambiguate by the global dword = `0x01A55220` |
-| 16 | is-hunting check (`client+0x5385 && mgr+0x11`) | `0x01117C44` | `E8 ?? ?? ?? ?? 84 C0 74 13 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 03 B0 01 C3 32 C0 C3` |
-| 17 | XP-fill gate (`JNZ` skipping the XP-bar charge) | `0x01116F39` | `75 49 68 96 00 00 00 8B` — unique: JNZ + `PUSH 0x96` (status 150 check right after the hunting gate) |
-| 18 | use skill on target (`PUSH 0x18C` prologue) | `0x011B39C9` | `68 8C 01 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F9 89 7D AC` |
-| 19 | action-interval virtual (`CMP [ESI+0x8F8],0`) | `0x010B148B` | `55 8B EC 56 8B F1 83 BE F8 08 00 00 00 74 1C FF 75 08 E8 ?? ?? ?? ?? 85 C0` |
+| 16 | is-hunting check (`client+0x5385 && mgr+0x11`) | `0x01117DE4` | `E8 ?? ?? ?? ?? 84 C0 74 13 E8 ?? ?? ?? ?? 8B C8 E8 ?? ?? ?? ?? 84 C0 74 03 B0 01 C3 32 C0 C3` |
+| 17 | XP-fill gate (`JNZ` skipping the XP-bar charge) | `0x011170D9` | `75 49 68 96 00 00 00 8B` — unique: JNZ + `PUSH 0x96` (status 150 check right after the hunting gate) |
+| 18 | use skill on target (`PUSH 0x18C` prologue) | `0x011B3B69` | `68 8C 01 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F9 89 7D AC` |
+| 19 | action-interval virtual (`CMP [ESI+0x8F8],0`) | `0x010B162B` | `55 8B EC 56 8B F1 83 BE F8 08 00 00 00 74 1C FF 75 08 E8 ?? ?? ?? ?? 85 C0` |
 | 20 | master interval computation (`MOV ECX,[EBX+0x770]`) | `0x00DE93F2` | `6A 18 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 8B 8B 70 07 00 00 33 FF 85 C9` — the `8B 8B 70 07 00 00` anchor; many `8B 8B 70 07` hits — disambiguate: entry prologue `6A 18` + this is the one with the `+0x44/+0x48` final divisor (decompile) |
-| 21 | walk-to-coord (brain helper) | `0x00F49497` | `68 3C 01 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 68 0F 02 00 00 E8 ?? ?? ?? ?? 8B C8` — verify: called by the brain (#13) with `(x, y, 4)` |
-| 22 | find-target (brain helper, writes `{id,dist}`) | `0x00F4412C` | `6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 33 C9 89 4D F0` — verify: called by the brain (#13) with `&outPair` |
+| 21 | walk-to-coord (brain helper) | `0x00F49637` | `68 3C 01 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 68 0F 02 00 00 E8 ?? ?? ?? ?? 8B C8` — verify: called by the brain (#13) with `(x, y, 4)` |
+| 22 | find-target (brain helper, writes `{id,dist}`) | `0x00F442CC` | `6A 2C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9 89 5D E8 33 C9 89 4D F0` — verify: called by the brain (#13) with `&outPair` |
 | 23 | my-role list match (thunk: `ADD ECX,0x78; JMP`) | `0x00D3313A` | `55 8B EC 83 C1 78 5D E9 ?? ?? ?? ??` — unique |
-| 24 | `CMyHero::SwapEquipMode` (`PUSH 0x94C`; reads `[ESI+0x193C]`) | `0x00FF2B8E` | `68 4C 09 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F1 8B 86 3C 19 00 00` |
-| 25 | `STR_CANNOT_USE_XP_WHEN_HANGUP` string | `0x01744044` | string search; its code xrefs land in #4/#5's functions |
+| 24 | `CMyHero::SwapEquipMode` (`PUSH 0x94C`; reads `[ESI+0x193C]`) | `0x00FF2D2E` | `68 4C 09 00 00 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B F1 8B 86 3C 19 00 00` |
+| 25 | `STR_CANNOT_USE_XP_WHEN_HANGUP` string | `0x01744054` | string search; its code xrefs land in #4/#5's functions |
 | 26 | speed cap table (13 dwords `{100..200}`) | `0x016F9E84` | data scan: `64 00 00 00 69 00 00 00 6E 00 00 00 73 00 00 00 78 00 00 00 82 00 00 00 8C 00 00 00 96 00 00 00 A5 00 00 00 B9 00 00 00 BE 00 00 00 C3 00 00 00 C8 00 00 00` — **unique** |
 | 27 | brain tick global (`DAT_01a5ee04`) | `0x01A5EE04` | no AOB (data global); re-find from the hunt brain (#13): the `MOV EDX,[<g>]; ADD EDX,0x3E8; CMP EAX,EDX` sequence right after its is-hunting call |
 | 28 | client / hero global (`DAT_01a549a0`) | `0x01A549A0` | no AOB; re-find from #14 (client accessor `A1` dword) |

@@ -8,6 +8,50 @@ Ghidra project: `private_client` (Conquer.exe + GameData.dll + Role3D.dll import
 Access path: Ghidra MCP bridge via ngrok tunnel (ghidra-mcp, bridge on 8081, plugin on 8089).
 
 
+> **2026-09-01: client recompiled (version 7952).** All hook modules
+> re-pointed at the new build via Ghidra MCP. Full migration table in OFFSETS.md.
+> This recompile was mostly a uniform **+0x1A0 shift**: the code regions
+> 0x00F4/0x00F1/0x00FF/0x00E4/0x00EE/0x00EF/0x010B/0x0111/0x011B/0x0101/0x00EA
+> all moved forward by 0x1A0, while the globals, accessors, and the
+> 0x00D9/0x00DE/0x00A7/0x00AE/0x016F/0x0174 regions stayed unchanged.
+>
+> Key AOB signatures that still matched byte-for-byte:
+> - `8A 81 85 53 00 00 C3` (auto-battle getter) → 0x01116E10
+> - `8D 41 70 C3` (magic getter) → 0x00D96E6C — unchanged
+> - `55 8B EC 8A 45 08 88 81 C8 0A 00 00 5D C2 04 00` (XP panel) → 0x00AE6208 — unchanged
+> - `6A 18 B8 ... 8B 8B 70 07 00 00` (master interval) → 0x00DE93F2 — unchanged
+> - Cap table data pattern → 0x016F9E84 — unchanged
+> - `55 8B EC 53 56 57 8B 7D 08 ... 83 E0 3F` (bitset core) → 0x00A73B8E — unchanged
+> - `55 8B EC 81 7D 08 3F 02 00 00 77 0C 81 C1 38 01 00 00 5D E9` (ChkStatus) → 0x00F1B9D8
+> - `68 4C 09 00 00 B8 ... 8B 86 3C 19 00 00` (swap) → 0x00FF2D2E
+> - `68 8C 01 00 00 B8 ... 8B F9 89 7D AC` (use skill on target) → 0x011B3B69
+> - `75 49 68 96 00 00 00 8B` (XP-fill gate) → 0x011170D9
+> - `68 3C 01 00 00 B8 ... 68 0F 02 00 00` (walk) → 0x00F49637
+> - `6A 2C B8 ... 89 5D E8 33 C9 89 4D F0` (find-target) → 0x00F442CC
+> - `6A 00 E8 ... 8B C8 E8 ... C3` (toggle handler) → 0x00BD8035 — unchanged
+> - `55 8B EC 56 8B F1 83 BE F8 08 00 00 00 74 1C` (interval virtual) → 0x010B162B
+>
+> Signatures that failed because embedded addresses moved:
+> - `75 3C 68 44 40 74 01` (use-skill-at-position gate) — string address `0x01744044` → `0x01744054`
+> - `75 4B 68 44 40 74 01` (use-skill-on-target gate) — same reason
+> - AddStatus/ClearStatus AOBs — prologue re-analyzed; found via `81 C1 38 01 00 00` scan instead
+>
+> Auto-login: all three functions moved +0x1A0 (login send 0x0101CB78,
+> SetString 0x00EA20F0, GetString 0x00EB3383). Button handler (0x008A8FCA)
+> and shell global (0x01A5A510) unchanged.
+>
+> Status apply: prologue `6A 1C B8` was found by `6A 1C B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B D9`
+> scan; address 0x00E49D77 confirmed as the 6-arg thiscall apply via decompile
+> (statusId comparison, icon-vector init, caller FUN_010410dc).
+>
+> Gate polarities (JNZ) are unchanged from 7950 — all three gates are still
+> `JNZ` that patch to unconditional JMP / NOP NOP.
+>
+> Field offsets confirmed unchanged: +0x5385, +0xaec, +0x268, +0x138,
+> mgr+0x11, role+0x44/+0x48/+0xc0, hero+0x193C.
+
+---
+
 > **2026-08-30: Fill Password — transform key is the per-position table
 > `[B8 98 45 B8 91 45 5D DF]` (verified live). The CEncryptData key at
 > +0..0xFF is NOT the per-char transform table — reading it produced wrong

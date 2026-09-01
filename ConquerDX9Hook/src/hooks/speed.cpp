@@ -15,10 +15,10 @@ extern bool IsAutoHuntMonsterNear();
 extern void ClearAutoHuntTarget();
 
 // ============================================================================
-// Speed Control (CRole action speed fields) - Conquer.exe client 7937 (0x400000)
+// Speed Control (CRole action speed fields) - Conquer.exe client 7952 (0x400000)
 // ----------------------------------------------------------------------------
 // IMPORTANT LIVE FINDING (2026-08-10): in the running game, the per-role
-// action-interval virtual FUN_010b148b is ALREADY hooked - its first 5 bytes
+// action-interval virtual FUN_010b162b is ALREADY hooked - its first 5 bytes
 // are overwritten with an E9 (JMP to a dynamically allocated trampoline
 // page). Something (server anti-cheat / launcher patch) watches the classic
 // speed-hack spot, so this module uses NO code hooks at all and drives speed
@@ -34,10 +34,10 @@ extern void ClearAutoHuntTarget();
 // against the role's id fields (two placements seen in the wild - this server
 // leaves client+0x26c = 0 and uses client+0x268), then VALIDATES the
 // candidate's class: its vtable must contain one of the interval functions
-// (FUN_010b148b / FUN_00de93f2 - only role classes have them), so a random
+// (FUN_010b162b / FUN_00de93f2 - only role classes have them), so a random
 // object carrying the same id can't win the scan.
 //
-// Looting speed: the hunt brain (FUN_00f556fc) only ticks when
+// Looting speed: the hunt brain (FUN_00f5589c) only ticks when
 // timeGetTime() >= DAT_01a5ee04 + 1000. Only the brain reads or writes that
 // global (verified by xrefs), so forcing it to 0 lets the brain issue
 // find/attack/loot orders early. Resetting it EVERY frame made loot orders
@@ -69,13 +69,13 @@ extern void ClearAutoHuntTarget();
 // Cancel Attack Animation v2 (2026-08-23, Ghidra-verified): v1 (boost + 50 ms
 // loot ticks) made the SERVER see ~20 attacks/sec and kicked the client.
 // Full static map of the attack chain:
-//   hunt brain FUN_00f556fc (1 s tick gate DAT_01a5ee04)
+//   hunt brain FUN_00f5589c (1 s tick gate DAT_01a5ee04)
 //     -> attack order FUN_0112112c
 //     -> pre-send validator FUN_010f90c2: target alive/in-range AND the
 //        vtable+0xcc "action in progress" virtual clear
 //     -> CMsgAction create FUN_00f36ffd, send FUN_00f67675 -> FUN_010cf416
 //   action length: interval virtual at vtable+0x80 (CRole vtable @
-//   0x01730794; FUN_010b148b -> master computation FUN_00de93f2, whose
+//   0x01730794; FUN_010b162b -> master computation FUN_00de93f2, whose
 //   final uncapped step is exactly the role+0x44/+0x48 divisor).
 // v2 splits the two clocks: the +0x44 boost still collapses the LOCAL
 // interval (so the busy gate never blocks an order) while a PACER owns the
@@ -94,7 +94,7 @@ namespace Speed
 {
 	const uintptr_t CLIENT_GLOBAL_ADDRESS  = 0x01A549A0;  // DAT_01a549a0 - client object*
 	const uintptr_t HUNT_BRAIN_TICK_GLOBAL = 0x01A5EE04;  // DAT_01a5ee04 - last brain tick (timeGetTime)
-	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010B148B;  // FUN_010b148b - interval virtual (vtable check)
+	const uintptr_t ACTION_INTERVAL_FUNC   = 0x010B162B;  // FUN_010b162b - interval virtual (vtable check)
 	const uintptr_t ACTION_INTERVAL_CORE   = 0x00DE93F2;  // FUN_00de93f2 - master computation (vtable check)
 	const uintptr_t SPEED_CAP_TABLE        = 0x016F9E84;  // per-state nSpeedPercent caps (13 dwords)
 
@@ -758,7 +758,7 @@ void RenderSpeedInterface()
 		ImGui::Text("Speed caps raised: %s", Speed::g_capsRaised ? "yes" : "no");
 		char bytesText[64];
 		Speed::GetTargetBytesHex(bytesText, 16);
-		ImGui::TextDisabled("Interval fn @0x010B148B: %s", bytesText);
+		ImGui::TextDisabled("Interval fn @0x010B162B: %s", bytesText);
 		ImGui::TreePop();
 	}
 }

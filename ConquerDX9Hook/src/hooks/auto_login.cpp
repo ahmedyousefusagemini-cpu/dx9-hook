@@ -3,29 +3,29 @@
 #include "MinHook.h"
 
 // ============================================================================
-// Auto Login (MFC CDlgLogin) - Conquer.exe client 7950 (image base 0x400000)
+// Auto Login (MFC CDlgLogin) - Conquer.exe client 7952 (image base 0x400000)
 // ----------------------------------------------------------------------------
 // The login screen is an MFC dialog (CDlgLogin, source myshell/dlglogin.cpp,
 // RTTI string "CDlgLogin" @ 0x016036A0). It is a WS_CHILD dialog of the game's
 // root window hosting the fgui login UI (`login_xzk`).
 //
-// RE-verified click chain (Ghidra, 7950 build):
+// RE-verified click chain (Ghidra, 7952 build):
 //   Login button click
 //     -> FUN_LoginButtonHandler @ 0x008A8FCA (__fastcall(CDlgLogin*))
 //          reads account (dlg+0x13B88), password (dlg+0x13BD0), server fields
-//     -> FUN_0101C9D8 @ 0x0101C9D8 (cdecl) - sends the login packet:
+//     -> FUN_0101CB78 @ 0x0101CB78 (cdecl) - sends the login packet:
 //          login(account, password, serverName, mode, extra)
 //          mode 0 = CMsgAccountEx, 1 = QR, 2 = poker
 //
 // ACCOUNT FILLING: reads accountinfo.ini (next to the exe) â€” [AccountN]
 // sections, first Use=1 wins, User= (plain) â€” and fills the account edit via
-// WM_SETTEXT + MinHook on FUN_0101C9D8 that replaces the account ptr.
+// WM_SETTEXT + MinHook on FUN_0101CB78 that replaces the account ptr.
 // PASSWORD FILLING: same ini section, Pass= (plain). Separate "Fill Password"
 // button writes the plain Pass= into the CEncryptData at dlg+0x13BD0, XOR'd
 // with the fixed per-position table [B8 98 45 B8 91 45 5D DF][i&7] (verified
 // against manual typing: "3643748z" -> 8B AE 71 8B A6 71 65 A5, stable across
 // restarts). The old key table at *(encData+0x208)+0x30C is session-RANDOM and
-// NOT the transform key. The hook on FUN_0101C9D8 acts as a last-resort.
+// NOT the transform key. The hook on FUN_0101CB78 acts as a last-resort.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
@@ -39,11 +39,11 @@ namespace AutoLogin {
 	extern HWND g_dlgMemTokenHwnd;
 }
 
-// MinHook target: FUN_0101C9D8 (cdecl) - the login packet sender.
+// MinHook target: FUN_0101CB78 (cdecl) - the login packet sender.
 // Replaces the account argument with the ini account when the game passes
 // an empty (or matching) one, so the server always receives the right name.
 // Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf at +0x108,
-// see FUN_00ea1f50). The hook acts as a last-resort when the game's CEncryptData
+// see FUN_00ea20f0). The hook acts as a last-resort when the game's CEncryptData
 // is empty (len<=0) — it writes the fixed per-position XOR'd form the server
 // expects: out[i] = plain[i] ^ kPwdXor[i & 7] where kPwdXor = [B8 98 45 B8 91
 // 45 5D DF] (verified against manual typing, stable across restarts).
@@ -51,11 +51,11 @@ typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* 
 static LoginSendFunc g_originalLoginSend = NULL;
 static bool g_loginHookInstalled = false;
 
-const uintptr_t LOGIN_SEND_ADDR = 0x0101C9D8;
+const uintptr_t LOGIN_SEND_ADDR = 0x0101CB78;
 
 // FUN_LoginButtonHandler @ 0x008A8FCA - __fastcall(CDlgLogin*). The MFC login
 // button handler: reads account (dlg+0x13B88) and password (dlg+0x13BD0) from
-// memory and sends the packet via FUN_0101C9D8 (which HookedLoginSend hooks,
+// memory and sends the packet via FUN_0101CB78 (which HookedLoginSend hooks,
 // guaranteeing the ini account/password reach the server). Calling it directly
 // bypasses the fgui Login button's client-side field gate (the Lua handler that
 // shows "Wrong password." locally when the visible edit is empty, before any
@@ -64,14 +64,14 @@ typedef void (__fastcall* LoginBtnHandlerFunc)(void* dlg);
 static const uintptr_t LOGIN_BTN_HANDLER_ADDR = 0x008A8FCA;
 
 // Game's CEncryptData::SetString â€” encrypts plain into the struct at ECX.
-// Verified: FUN_00ea1f50 @ 0x00EA1F50 is void __thiscall(void* this, const char* plain)
+// Verified: FUN_00ea20f0 @ 0x00EA20F0 is void __thiscall(void* this, const char* plain)
 // where this+0x104 = len, this+0x108 = enc buf[0x100] (encryptdata.cpp:0x1dc).
 // NOTE: the correct base for the login's password is dlg+0x13BD0 directly
 // (len at +0x104), NOT the +0x30C thunk used by the UI edit-sync path
 // (FUN_00607CD5). Using the wrong base produces a wrong encrypted blob
 // and the server replies "invalid username or password".
 typedef void (__thiscall* SetEncStringFunc)(void* encData, const char* plain);
-static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA1F50;
+static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
@@ -793,7 +793,7 @@ namespace AutoLogin
 
 	// Fills the account edit (WM_SETTEXT for display) and logs the status.
 	// The actual login packet's account is guaranteed by the MinHook on
-	// FUN_0101C9D8 â€” no member write needed. Never overwrites a field that
+	// FUN_0101CB78 â€” no member write needed. Never overwrites a field that
 	// already holds a different account.
 	static int FillAccountEdit(HWND dialog)
 	{
@@ -825,7 +825,7 @@ namespace AutoLogin
 			}
 		}
 
-		// Install the MinHook on FUN_0101C9D8 if not done yet.
+		// Install the MinHook on FUN_0101CB78 if not done yet.
 		InstallLoginHook();
 
 		// Move focus to the password field (user can type there).
@@ -836,9 +836,9 @@ namespace AutoLogin
 
 	// Fills the password by writing the plain Pass= value directly into the
 	// login CEncryptData (dlg+0x13BD0, poker slot dlg+0x13980) using the
-	// game's own SetString (FUN_00ea1f50) — no SendInput, no mouse, no focus
+	// game's own SetString (FUN_00ea20f0) — no SendInput, no mouse, no focus
 	// dance. The login button handler reads exactly these slots in memory
-	// (verified: LEA ECX,[EDI+0x13BD0] → FUN_0101C9D8), and SetString's XOR
+	// (verified: LEA ECX,[EDI+0x13BD0] → FUN_0101CB78), and SetString's XOR
 	// transform is self-inverse, so the server's GetString recovers the plain
 	// password. Also installs the login hook so the packet is guaranteed.
 	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
@@ -1459,12 +1459,12 @@ void RenderAutoLoginInterface()
 							ImGui::Text("CanonKey: (unreadable)");
 						}
 					} __except(EXCEPTION_EXECUTE_HANDLER) {}
-					// Decrypted preview via 00EB31E3 (CEncryptData::GetString)
+					// Decrypted preview via 00EB3383 (CEncryptData::GetString)
 					__try {
 						typedef void (__thiscall *GetEncStrFn)(void*, void*);
 						char out1[32] = {0}, out2[32] = {0};
-						((GetEncStrFn)0x00EB31E3)(dlgDbg + 0x13BD0, out1);
-						((GetEncStrFn)0x00EB31E3)(dlgDbg + 0x13980, out2);
+						((GetEncStrFn)0x00EB3383)(dlgDbg + 0x13BD0, out1);
+						((GetEncStrFn)0x00EB3383)(dlgDbg + 0x13980, out2);
 						// std::string layout: if *(int*)(out+0x14) <=15, str at out, else *(char**)out
 						int sz1 = *(int*)(out1 + 0x14);
 						char* ps1 = (sz1 <= 15) ? out1 : *(char**)out1;
@@ -1480,7 +1480,7 @@ void RenderAutoLoginInterface()
 								if (editCEnc && !IsBadReadPtr(editCEnc, 0x208)) {
 									int editLen = *(int*)((char*)editCEnc + 0x104);
 									char editOut[32] = {0};
-									((GetEncStrFn)0x00EB31E3)(editCEnc, editOut);
+									((GetEncStrFn)0x00EB3383)(editCEnc, editOut);
 									int esz = *(int*)(editOut + 0x14);
 									char* eps = (esz <= 15) ? editOut : *(char**)editOut;
 									if (eps && !IsBadReadPtr(eps, 1)) {
