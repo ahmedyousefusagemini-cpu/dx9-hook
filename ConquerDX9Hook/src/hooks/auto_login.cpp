@@ -793,7 +793,10 @@ namespace AutoLogin
 				char* dlg = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlg, 0x40)) {
 					HWND hLogin = *(HWND*)(dlg + 0x20);
-					if (hwnd == hLogin) return true;
+					// Must be visible too — a hidden/stale HWND while in game
+					// must not be treated as a usable login screen.
+					if (hwnd == hLogin && IsWindowVisible(hwnd))
+						return true;
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -870,7 +873,10 @@ namespace AutoLogin
 				char* dlg = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlg, 0x40)) {
 					HWND hDlg = *(HWND*)(dlg + 0x20);
-					if (hDlg && IsWindow(hDlg)) {
+					// Must be a real, VISIBLE window — a hidden/stale CDlgLogin
+					// HWND survives into the game and must not be treated as a
+					// login screen.
+					if (hDlg && IsWindow(hDlg) && IsWindowVisible(hDlg)) {
 						// Verify it looks like the login (has at least 2 edits, not the Tips with 4/153)
 						ChildScan local = {0};
 						local.dialog = hDlg;
@@ -1545,7 +1551,7 @@ namespace AutoLogin
 			if (IsBadReadPtr(dlg, 0x40))
 				return false;
 			HWND hDlg = *(HWND*)(dlg + 0x20);
-			if (!hDlg || !IsWindow(hDlg))
+			if (!hDlg || !IsWindow(hDlg) || !IsWindowVisible(hDlg))
 				return false;
 			((LoginBtnHandlerFunc)LOGIN_BTN_HANDLER_ADDR)(dlg);
 			return true;
@@ -1579,6 +1585,16 @@ namespace AutoLogin
 			return;
 		g_clickInProgress = true;
 
+		// NEVER attempt a login unless a VISIBLE login screen is present.
+		// (In-game the CDlgLogin object keeps a stale hidden HWND — clicking
+		// it would send a login packet mid-game.)
+		HWND dialog = FindLoginDialog();
+		if (!dialog || !IsDialogUsable(dialog))
+		{
+			g_clickInProgress = false;
+			return;
+		}
+
 		InstallLoginTraceHooks();
 		LogLogin("CLICK_LOGIN", "method=%d acct=\"%s\" pwd=\"%s\"",
 			g_clickMethod, g_activeAccount, g_activePassword[0] ? "****" : "");
@@ -1598,7 +1614,6 @@ namespace AutoLogin
 		// actually reads (debug: EditCEnc len=8 in successful manual login).
 		WritePasswordBlob();
 
-		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
 		bool ok = false;
