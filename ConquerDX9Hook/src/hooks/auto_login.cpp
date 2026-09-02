@@ -195,7 +195,6 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			DumpEncSlot("HOOK_ENTRY", "pwdSlot", password);
 		DumpSessionKeyState("HOOK_ENTRY");
 		LogCredentialState("HOOK_ENTRY");
-	}
 	// WritePasswordBlob (called right before the click) already stored the
 	// canonical-encoded X in all slots. No mutation needed here — the packet
 	// builder reads the send slot as-is.
@@ -1003,54 +1002,68 @@ namespace AutoLogin
 		return result;
 	}
 
-	// Write the password blob into all three slots the game reads:
-	// 0x13BD0 (MFC normal path), 0x13980 (poker/reconnect), and the fgui
-	// edit's CEncryptData at *(dlg+0x13DD8)+0x30C (the EnterGame button reads
-	// from HERE — debug: successful login has EditCEnc len=8, failed has
-	// EditCEnc len=0).
+	// Write the password blob into all three slots the game reads.
+	// The game's manual-typing flow:
+	//   1. fgui framework computes X[i] = raw[i] ^ canonTable[raw[i]] (FIXED
+	//      256-byte canonical table indexed by the CHARACTER VALUE — verified:
+	//      '3'→0x37, '6'→0x92, '4'→0xF9, '7'→0xF0, '8'→0xF7, 'z'→0xED produce
+	//      X="04 A4 CD 04 C7 CD CF 97" for "3643748z", constant every session).
+	//   2. On killfocus: GetString(editCEnc+0x30C) → X, then SetString(0x13BD0, X)
+	//      and SetString(editCEnc+0x30C, X) for display.
+	//   3. The packet builder sends X (via GetString(0x13BD0)).
+	//      The server compares X against canonTable[stored_password].
 	//
-	// Canonical-encoding flow (verified from manual-login trace):
-	//   The game does NOT SetString the raw password into 0x13BD0. The fgui
-	//   edit's BASE CEncryptData at *(dlg+0x13DD8)+0 has the FIXED canonical
-	//   key table. SetString(edit+0, raw) produces X — the value that stays
-	//   constant across sessions for the same password (manual trace dec is
-	//   "04 A4 CD 04 C7 CD CF 97" for every manual login). Then the game
-	//   SetStrings X into 0x13BD0/0x13980 and the display copy at +0x30C.
-	//   The server validates X (not the raw password), so we must replicate:
-	//   SetString(edit+0, raw) → GetString(edit+0)=X → SetString(slots, X).
+	// The canonical table is the deterministic LCG-derived key table. In this
+	// build the CEncryptData at dlg+0x13980 keeps that fixed key table (observed
+	// identical 63 9D CC 17 14 F3 EB 2E... in EVERY session, while 0x13BD0 and
+	// the fgui edit's are session-random). So we read the canonical table from
+	// 0x13980 at runtime, compute X, and SetString X into the slots.
 	static void WritePasswordBlob()
 	{
 		typedef void (__thiscall* SetEncStrFn)(void*, const char*);
-		typedef void (__thiscall* EncGetStringFunc)(void* encData, char* out);
 		__try {
 			void* shell = *(void**)0x01A5A510;
 			if (!shell || !g_activePassword[0]) return;
 			char* dlg = (char*)shell + 0x39B948;
-			void* editCEnc = *(void**)(dlg + 0x13DD8);
-			if (!editCEnc || IsBadReadPtr(editCEnc, 0x208)) return;
 
-			// Step 1: canonical-encrypt the raw password → X via edit+0 base.
-			DWORD op = 0, tp = 0;
-			if (!VirtualProtect(editCEnc, 0x208, PAGE_EXECUTE_READWRITE, &op))
-				return;
-			((SetEncStrFn)0x00EA20F0)(editCEnc, g_activePassword);
-			VirtualProtect(editCEnc, 0x208, op, &tp);
+			// Read the canonical table from the deterministic CEncryptData at
+			// 0x13980 (key table is FIXED per build: 63 9D CC 17 14 F3 EB 2E...).
+			const unsigned char* canonTable = (const unsigned char*)(dlg + 0x13980);
+			if (IsBadReadPtr(canonTable, 256)) return;
 
-			// Step 2: GetString(edit+0) → X
-			char X[256] = "";
-			{
-				char tmp[256];
-				((EncGetStringFunc)0x00EB3383)(editCEnc, tmp);
-				int cap = *(int*)(tmp + 0x14);
-				char* ps = (cap <= 15) ? tmp : *(char**)tmp;
-				int sz = *(int*)(tmp + 0x10);
-				if (sz > 0 && sz < 200 && ps && !IsBadReadPtr(ps, sz)) {
-					memcpy(X, ps, sz); X[sz] = 0;
-				}
+			// Compute X[i] = raw[i] ^ canonTable[raw[i]]
+			const char* raw = g_activePassword;
+			int rawLen = (int)strlen(raw);
+			if (rawLen <= 0 || rawLen > 0x100) return;
+			char X[256];
+			for (int i = 0; i < rawLen; i++) {
+				unsigned char c = (unsigned char)raw[i];
+				X[i] = (char)(c ^ canonTable[c]);
 			}
-			if (X[0] == 0) return;  // canonical encrypt failed
+			X[rawLen] = 0;
 
-			// Step 3: SetString X into the MFC slots.
+			// Log the computed X + canon table for verification vs manual login.
+			{
+				char hexX[200] = "";
+				for (int i = 0; i < rawLen; i++) {
+					char t[4];
+					_snprintf_s(t, sizeof(t), "%02X ", (unsigned char)X[i]);
+					lstrcatA(hexX, t);
+				}
+				char hexT[200] = "";
+				for (int i = 0; i < 32; i++) {
+					char t[4];
+					_snprintf_s(t, sizeof(t), "%02X ", canonTable[i]);
+					lstrcatA(hexT, t);
+				}
+				LogLogin("FILL_PASSWORD", "canonTable[0..31]=%s X=%s (rawLen=%d)",
+					hexT, hexX, rawLen);
+			}
+
+			// SetString X into the send slot (0x13BD0) and the reconnect slot
+			// (0x13980 — SetString only writes len+encBuf, the canonical table
+			// at +0..0xFF stays intact for future reads).
+			DWORD op = 0, tp = 0;
 			const uintptr_t offs[2] = {0x13BD0, 0x13980};
 			for (int oi = 0; oi < 2; ++oi) {
 				void* pEnc = dlg + offs[oi];
@@ -1059,8 +1072,9 @@ namespace AutoLogin
 					VirtualProtect(pEnc, 0x208, op, &tp);
 				}
 			}
-			// Step 4: sync X into the display copy (edit+0x30C).
-			if (!IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
+			// Sync X into the display copy (editCEnc+0x30C).
+			void* editCEnc = *(void**)(dlg + 0x13DD8);
+			if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
 				char* dispEnc = (char*)editCEnc + 0x30C;
 				if (VirtualProtect(dispEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
 					((SetEncStrFn)0x00EA20F0)(dispEnc, X);
