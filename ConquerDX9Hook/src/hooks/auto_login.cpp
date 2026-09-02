@@ -1,6 +1,7 @@
 ﻿#include <windows.h>
 #include "imgui.h"
 #include "MinHook.h"
+#include "login_trace.h"
 
 // ============================================================================
 // Auto Login (MFC CDlgLogin) - Conquer.exe client 7952 (image base 0x400000)
@@ -78,6 +79,28 @@ static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
+	// Login-sequence log: what the game passed in, before our replacement.
+	{
+		char decPwd[256] = "";
+		if (password) {
+			typedef void (__thiscall* EncGetStringFunc)(void* encData, char* out);
+			__try {
+				char tmp[256];
+				((EncGetStringFunc)0x00EB3383)(password, tmp);
+				int cap = *(int*)(tmp + 0x14);
+				char* ps = (cap <= 15) ? tmp : *(char**)tmp;
+				int sz = *(int*)(tmp + 0x10);
+				if (sz > 0 && sz < 200 && ps && !IsBadReadPtr(ps, sz)) {
+					memcpy(decPwd, ps, sz); decPwd[sz] = 0;
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {}
+		}
+		char srv[256] = "";
+		if (serverName && !IsBadReadPtr(serverName, 1))
+			lstrcpynA(srv, (const char*)serverName, sizeof(srv));
+		LogLogin("HOOK_ENTRY", "acct=\"%s\" pwd=0x%08X dec=\"%s\" server=\"%s\" mode=%d extra=%d",
+			account ? account : "(null)", (unsigned)password, decPwd, srv, mode, extra);
+	}
 	// The fgui edit's CEncryptData at *(dlg+0x13DD8)+0x30C is encrypted with
 	// the server's session key (CanonKey). Overwrite 0x13BD0 with the edit's
 	// blob so the packet carries what the server can decrypt — the edit's key
@@ -108,6 +131,26 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+	}
+	// Login-sequence log: final values just before the packet is sent.
+	{
+		char decPwd[256] = "";
+		if (password) {
+			typedef void (__thiscall* EncGetStringFunc)(void* encData, char* out);
+			__try {
+				char tmp[256];
+				((EncGetStringFunc)0x00EB3383)(password, tmp);
+				int cap = *(int*)(tmp + 0x14);
+				char* ps = (cap <= 15) ? tmp : *(char**)tmp;
+				int sz = *(int*)(tmp + 0x10);
+				if (sz > 0 && sz < 200 && ps && !IsBadReadPtr(ps, sz)) {
+					memcpy(decPwd, ps, sz); decPwd[sz] = 0;
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {}
+		}
+		LogLogin("HOOK_SEND", "acct=\"%s\" pwd=0x%08X dec=\"%s\" server=\"%s\" mode=%d extra=%d",
+			account ? account : "(null)", (unsigned)password, decPwd,
+			serverName ? (const char*)serverName : "(null)", mode, extra);
 	}
 	return g_originalLoginSend(account, password, serverName, mode, extra);
 }
@@ -661,6 +704,7 @@ namespace AutoLogin
 				strcpy_s(g_activePassword, pass);
 				strcpy_s(g_passwordSection, s);
 			}
+			LogLogin("INI_LOAD", "[%s] User=\"%s\" Pass=%s", s, user, pass[0] ? "****" : "(empty)");
 			return true;
 		}
 		return false;
@@ -846,6 +890,7 @@ namespace AutoLogin
 		// 0x13938 instead. Fill both to cover all paths.
 		// MSVC x86 std::string: union{char buf[16]; char* ptr} at +0,
 		// size at +0x10, capacity at +0x14. SSO (cap<=15) stores inline.
+		LogLogin("FILL_ACCOUNT", "ini acct=\"%s\" writing to 0x13B88 + 0x13938", g_activeAccount);
 		__try {
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
@@ -872,6 +917,8 @@ namespace AutoLogin
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		LogLogin("FILL_ACCOUNT", "account std::strings written");
+		LogCredentialState("FILL_ACCOUNT");
 
 		// Move focus to the password field (user can type there).
 		if (result >= 0 && passwordEdit && IsWindow(passwordEdit))
@@ -912,6 +959,8 @@ namespace AutoLogin
 			if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208))
 				((EditSyncFn)0x00607CD5)(editCEnc, dlg + 0x13BD0);
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		LogLogin("FILL_PASSWORD", "blob written to all slots");
+		LogCredentialState("FILL_PASSWORD");
 	}
 
 	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
@@ -920,6 +969,8 @@ namespace AutoLogin
 			return -1;
 		if (g_activePassword[0] == 0)
 			return -1;
+
+		LogLogin("FILL_PASSWORD", "begin pwd=\"%s\" force=%d", g_activePassword, (int)forceOverwrite);
 
 		InstallLoginHook();
 		InstallGetWindowTextHooks();
@@ -1038,6 +1089,10 @@ namespace AutoLogin
 		if (g_clickInProgress)
 			return;
 		g_clickInProgress = true;
+
+		InstallLoginTraceHooks();
+		LogLogin("CLICK_LOGIN", "method=%d acct=\"%s\" pwd=\"%s\"",
+			g_clickMethod, g_activeAccount, g_activePassword[0] ? "****" : "");
 
 		// Ensure packet + GetWindowText hooks are up (account + password).
 		if (g_activeAccount[0] || g_activePassword[0])
@@ -1276,6 +1331,7 @@ namespace AutoLogin
 			{
 				g_loginCompleted = true;
 				g_loginResult = "ok (dialog closed)";
+				LogLogin("LOGIN_OK", "login dialog closed after %d clicks", g_clickCount);
 			}
 			if (g_loginCompleted)
 				g_autoClickLogin = false;  // disarm the auto loop
@@ -1429,6 +1485,13 @@ void RenderAutoLoginInterface()
 		if (ImGui::SmallButton("Copy Log"))
 		{
 			CopyDebugLogToClipboard();
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Log State"))
+		{
+			LogLogin("MANUAL_STATE", "manual credential dump from overlay");
+			LogCredentialState("MANUAL_STATE");
+			AutoLogin::g_fillStatus[0] = 0; // no-op to keep it read-only
 		}
 		ImGui::Text("Dialog: 0x%08X  Button: 0x%08X",
 			(unsigned int)AutoLogin::g_cachedDialog,
