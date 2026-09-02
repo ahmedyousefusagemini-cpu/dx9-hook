@@ -52,6 +52,8 @@ static void HexDump(char* dst, size_t dstLen, const unsigned char* data, int len
 	dst[used] = 0;
 }
 
+static void InitLogFile();
+
 void LogLogin(const char* stage, const char* fmt, ...)
 {
 	InitLogFile();
@@ -194,7 +196,7 @@ void LogCredentialState(const char* tag)
 	} __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-static int __thiscall HookedSendLoop(void* thisPtr, char* buf, int len)
+static int __fastcall HookedSendLoop(void* thisPtr, void* /*edx*/, char* buf, int len)
 {
 	if (buf && len > 0) {
 		__try {
@@ -212,7 +214,7 @@ static int __thiscall HookedSendLoop(void* thisPtr, char* buf, int len)
 	return 0;
 }
 
-static void __thiscall HookedRecvLoop(void* thisPtr, void* msgHandler, int maxPackets)
+static void __fastcall HookedRecvLoop(void* thisPtr, void* /*edx*/, void* msgHandler, int maxPackets)
 {
 	if (g_origRecvLoop)
 		g_origRecvLoop(thisPtr, msgHandler, maxPackets);
