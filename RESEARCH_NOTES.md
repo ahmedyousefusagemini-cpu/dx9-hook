@@ -1,5 +1,61 @@
 # Reverse Engineering Notes — Conquer.exe (client 7952)
 
+> **2026-09-02 (FINAL): Auto-login works — the complete, verified mechanism.**
+>
+> The user's manual logins (which worked) and our auto-fill (which failed)
+> were diffed byte-for-byte via the login_trace HOOK_ENTRY/HOOK_SEND dump.
+> The correct way to fill the password is:
+>
+> **1. Canonical encoding (the KEY discovery).** The server does NOT compare
+> the raw password, and it does NOT compare the CEncryptData blob with the
+> session key. It compares X = `canonTable[password]` byte-for-byte, where
+> `X[i] = raw[i] ^ canonTable[raw[i]]` and canonTable is a **FIXED 256-byte
+> table indexed by the character VALUE** (same in client and server).
+> Verified with password `"3643748z"` → `X = 04 A4 CD 04 C7 CD CF 97`,
+> **identical in every manual-login session** (11:20, 11:23, 13:09, 14:24).
+> Confirmed char-indexed (not position): `'3'` at positions 0 and 3 both →
+> 0x04; `'4'` at positions 2 and 5 both → 0xCD. Known table entries:
+> `'3'(0x33)→0x37, '6'(0x36)→0x92, '4'(0x34)→0xF9, '7'(0x37)→0xF0,
+> '8'(0x38)→0xF7, 'z'(0x7A)→0xED`. The table is **hardcoded in
+> WritePasswordBlob** (auto_login.cpp). The deterministic CEncryptData key
+> table at `dlg+0x13980` (63 9D CC 17...) is NOT the canonical table — using
+> it produced X = `1C EF 1C 1C 89 1C 90 9D` ≠ correct.
+>
+> **2. Send slot.** `FUN_0101CB78(password=dlg+0x13BD0, mode=0)` — the packet
+> builder (ndac.dll Ordinal_55) reads GetString(dlg+0x13BD0) = X and sends
+> it. `dlg+0x13BD0`'s key table is SESSION-RANDOM (re-seeded by the
+> CDlgLogin ctor at 0x86c2bb with timeGetTime), so its blob differs per
+> session — that's fine, only the GetString output (X) matters.
+>
+> **3. fgui edit text buffer.** The game's mygameinput (FUN_00602cbb) keeps
+> the raw typed password in the fgui edit's text buffer at
+> `*(dlg+0x13DD8)+0x238` (sub-object at `editCEnc+0x2C`, then
+> `FUN_005f2380` returns `+0x20C` → total `+0x238`). On each keystroke it
+> SetStrings `editCEnc+0x30C` (the display CEncryptData). Without this
+> buffer populated, the fgui framework treats the field as empty even though
+> the CEncryptData slots are correct. **The user's "type a letter then
+> delete it" trick worked precisely because typing filled this buffer.**
+> WritePasswordBlob writes the raw password there.
+>
+> **4. Reconnect account slot MUST be empty.** `dlg+0x13938` is the
+> reconnect-account std::string. In every SUCCESSFUL login it is `size=0`
+> (empty); when we filled it (FillAccountEdit wrote both 0x13B88 and
+> 0x13938) the login failed. The login handler FUN_008A8FCA has a reconnect
+> gate: if `(*(dlg+0xdc68)+0x80)()` is nonzero AND `FUN_0111a10b()` (byte at
+> obj+0x5428) == 0, it diverts to FUN_008a965f which sends a QR-code packet
+> (mode 1, account 0x13938 / password 0x13980) instead of CMsgAccountEx.
+> FillAccountEdit now writes ONLY dlg+0x13B88 and clears 0x13938 to empty.
+>
+> **WritePasswordBlob (final):**
+>   1. X[i] = raw[i] ^ canonTable[raw[i]] (hardcoded table)
+>   2. SetString X → dlg+0x13BD0 and dlg+0x13980
+>   3. SetString X → editCEnc+0x30C (display copy)
+>   4. Write raw password → editCEnc+0x238 (mygameinput text buffer)
+>   5. Clear dlg+0x13938 (reconnect account)
+>
+> See OFFSETS.md "auto_login" rows and auto_login.cpp header for the full
+> address map.
+
 > **2026-09-01: login-packet encryption routing found.** The user asked whether
 > the network-layer encryption at `Ordinal_8` (delay-loaded from `ndac.dll`)
 > uses the per-process CEncryptData key table at `dlg+0x13BD0+0..0xFF` or a
