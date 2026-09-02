@@ -811,3 +811,72 @@ Use=0
 ```
 
 Account/Password/section diagnostics are shown in the Auto Login UI and debug tree. `Pass=` is plain text — keep the file private.
+
+---
+
+## Auto Relogin / Disconnect Handling (VERIFIED on client 7952, 2026-09-02)
+
+Extends the Auto Login module with a per-frame relogin state machine. Startup
+login works automatically; after a server drop (error box → OK → login screen
+reappears) the module auto-dismisses the box, checks internet reachability, and
+re-arms fill+click when the connection is back.
+
+### State machine (auto_login.cpp, `ApplyClientSideState`)
+
+```
+REL_IDLE (0) ──dialog visible──► REL_WAIT_LOGIN (1) ──dialog closed──► REL_IN_GAME (2)
+REL_IN_GAME ──dialog reappeared──► REL_DISCONNECTED (3) ──dialog usable──► REL_CHECK_NET (4)
+REL_CHECK_NET ──internet up──► re-arm fill+click → REL_WAIT_LOGIN
+REL_CHECK_NET ──internet down──► REL_WAIT_NET (5) ──backoff expired──► REL_CHECK_NET
+```
+
+* Disconnect detected when the login dialog (CDlgLogin m_hWnd) reappears while
+  in `REL_IN_GAME`.
+* Internet check: non-blocking TCP `connect()` to `8.8.8.8:53` with a 3s
+  `select()` timeout (`IsInternetUp()`).
+* Retry backoff: 5s → 10s → 20s → 40s → 60s (capped).
+* Click pacing: first click after arming uses `ClickIntervalMs` (1s); every
+  re-attempt after a failed click uses `ClickRetryMs` (10s default, ini
+  `[AutoLogin] ClickRetryMs`, 3s–60s).
+
+### Offsets & hooks used (all verified 7952)
+
+| What | Address | Notes |
+|---|---|---|
+| `gpDlgShell` global (CMyShellApp) | `0x01A5A510` | `CDlgLogin` instance at `+0x39B948`; login-dialog HWND (m_hWnd) at `+0x20` |
+| Login dialog usability | — | `IsDialogUsable(hwnd)`: true ONLY if `hwnd == *(gpDlgShell+0x39B948+0x20)` AND `IsWindowVisible`. The EnumWindows shape-fallback was REMOVED (it picked up in-game dialogs with Edit+Button children → false disconnect). |
+| Login button handler | `0x008A8FCA` | `FUN_LoginButtonHandler` — reads account `dlg+0x13B88`, password `dlg+0x13BD0` (CEncryptData), sends via `FUN_0101CB78` mode 0. Reconnect gate virtual `(*(dlg+0xdc68)+0x80)()` + `FUN_0111a10b` (byte `obj+0x5428`) → QR path `FUN_008A965F` (mode 1, slots `0x13938`/`0x13980`). Poker path selects via `dlg+0x13620`. |
+| Login packet sender | `0x0101CB78` | `login(account, pwd, serverName, mode, extra)` — MinHook target (`HookedLoginSend`), forced to log + pass-through; slots pre-filled by `WritePasswordBlob` (canonical X). |
+| `CEncryptData::SetString` | `0x00EA20F0` | canonical-encoded X write into `dlg+0x13BD0` / `0x13980` / `editCEnc+0x30C`; raw text into `editCEnc+0x238`. |
+| `CEncryptData::GetString` | `0x00EB3383` | debug decode. |
+| Disconnect error key | `0x0165DFEC` | UTF-16 string KEY `STR_LOGIN_GAME_SERVER` (text "Disconnected with game server..." resolved at runtime by `CStringManagerW::GetStr` from game data — NOT in the binary). |
+| Disconnect error key 2 | `0x0165DFCC` | UTF-16 `STR_CONNECT_BGP`. |
+| `CStringManagerW::GetStr` | `0x01224260` | key → display text resolver. |
+| Tip show chokepoint | `0x007FD29B` | `__thiscall(dialog, text)` — virtual call at `dialog+0x22D8` vtable+0xB4 shows the fgui/MFC error box. |
+| `CDlgMsgBox` | RTTI `0x01A366DC` / COL `0x017DF850` / vftable `0x01694C38` | the error message box class. |
+| `CMsgDisconnect` | RTTI `0x01A51CE4` / COL `0x01809BF0` / vftable `0x01746B60` / ctor `0x011D822F` / dtor `0x011DBC5C` | server-sent disconnect message; built by dispatcher `FUN_00f3874e` (case at `0x00f3b196`), processed by generic `FUN_010c99e4`. |
+| MessageBoxA/W | user32 | MinHook — auto-return IDOK for disconnect-keyword text while `g_wasInGame` (box never appears). |
+| Window scan | `EnumWindows` | `DismissDisconnectBox()` (400ms) finds the box by title/child text, BM_CLICKs its OK — fallback for fgui/MFC boxes the API hook can't catch. |
+
+### Verified behavior (live log 2026-09-02)
+
+```
+REL | login screen appeared - arming auto login
+FILL_ACCOUNT | account written (0x13938 cleared)
+FILL_PASSWORD | canonical X=04 A4 CD 04 C7 CD CF 97
+CLICK_LOGIN | method=0
+HOOK_ENTRY | acct="halms" slot=dlg+0x13BD0 server="DuneWanderer" mode=0
+(no further REL lines while in game)
+```
+
+### Gotchas (learned this round)
+
+* `client+0x5385` is the AUTO-BATTLE byte (`8A 81 85 53 00 00 C3` getter
+  `FUN_01116e10`), NOT an in-game flag — do NOT gate auto-login on it.
+* `CUserAttribMgr` global `0x01A58FE0` and the login-success globals
+  `0x01A5FC64/68/6C/70` are one-shot / persist after exit — unusable as
+  persistent state.
+* Only the exact CDlgLogin HWND + `IsWindowVisible` decides "at login screen".
+* The DLL loads twice (proxy + injected) — hooks are idempotent, single-owner.
+
+

@@ -1,5 +1,71 @@
 # Reverse Engineering Notes — Conquer.exe (client 7952)
 
+> **2026-09-02: Auto-relogin implemented + in-game false-login fixed.**
+>
+> **Feature (auto_login.cpp):** state machine `IDLE → WAIT_LOGIN → IN_GAME →
+> DISCONNECTED → CHECK_NET → WAIT_NET`. Arms fill+click on first visible login
+> screen; when the login dialog reappears while in game → disconnect detected →
+> auto-dismiss the error box → check internet (TCP connect 8.8.8.8:53, 3s) →
+> re-arm fill+click when back. Retry backoff 5s→60s; post-click retry delay 10s
+> (`[AutoLogin] ClickRetryMs`, default 10000) so a failed login attempt does not
+> spam the server.
+>
+> **Critical gotcha — `client+0x5385` is the AUTO-BATTLE byte, NOT an
+> in-game flag.** Initial auto-relogin attempt gated on it (`IsGameInGame()`)
+> and it is set by the auto-hunt module when hunting is on (`auto_hunt.cpp`
+> `CLIENT_AUTO_BATTLE_BYTE_OFFSET`). Using it as a login gate would (a) not
+> protect when hunting is off and (b) block relogin after a disconnect while
+> hunting was on. Reverted. The ONLY reliable login-screen indicator is the
+> CDlgLogin window: `gpDlgShell+0x39B948` → `m_hWnd` at `+0x20`, matched by
+> exact HWND AND `IsWindowVisible`.
+>
+> **Root cause of "tries to login while in game":** `FindLoginDialog` had an
+> `EnumWindows` fallback that accepted ANY process window with ≥1 Edit + ≥1
+> Button child. In-game dialogs (shop, system windows) matched, so the state
+> machine saw a "login screen", flagged a disconnect, and re-armed login
+> mid-game. Also `IsDialogUsable` returned `IsWindowVisible(hwnd)` for any
+> visible window. Fix (commit `91bdec1`):
+>   - `FindLoginDialog` now returns ONLY the CDlgLogin HWND (visible).
+>   - `IsDialogUsable` returns true ONLY for the exact CDlgLogin HWND match
+>     (visible); otherwise false — no generic visible-window acceptance.
+>   - `ScanChildTree`/EnumWindows fallback deleted.
+> Verified live: startup auto-login logs `REL "login screen appeared - arming
+> auto login"` → `FILL_ACCOUNT`/`FILL_PASSWORD` → `CLICK_LOGIN` → `HOOK_ENTRY`
+> (login packet sent, mode=0) and NO further REL activity while in game.
+>
+> **Disconnect error box RE (the box text is NOT in the binary):**
+>   - The displayed text "Disconnected with game server. Please login the game
+>     again!" comes from a UTF-16 **string KEY** `STR_LOGIN_GAME_SERVER` at
+>     `0x0165DFEC` (and `STR_CONNECT_BGP` at `0x0165DFCC`), resolved at runtime
+>     by `CStringManagerW::GetStr` (`FUN_01224260`) from game data files.
+>   - Show path: code at `0x00A56FF8-0x00A57025` copies the key → `FUN_00420ab4`
+>     (wide string copy) → `CStringManagerW::GetStr` → `FUN_007FD29B`
+>     (thiscall(dialog, text); virtual call at `dialog+0x22D8` vtable+0xB4) shows
+>     the fgui/MFC `CDlgMsgBox`.
+>   - `CDlgMsgBox` RTTI `0x01A366DC`, COL `0x017DF850`, vftable `0x01694C38`.
+>   - `CMsgDisconnect` RTTI `0x01A51CE4`, COL `0x01809BF0`, vftable `0x01746B60`,
+>     ctor `FUN_011d822f`, dtor `FUN_011dbc5c`. Constructed by the giant message
+>     dispatcher `FUN_00f3874e` (978 callees, message case at `0x00f3b196`), then
+>     processed via generic `FUN_010c99e4` (virtual at msg-vtable+0xc).
+>   - Auto-dismiss implemented two ways: MinHook on `MessageBoxA/W` (returns
+>     IDOK when `g_wasInGame` and the text matches disconnect keywords) plus a
+>     window scan (`DismissDisconnectBox`, 400ms throttle) that finds the box by
+>     title/child text and BM_CLICKs its OK button.
+>
+> **In-game state notes (dead ends recorded for the next round):**
+>   - `CUserAttribMgr` global `0x01A58FE0` (accessor `FUN_00832a5d`, lazy-create
+>     `FUN_008339ae`) persists after leaving the game — NOT a usable in-game flag.
+>   - Login-success char globals `0x01A5FC64/0x68/0x6C/0x70` are written ONCE
+>     right before `tqpOnRoleLoginSuccess` (string `0x0165E488`) and never
+>     cleared — one-shot, not persistent state.
+>   - `FUN_01136861` uses `client+0x652/+0x653` (timeGetTime gates); the
+>     " login success! Times:" heartbeat `FUN_01221313` writes `client+0xb4`.
+>   - The login handler `FUN_008A8FCA` reconnect gate: virtual
+>     `(*(dlg+0xdc68)+0x80)()` nonzero AND `FUN_0111a10b()` (byte at `obj+0x5428`)
+>     == 0 → QR reconnect path `FUN_008a965f` (mode 1, slots 0x13938/0x13980).
+>     Poker path uses `dlg+0x13620` to pick 0x13938/0x13B88 + 0x13980/0x13BD0.
+
+
 > **2026-09-02 (FINAL): Auto-login works — the complete, verified mechanism.**
 >
 > The user's manual logins (which worked) and our auto-fill (which failed)
