@@ -852,13 +852,41 @@ namespace AutoLogin
 		return result;
 	}
 
-	// Fills the password by SIMULATING REAL TYPING into the fgui password edit.
-	// This is the exact path the game uses on manual typing: the fgui GTextInput
-	// receives keystrokes, updates its internal text buffer + CEncryptData, and
-	// the game's edit-sync encrypts dlg+0x13BD0 with the CURRENT session key
-	// table at the correct time. Direct SetString at fill time used a stale
-	// (pre-session-seed) key table, producing a blob the server rejected
-	// (debug: fill blob D4 24... ≠ manual working blob 50 69...).
+	// Write the password blob into all three slots the game reads:
+	// 0x13BD0 (MFC normal path), 0x13980 (poker/reconnect), and the fgui
+	// edit's CEncryptData at *(dlg+0x13DD8)+0x30C (the EnterGame button reads
+	// from HERE — debug: successful login has EditCEnc len=8, failed has
+	// EditCEnc len=0). Uses SetString (FUN_00EA20F0) on each slot with its
+	// OWN key table, then the game's edit-sync FUN_00607cd5 to propagate
+	// 0x13BD0 → editCEnc (GetString(0x13BD0) → SetString(editCEnc+0x30C)).
+	static void WritePasswordBlob()
+	{
+		typedef void (__thiscall* SetEncStrFn)(void*, const char*);
+		typedef void (__thiscall* EditSyncFn)(void* editCEnc, void* src);
+		__try {
+			void* shell = *(void**)0x01A5A510;
+			if (!shell || !g_activePassword[0]) return;
+			char* dlg = (char*)shell + 0x39B948;
+			// Write to MFC slots via SetString (uses each slot's own key table).
+			const uintptr_t offs[2] = {0x13BD0, 0x13980};
+			for (int oi = 0; oi < 2; ++oi) {
+				void* pEnc = dlg + offs[oi];
+				DWORD op = 0;
+				if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+					((SetEncStrFn)0x00EA20F0)(pEnc, g_activePassword);
+					DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+				}
+			}
+			// Sync 0x13BD0 → fgui edit's CEncryptData (the game's own edit-sync).
+			// This is what the game does on manual typing — the EnterGame button
+			// reads the password from HERE (debug: EditCEnc len=8 in successful
+			// manual login, len=0 in our failed fill).
+			void* editCEnc = *(void**)(dlg + 0x13DD8);
+			if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208))
+				((EditSyncFn)0x00607CD5)(editCEnc, dlg + 0x13BD0);
+		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+	}
+
 	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
 	{
 		if (!IsDialogUsable(dialog))
@@ -866,66 +894,17 @@ namespace AutoLogin
 		if (g_activePassword[0] == 0)
 			return -1;
 
-		HWND passwordEdit = NULL;
-		if (!ResolvePasswordEdit(dialog, passwordEdit))
-			return -1;
-		if (!passwordEdit || !IsWindow(passwordEdit))
-			return -1;
-
 		InstallLoginHook();
 		InstallGetWindowTextHooks();
 
-		// Focus the password edit so keystrokes land there.
-		SetFocus(passwordEdit);
+		WritePasswordBlob();
 
-		// Clear any existing text first (Ctrl+A then Delete).
-		keybd_event(VK_CONTROL, 0, 0, 0);
-		keybd_event('A', 0, 0, 0);
-		keybd_event('A', 0, KEYEVENTF_KEYUP, 0);
-		keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
-		keybd_event(VK_DELETE, 0, 0, 0);
-		keybd_event(VK_DELETE, 0, KEYEVENTF_KEYUP, 0);
+		// Also set the visible edit text so the fgui gate sees non-empty.
+		HWND passwordEdit = NULL;
+		if (ResolvePasswordEdit(dialog, passwordEdit) && passwordEdit && IsWindow(passwordEdit))
+			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
+
 		Sleep(30);
-
-		// Type the password with real key events (Shift for uppercase, else char).
-		{
-			SHORT shift = GetKeyState(VK_SHIFT) & 0x8000;
-			for (const char* p = g_activePassword; *p; ++p)
-			{
-				unsigned char c = (unsigned char)*p;
-				if (c >= 'a' && c <= 'z')
-				{
-					keybd_event(VK_SHIFT, 0, 0, 0);
-					keybd_event((BYTE)(c - 'a' + 'A'), 0, 0, 0);
-					keybd_event((BYTE)(c - 'a' + 'A'), 0, KEYEVENTF_KEYUP, 0);
-					keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
-				}
-				else
-				{
-					if (c >= 'A' && c <= 'Z' && !shift)
-						keybd_event(VK_SHIFT, 0, 0, 0);
-					keybd_event((BYTE)c, 0, 0, 0);
-					keybd_event((BYTE)c, 0, KEYEVENTF_KEYUP, 0);
-					if (c >= 'A' && c <= 'Z' && !shift)
-						keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
-				}
-				Sleep(5);
-			}
-		}
-		Sleep(50);
-
-		// Let the game's edit-sync encrypt dlg+0x13BD0 with the current table.
-		__try {
-			void* shell = *(void**)0x01A5A510;
-			if (shell) {
-				char* dlg2 = (char*)shell + 0x39B948;
-				if (!IsBadReadPtr(dlg2 + 0x13BD0 + 0x104, 4)) {
-					int encLen = *(int*)(dlg2 + 0x13BD0 + 0x104);
-					if (encLen > 0 && encLen < 0x100)
-						return 0;
-				}
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 		return 0;
 	}
 
@@ -1043,23 +1022,10 @@ namespace AutoLogin
 		// Re-apply the password blob RIGHT before clicking — the server's session
 		// key seed (CMsgEncryptCode) may arrive AFTER FillPasswordEdit ran, making
 		// 0x13BD0's key table stale. By SetString-ing at click time, we use the
-		// current seeded key table (matching what the server expects).
-		__try {
-			void* shell = *(void**)0x01A5A510;
-			if (shell && g_activePassword[0]) {
-				char* dlg = (char*)shell + 0x39B948;
-				typedef void (__thiscall* SetEncStrFn)(void*, const char*);
-				const uintptr_t offs[2] = {0x13BD0, 0x13980};
-				for (int oi = 0; oi < 2; ++oi) {
-					void* pEnc = dlg + offs[oi];
-					DWORD op = 0;
-					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStrFn)0x00EA20F0)(pEnc, g_activePassword);
-						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
-					}
-				}
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		// current seeded key table (matching what the server expects). Also syncs
+		// into the fgui edit's CEncryptData (EditCEnc), which the EnterGame button
+		// actually reads (debug: EditCEnc len=8 in successful manual login).
+		WritePasswordBlob();
 
 		HWND dialog = FindLoginDialog();
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
