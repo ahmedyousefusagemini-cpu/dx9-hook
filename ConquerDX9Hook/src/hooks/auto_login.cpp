@@ -122,10 +122,10 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 				void* editCEnc = *(void**)(dlg + 0x13DD8);
 				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
 					char* editEnc = (char*)editCEnc + 0x30C;
-					DWORD op = 0;
+					DWORD op = 0, tp = 0;
 					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
 						((SetEncStrFn)0x00EA20F0)(editEnc, AutoLogin::g_activePassword);
-						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
+						VirtualProtect(editEnc, 0x208, op, &tp);
 					}
 					// 2. Copy the fresh edit blob into the MFC slots.
 					int editLen = *(int*)(editEnc + 0x104);
