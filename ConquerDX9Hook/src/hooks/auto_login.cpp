@@ -1,4 +1,5 @@
 ﻿#define WIN32_LEAN_AND_MEAN
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
@@ -622,7 +623,7 @@ static BOOL CALLBACK FindDisconnectOkProc(HWND hwnd, LPARAM lParam)
 		return TRUE;
 	char text[64] = "";
 	GetWindowTextA(hwnd, text, sizeof(text));
-	if (lstrcmpiA(text, "OK") == 0 || lstrcmpiA(text, "确定") == 0)
+	if (lstrcmpiA(text, "OK") == 0)
 	{
 		SendMessage(hwnd, BM_CLICK, 0, 0);
 		return FALSE;
