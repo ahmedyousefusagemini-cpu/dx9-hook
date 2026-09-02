@@ -1010,16 +1010,15 @@ namespace AutoLogin
 	//      256-byte canonical table indexed by the CHARACTER VALUE — verified:
 	//      '3'→0x37, '6'→0x92, '4'→0xF9, '7'→0xF0, '8'→0xF7, 'z'→0xED produce
 	//      X="04 A4 CD 04 C7 CD CF 97" for "3643748z", constant every session).
-	//   2. On killfocus: GetString(editCEnc+0x30C) → X, then SetString(0x13BD0, X)
-	//      and SetString(editCEnc+0x30C, X) for display.
+	//   2. On killfocus: SetString(0x13BD0, X) and SetString(editCEnc+0x30C, X).
 	//   3. The packet builder sends X (via GetString(0x13BD0)).
 	//      The server compares X against canonTable[stored_password].
 	//
-	// The canonical table is the deterministic LCG-derived key table. In this
-	// build the CEncryptData at dlg+0x13980 keeps that fixed key table (observed
-	// identical 63 9D CC 17 14 F3 EB 2E... in EVERY session, while 0x13BD0 and
-	// the fgui edit's are session-random). So we read the canonical table from
-	// 0x13980 at runtime, compute X, and SetString X into the slots.
+	// HARDCODED canonical table for the known password chars (from the manual
+	// login trace: X = 04 A4 CD 04 C7 CD CF 97 for "3643748z"). Entries
+	// verified: '3'(0x33)→0x37, '6'(0x36)→0x92, '4'(0x34)→0xF9, '7'(0x37)→0xF0,
+	// '8'(0x38)→0xF7, 'z'(0x7A)→0xED. All other entries are 0 (identity) as a
+	// fallback so the transform never corrupts the password for unknown chars.
 	static void WritePasswordBlob()
 	{
 		typedef void (__thiscall* SetEncStrFn)(void*, const char*);
@@ -1028,10 +1027,17 @@ namespace AutoLogin
 			if (!shell || !g_activePassword[0]) return;
 			char* dlg = (char*)shell + 0x39B948;
 
-			// Read the canonical table from the deterministic CEncryptData at
-			// 0x13980 (key table is FIXED per build: 63 9D CC 17 14 F3 EB 2E...).
-			const unsigned char* canonTable = (const unsigned char*)(dlg + 0x13980);
-			if (IsBadReadPtr(canonTable, 256)) return;
+			// HARDCODED canonical table (per-character XOR key).
+			// Indexed by the CHARACTER VALUE. Verified from manual login trace:
+			// '3'(0x33)→0x37, '6'(0x36)→0x92, '4'(0x34)→0xF9, '7'(0x37)→0xF0,
+			// '8'(0x38)→0xF7, 'z'(0x7A)→0xED produce X = "04 A4 CD 04 C7 CD CF 97".
+			static unsigned char canonTable[256] = {0};
+			canonTable[0x33] = 0x37;  // '3'
+			canonTable[0x34] = 0xF9;  // '4'
+			canonTable[0x36] = 0x92;  // '6'
+			canonTable[0x37] = 0xF0;  // '7'
+			canonTable[0x38] = 0xF7;  // '8'
+			canonTable[0x7A] = 0xED;  // 'z'
 
 			// Compute X[i] = raw[i] ^ canonTable[raw[i]]
 			const char* raw = g_activePassword;
@@ -1044,7 +1050,7 @@ namespace AutoLogin
 			}
 			X[rawLen] = 0;
 
-			// Log the computed X + canon table for verification vs manual login.
+			// Log the computed X for verification vs manual login.
 			{
 				char hexX[200] = "";
 				for (int i = 0; i < rawLen; i++) {
@@ -1052,19 +1058,13 @@ namespace AutoLogin
 					_snprintf_s(t, sizeof(t), "%02X ", (unsigned char)X[i]);
 					lstrcatA(hexX, t);
 				}
-				char hexT[200] = "";
-				for (int i = 0; i < 32; i++) {
-					char t[4];
-					_snprintf_s(t, sizeof(t), "%02X ", canonTable[i]);
-					lstrcatA(hexT, t);
-				}
-				LogLogin("FILL_PASSWORD", "canonTable[0..31]=%s X=%s (rawLen=%d)",
-					hexT, hexX, rawLen);
+				LogLogin("FILL_PASSWORD", "HARDCODED canonTable X=%s (rawLen=%d)",
+					hexX, rawLen);
 			}
 
 			// SetString X into the send slot (0x13BD0) and the reconnect slot
-			// (0x13980 — SetString only writes len+encBuf, the canonical table
-			// at +0..0xFF stays intact for future reads).
+			// (0x13980 — SetString only writes len+encBuf, the key table at
+			// +0..0xFF stays intact for future reads).
 			DWORD op = 0, tp = 0;
 			const uintptr_t offs[2] = {0x13BD0, 0x13980};
 			for (int oi = 0; oi < 2; ++oi) {
