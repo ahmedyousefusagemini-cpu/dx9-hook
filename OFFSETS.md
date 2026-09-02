@@ -63,8 +63,26 @@ Ghidra on the 7952 build (AOB signature, xref or decompile).
 | `0x0101C9D8` | `0x0101CB78` | login-packet sender `login(account, pwd, serverName, mode, extra)` (auto_login) |
 | `0x00EA1F50` | `0x00EA20F0` | `CEncryptData::SetString` (auto_login) |
 | `0x00EB31E3` | `0x00EB3383` | `CEncryptData::GetString` (auto_login debug) |
+| `0x008A8FCA` | `0x008A8FCA` | `FUN_LoginButtonHandler` — `__fastcall(CDlgLogin*)`. Reads account `dlg+0x13B88` std::string, password `dlg+0x13BD0` CEncryptData, server name; then calls `FUN_0101CB78`. Reconnect gate: if `(*(dlg+0xdc68)+0x80)()` nonzero AND `FUN_0111a10b()` (byte at `obj+0x5428`) == 0 → `FUN_008a965f` (QR mode 1, uses 0x13938/0x13980) instead of normal mode 0. |
+| `0x008A965F` | `0x008A965F` | reconnect login path — sends `FUN_0101CB78(0x13938 acct, 0x13980 pwd, server, mode=1, 0)` (QR code). Filling 0x13938 can trigger this; it must stay EMPTY for normal login. |
+| `0x005F2380` | `0x005F2380` | returns `this + 0x20C` — the mygameinput raw text buffer pointer (CGameInput sub-object). |
+| `0x00602CBB` | `0x00602CBB` | `CGameInput::Process` (mygameinput.cpp) — per-keystroke text handling. `this`=editCEnc, sub-object at `editCEnc+0x2C`, reads text at `FUN_005f2380(editCEnc+0x2C)` = `editCEnc+0x238`, SetStrings into `editCEnc+0x30C`. |
+| `0x0089C013` | `0x0089C013` | `CDlgLogin::Process` / killfocus handler — password branch (focus == `dlg+0xFE8`) syncs `0x13BD0` ↔ `editCEnc+0x30C`; account branch writes `dlg+0x13B88`; token branch `dlg+0x13BB8`. |
+| `0x0089C5A0` | `0x0089C5A0` | killfocus password-sync call site: `FUN_00607cd5(editCEnc, dlg+0x13BD0)` then `GetString(editCEnc+0x30C)` → `SetString(0x13BD0)`. |
+| — | `0x00ED3CD1` | `CEncryptData` key-table expansion: copies 16 DWORDs cyclically into 64 DWORDs (`this+0..0xFF`). Used by ctor and CDlgLogin ctor re-seed. |
 | — | `0x00E9CC3F` | `CEncryptData::CEncryptData` — new finding. Constructor seeds `this+0..0xFF` key table from LCG via `GetGameRandomByte(0xff,0)`. Layout: `+0..+0xFF` key[256], `+0x100` nEncLen, `+0x104` nLen, `+0x108..+0x207` encBuf[256]. Deterministic per-build (uses `DAT_019ebaac` seed=0x0e89 from `.data`). Only verified caller is `CDlgLogin::CDlgLogin` @ `0x0086bdb5` calling it at `0x0086c0d4` with `ECX = EBX+0x13bd0`. The destructor `FUN_00ea1f0d` previously misattributed to CEncryptData belongs to a different class with 5 `std::string` sub-objects. |
 | — | `0x00ECE5FC` | `GetGameRandomByte(max, reseed)` — the LCG used by CEncryptData ctor. `state = (state * 0x355d + 0x17061b) % 0x6cf39b; return state / (0x6cf39b / max)`. `reseed=1` → `state = timeGetTime()`. Global state at `0x019ebaac` (initial value `0x0e89`). |
+| — | `0x00EA20F0` | `CEncryptData::SetString` (thiscall, `this=encData, plain`). Writes `this+0x104 = strlen`, `this+0x108 = plain`, then per-byte transform `out[i] = (i*0x67-0x7f)*i ^ key[i&0xff] ^ (i>>4)*0x66 ^ in[i] ^ 0xB9`. Symmetric with GetString. |
+| — | `0x010C1C27` | `CMsgEncryptCode` handler — `srand(code); DAT_019ec240[i] = rand()&0xff` for 16 bytes; stores code at singleton `FUN_0043e581()`+0x5328; posts `0x464/0xcdf`. Seeds the packet-level session key (sessKey16) — NOT the CEncryptData key tables. |
+| — | `0x019EC240` | 16-byte session key buffer (from `srand(code)` in CMsgEncryptCode handler). |
+| — | `0x01A549A0` | session singleton (lazy-inited by `FUN_0043e581`), code stored at `+0x5328` (via `FUN_01141A00`). |
+| — | `0x00EB0999` | `CEncryptData::GetEncLen` — returns `*(this+0x104)`. |
+| — | `0x00ED3655` | `CEncryptData::SetEncLen` — `*(this+0x104) = len`. |
+| — | `0x00EAF323` / `0x00EAF85A` | encrypt-data key-table helpers (old SetEncCode path). |
+| — | `0x00D02F5C` | fgui edit message dispatch (called by `FUN_006074ED`). |
+| — | `0x006074ED` | fgui edit text-set helper: `Ordinal_133(editCEnc+4, msg)` (0x81 = set text). |
+| — | `0x00ED3602` | edit-sync worker — `GetString(src) → SetString(this)` (direction: 0x13BD0 → editCEnc+0x30C). |
+| — | `0x00607CD5` | thunk `ADD ECX,0x30C; JMP 0x00ED3602` — edit-sync (password). Called as `FUN_00607cd5(editCEnc, dlg+0x13BD0)`. |
 | `0x01A5FB44` (file `.data` RVA `0x165FB44`) | unchanged | `CPacket` frame header used by `Ordinal_8` (20-byte struct: opcode 2 / length 0x14 / GetTickCount / `client+0x5328` / data ptr / 0x40). See RESEARCH_NOTES.md 2026-09-01 "login-packet encryption routing found" entry for full layout. |
 | `0x0126F254` / `0x0126F25E` | unchanged | `DelayLoad_Ordinal_8` / dispatch thunk to `ndac.dll` Ordinal_8. Slot at `[0x01A54490]`. |
 | `0x0126F2D4` / `0x0126F2DE` | unchanged | `DelayLoad_Ordinal_55` / dispatch thunk to `ndac.dll` Ordinal_55. Slot at `[0x01A54480]`. |

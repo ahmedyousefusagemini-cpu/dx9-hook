@@ -11,23 +11,69 @@
 // RTTI string "CDlgLogin" @ 0x016036A0). It is a WS_CHILD dialog of the game's
 // root window hosting the fgui login UI (`login_xzk`).
 //
-// RE-verified click chain (Ghidra, 7952 build):
-//   Login button click
-//     -> FUN_LoginButtonHandler @ 0x008A8FCA (__fastcall(CDlgLogin*))
-//          reads account (dlg+0x13B88), password (dlg+0x13BD0), server fields
-//     -> FUN_0101CB78 @ 0x0101CB78 (cdecl) - sends the login packet:
-//          login(account, password, serverName, mode, extra)
-//          mode 0 = CMsgAccountEx, 1 = QR, 2 = poker
+// CREDENTIAL FLOW (to send a successful login packet):
+//   1. User types password into the fgui password edit (the visible field).
+//      The fgui framework stores the raw text in the edit's internal buffer
+//      at editCEnc+0x238 (CGameInput sub-object at editCEnc+0x2C, then
+//      FUN_005f2380 returns editCEnc+0x2C+0x20C = editCEnc+0x238).
+//      Each keystroke calls mygameinput::Process (FUN_00602cbb) which
+//      calls CEncryptData::SetString on editCEnc+0x30C (the display copy).
+//      The "plaintext" stored in editCEnc+0x30C is the CANONICAL-ENCODED
+//      password: X[i] = raw[i] ^ canonTable[raw[i]] where canonTable is a
+//      FIXED 256-byte table indexed by character value (same per build).
+//      The killfocus/Process handler (FUN_0089c013, password branch at
+//      0x0089c56c) then syncs: GetString(0x13BD0) → SetString(editCEnc+0x30C),
+//      then GetString(editCEnc+0x30C) → SetString(0x13BD0).
+//   2. Login button handler FUN_008A8FCA (__fastcall(CDlgLogin*)) reads
+//      account from dlg+0x13B88 (std::string), password from dlg+0x13BD0
+//      (CEncryptData). The reconnect account 0x13938 MUST be EMPTY —
+//      when filled, the game's reconnect gate diverts to FUN_008a965f
+//      which sends a QR-code packet (mode 1) instead of CMsgAccountEx.
+//   3. FUN_0101CB78 @ 0x0101CB78 (cdecl) sends the login packet:
+//      login(account, password, serverName, mode, extra)
+//      mode 0 = CMsgAccountEx, 1 = QR, 2 = poker
+//      The packet builder (Ordinal_55 in ndac.dll) reads the CEncryptData
+//      at dlg+0x13BD0 and sends the canonical value X.
+//      The server compares X against canonTable[stored_password].
 //
-// ACCOUNT FILLING: reads accountinfo.ini (next to the exe) â€” [AccountN]
-// sections, first Use=1 wins, User= (plain) â€” and fills the account edit via
-// WM_SETTEXT + MinHook on FUN_0101CB78 that replaces the account ptr.
-// PASSWORD FILLING: same ini section, Pass= (plain). Separate "Fill Password"
-// button writes the plain Pass= into the CEncryptData at dlg+0x13BD0, XOR'd
-// with the fixed per-position table [B8 98 45 B8 91 45 5D DF][i&7] (verified
-// against manual typing: "3643748z" -> 8B AE 71 8B A6 71 65 A5, stable across
-// restarts). The old key table at *(encData+0x208)+0x30C is session-RANDOM and
-// NOT the transform key. The hook on FUN_0101CB78 acts as a last-resort.
+// CANONICAL ENCODING (verified from manual-login trace):
+//   X[i] = raw[i] ^ canonTable[raw[i]] where canonTable is a 256-byte
+//   table indexed by the CHARACTER VALUE (not position). Verified entries
+//   for the password "3643748z":
+//     '3'(0x33)→0x37, '6'(0x36)→0x92, '4'(0x34)→0xF9,
+//     '7'(0x37)→0xF0, '8'(0x38)→0xF7, 'z'(0x7A)→0xED
+//   These produce X = "04 A4 CD 04 C7 CD CF 97" (constant across all
+//   manual login sessions for the same password).
+//   The table is FIXED per build (same for client and server). In this
+//   build the CEncryptData at dlg+0x13980 keeps a deterministic key table
+//   (63 9D CC 17 14 F3 EB 2E... identical every session), but it is NOT
+//   the canonical table (that gave X=1C EF... ≠ 04 A4 CD...). The
+//   canonical table is separately hardcoded in WritePasswordBlob.
+//
+// CRITICAL SLOTS:
+//   dlg+0x13BD0  — CEncryptData, password send slot (normal path, mode 0)
+//                   Its key table is SESSION-RANDOM (re-seeded by CDlgLogin
+//                   ctor with timeGetTime at 0x86c2bb). The packet builder
+//                   reads GetString() → X from this slot.
+//   dlg+0x13980  — CEncryptData, password reconnect slot (poker/QR, mode 2)
+//                   Its key table is DETERMINISTIC (63 9D CC 17 14 F3 EB 2E...
+//                   identical every session — never re-seeded).
+//   dlg+0x13B88  — std::string, account (normal path)
+//   dlg+0x13938  — std::string, account (reconnect) — MUST BE EMPTY for
+//                   normal login; when filled, the reconnect gate triggers
+//                   and sends a different packet (mode 1/2).
+//   *(dlg+0x13DD8)+0x30C — CEncryptData, fgui edit display copy (session-
+//                   random key). The killfocus reads from here.
+//   *(dlg+0x13DD8)+0x238 — raw text buffer (CGameInput at +0x2C then
+//                   FUN_005f2380 returns +0x20C). The game re-encodes from
+//                   this buffer when the user types.
+//
+// WritePasswordBlob:
+//   1. Compute X = raw[i] ^ canonTable[raw[i]] (hardcoded table).
+//   2. SetString X into dlg+0x13BD0 and dlg+0x13980 (send slots).
+//   3. SetString X into editCEnc+0x30C (display copy).
+//   4. Write raw password into editCEnc+0x238 (mygameinput text buffer).
+//   5. Clear dlg+0x13938 (reconnect account) to empty.
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
