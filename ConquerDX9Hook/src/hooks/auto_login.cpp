@@ -1196,12 +1196,16 @@ namespace AutoLogin
 
 	void ApplyClientSideState()
 	{
-		// Install the login-send + GetWindowText hooks once if we have credentials.
-		if (g_activeAccount[0] || g_activePassword[0])
-		{
-			InstallLoginHook();
-			InstallGetWindowTextHooks();
-		}
+		// Install the login trace hooks (send/recv + log file) unconditionally,
+		// once — covers MANUAL login too (the log file must capture a hand-typed
+		// login attempt, which never goes through ClickLoginOnce).
+		InstallLoginTraceHooks();
+		// Install the login-send hook unconditionally — the HOOK_ENTRY/HOOK_SEND
+		// logs must capture the MANUAL login packet too. The hook's credential
+		// injection (g_activePassword) is guarded by g_activePassword[0] which
+		// is empty until the INI is loaded, so it's safe to have the hook up.
+		InstallLoginHook();
+		InstallGetWindowTextHooks();
 		// Keep resolved HWNDs up to date for the GetWindowText hook (needs HWND match).
 		if (IsDialogUsable(g_cachedDialog))
 		{
