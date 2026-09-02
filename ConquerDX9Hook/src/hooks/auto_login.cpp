@@ -962,21 +962,22 @@ namespace AutoLogin
 		InstallLoginHook();
 
 		// Write the account into the CDlgLogin std::string at dlg+0x13B88
-		// (normal path) and dlg+0x13938 (reconnect path). The login handler
-		// FUN_008a8fca reads account from 0x13B88, but the reconnect gate
-		// (virtual at dlg+0xdc68) diverts to FUN_008a965f which reads from
-		// 0x13938 instead. Fill both to cover all paths.
+		// (normal path) ONLY. Do NOT fill dlg+0x13938 — that is the RECONNECT
+		// account slot; in a successful manual login it stays EMPTY (size=0).
+		// Filling it makes the login handler treat the session as a reconnect
+		// and the server rejects the packet. Clear 0x13938 to empty string to
+		// match the working manual-login state.
 		// MSVC x86 std::string: union{char buf[16]; char* ptr} at +0,
 		// size at +0x10, capacity at +0x14. SSO (cap<=15) stores inline.
-		LogLogin("FILL_ACCOUNT", "ini acct=\"%s\" writing to 0x13B88 + 0x13938", g_activeAccount);
+		LogLogin("FILL_ACCOUNT", "ini acct=\"%s\" writing to 0x13B88 only (clearing 0x13938)", g_activeAccount);
 		__try {
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
 				char* dlgA = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlgA, 0x1400)) {
-					const uintptr_t accOffs[2] = {0x13B88, 0x13938};
-					for (int oi = 0; oi < 2; ++oi) {
-						char* accStr = dlgA + accOffs[oi];
+					// Fill the normal account slot only.
+					{
+						char* accStr = dlgA + 0x13B88;
 						int cap = *(int*)(accStr + 0x14);
 						int alen = (int)strlen(g_activeAccount);
 						if (alen < 16 && cap <= 15) {
@@ -989,6 +990,21 @@ namespace AutoLogin
 							if (!IsBadWritePtr(heap, alen + 1)) {
 								memcpy(heap, g_activeAccount, alen + 1);
 								*(int*)(accStr + 0x10) = alen;
+							}
+						}
+					}
+					// Clear the reconnect slot (0x13938) to empty.
+					{
+						char* recStr = dlgA + 0x13938;
+						int cap = *(int*)(recStr + 0x14);
+						if (cap <= 15) {
+							recStr[0] = 0;
+							*(int*)(recStr + 0x10) = 0;
+						} else {
+							char* heap = *(char**)recStr;
+							if (heap && !IsBadWritePtr(heap, 1)) {
+								heap[0] = 0;
+								*(int*)(recStr + 0x10) = 0;
 							}
 						}
 					}
@@ -1083,21 +1099,35 @@ namespace AutoLogin
 					VirtualProtect(dispEnc, 0x208, op, &tp);
 				}
 			}
-			// ALSO populate the fgui edit's raw text buffer at +0x20C
-			// (FUN_005f2380 returns editCEnc+0x20C; the game's killfocus /
-			// mygameinput re-encodes from this buffer). The user's
-			// "type then delete" trick works because typing fills this
-			// buffer. Without it the fgui framework treats the field as
-			// empty and the login packet carries no password.
-			if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x20C, rawLen + 1)) {
-				char* textBuf = (char*)editCEnc + 0x20C;
-				if (VirtualProtect(textBuf, rawLen + 1, PAGE_EXECUTE_READWRITE, &op)) {
-					memcpy(textBuf, raw, rawLen + 1);
-					VirtualProtect(textBuf, rawLen + 1, op, &tp);
-					LogLogin("FILL_PASSWORD", "edit text buffer +0x20C wrote \"%s\"", raw);
+			// ALSO populate the fgui edit's raw text buffer. From the
+			// mygameinput disasm (FUN_00602cbb): this = editCEnc, the input
+			// object is at editCEnc+0x2C (LEA EBX,[EDI+0x2c]), and
+			// FUN_005f2380(this=editCEnc+0x2C) returns editCEnc+0x2C+0x20C =
+			// editCEnc+0x238. The game's killfocus / mygameinput re-encodes
+			// from this buffer. The user's "type then delete" trick works
+			// because typing fills this buffer. Without it the fgui framework
+			// treats the field as empty.
+			{
+				const int TEXTBUF_OFF = 0x238;  // editCEnc+0x2C + 0x20C
+				char* textBuf = (char*)editCEnc + TEXTBUF_OFF;
+				if (textBuf && !IsBadReadPtr(textBuf, rawLen + 1)) {
+					if (VirtualProtect(textBuf, rawLen + 1, PAGE_EXECUTE_READWRITE, &op)) {
+						memcpy(textBuf, raw, rawLen + 1);
+						VirtualProtect(textBuf, rawLen + 1, op, &tp);
+						LogLogin("FILL_PASSWORD", "edit text buffer +0x238 wrote \"%s\"", raw);
+					}
+				} else {
+					LogLogin("FILL_PASSWORD", "edit text buffer +0x238 (unwritable)");
 				}
-			} else {
-				LogLogin("FILL_PASSWORD", "edit text buffer +0x20C (unwritable)");
+				// Also write the +0x2C base if it is a plain C string.
+				char* baseBuf = (char*)editCEnc + 0x2C;
+				if (baseBuf && !IsBadReadPtr(baseBuf, rawLen + 1)) {
+					if (VirtualProtect(baseBuf, rawLen + 1, PAGE_EXECUTE_READWRITE, &op)) {
+						memcpy(baseBuf, raw, rawLen + 1);
+						VirtualProtect(baseBuf, rawLen + 1, op, &tp);
+						LogLogin("FILL_PASSWORD", "edit base +0x2C wrote \"%s\"", raw);
+					}
+				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 		LogLogin("FILL_PASSWORD", "blob written to all slots via canonical encoder");

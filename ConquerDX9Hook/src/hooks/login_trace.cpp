@@ -212,6 +212,20 @@ void LogCredentialState(const char* tag)
 				LogLogin(tag, "editCEnc+0x30C disp ptr=0x%08X len=%d key=%s blob=%s dec=\"%s\"",
 					(unsigned)editCEnc, editLen, key, hex, dec);
 			}
+			// +0x238 raw text buffer (mygameinput: this+0x2C then +0x20C)
+			{
+				char* textBuf = (char*)editCEnc + 0x238;
+				if (!IsBadReadPtr(textBuf, 1)) {
+					char txt[128] = "";
+					for (int i = 0; i < 100 && textBuf[i]; i++) {
+						unsigned char c = (unsigned char)textBuf[i];
+						if (c < 0x20 || c > 0x7E) break;
+						txt[i] = (char)c;
+						txt[i+1] = 0;
+					}
+					LogLogin(tag, "editCEnc+0x238 text=\"%s\"", txt);
+				}
+			}
 		} else {
 			LogLogin(tag, "fgui editCEnc (unreadable)");
 		}
