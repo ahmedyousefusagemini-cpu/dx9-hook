@@ -289,6 +289,7 @@ namespace AutoLogin
 	int  g_clickIntervalMs = 1000;   // min ms between automatic clicks
 	int  g_clickCount = 0;           // total clicks sent this session
 	bool g_loginCompleted = false;   // a click made the login dialog disappear
+	const char* g_loginResult = "idle"; // "failed", "sent", "ok"
 	int  g_clickMethod = 0;          // 0 = SendMessage LBDOWN/UP (no cursor), 1 = SendInput real click, 2 = BM_CLICK, 3 = direct FUN_LoginButtonHandler call (bypasses fgui gate)
 	int  g_buttonIdOverride = 0;     // 0 = auto-detect, else GetDlgItem id
 	int  g_accountEditIndex = -1;    // -1 = auto (topmost visible Edit), else index into g_edits
@@ -1073,6 +1074,7 @@ namespace AutoLogin
 		{
 			g_clickCount++;
 			g_lastClickTick = GetTickCount();
+			g_loginResult = "sent";
 		}
 
 		g_cachedDialog = dialog;
@@ -1273,10 +1275,19 @@ namespace AutoLogin
 			// If we clicked before and the dialog is now gone, login went
 			// through - stop repeating and report success.
 			if (g_clickCount > 0 && g_loginCompleted == false)
+			{
 				g_loginCompleted = true;
+				g_loginResult = "ok (dialog closed)";
+			}
 			if (g_loginCompleted)
 				g_autoClickLogin = false;  // disarm the auto loop
 			return;
+		}
+		else if (g_clickCount > 0 && g_loginCompleted == false &&
+		         now - g_lastClickTick > 3000)
+		{
+			// Dialog still up 3s after a click → the server rejected the login.
+			g_loginResult = "FAILED (dialog still open)";
 		}
 
 		if (!IsWindow(g_cachedButton))
@@ -1427,6 +1438,13 @@ void RenderAutoLoginInterface()
 		ImGui::Text("Button text: \"%s\"  CtrlID: %u", AutoLogin::g_buttonText, AutoLogin::g_buttonId);
 		ImGui::Text("Dialog children: %u edits, %u buttons", AutoLogin::g_editCount, AutoLogin::g_buttonCount);
 		ImGui::Text("Clicks sent: %d", AutoLogin::g_clickCount);
+		{
+			const char* r = AutoLogin::g_loginResult;
+			bool ok = strstr(r, "ok") != NULL;
+			bool bad = strstr(r, "FAIL") != NULL;
+			ImVec4 col = ok ? ImVec4(0,1,0,1) : (bad ? ImVec4(1,0.3f,0.3f,1) : ImVec4(0.8f,0.8f,0.8f,1));
+			ImGui::TextColored(col, "Login result: %s", r);
+		}
 		ImGui::Text("Account: \"%s\" (%s)", AutoLogin::g_activeAccount,
 			AutoLogin::g_accountSection[0] ? AutoLogin::g_accountSection : "none");
 		ImGui::Text("Password: \"%s\" (%s)", AutoLogin::g_activePassword[0] ? "****" : "",
