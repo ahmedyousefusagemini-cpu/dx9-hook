@@ -694,6 +694,23 @@ static void DismissDisconnectBox()
 	EnumWindows(FindDisconnectBoxProc, 0);
 }
 
+// Authoritative "in game" test: the game's own logged-in flag at client+0x5385
+// (read by FUN_01116e10, the same byte the is-hunting check gates on). It is
+// 1 only while a character is actually in the game world and 0 at the login
+// screen — so auto-login must never run while it is set, even if a stale
+// hidden CDlgLogin HWND makes the dialog discovery report a "login screen".
+static bool IsGameInGame()
+{
+	__try {
+		void* client = *(void**)0x01A549A0;
+		if (!client || IsBadReadPtr((char*)client + 0x5385, 1))
+			return false;
+		return *(char*)((char*)client + 0x5385) != 0;
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
 namespace AutoLogin
 {
 	// User intent - auto-click the Login button until the dialog disappears.
@@ -1585,6 +1602,15 @@ namespace AutoLogin
 			return;
 		g_clickInProgress = true;
 
+		// Authoritative gate: never attempt login while a character is in the
+		// game world. The game's client+0x5385 flag is the single source of
+		// truth, even if the dialog discovery incorrectly reports a login screen.
+		if (IsGameInGame())
+		{
+			g_clickInProgress = false;
+			return;
+		}
+
 		// NEVER attempt a login unless a VISIBLE login screen is present.
 		// (In-game the CDlgLogin object keeps a stale hidden HWND — clicking
 		// it would send a login packet mid-game.)
@@ -1820,6 +1846,19 @@ namespace AutoLogin
 
 			bool dlgUsable = IsDialogUsable(g_cachedDialog);
 			DismissDisconnectBox(); // auto-click OK on the error box if shown
+
+			// Authoritative gate: the game's own in-game flag (client+0x5385).
+			// While a character is in the world, auto-login is fully disabled —
+			// the click loop is disarmed regardless of what the dialog scan says.
+			if (IsGameInGame())
+			{
+				g_wasInGame = true;
+				if (g_reloginState != REL_IN_GAME)
+				{
+					g_reloginState = REL_IN_GAME;
+					strcpy_s(g_reloginStatus, "in game");
+				}
+			}
 
 			switch (g_reloginState)
 			{
