@@ -28,6 +28,7 @@ namespace AutoHunt
 	extern int  g_arrivalThreshold;
 	extern int  g_clearedSeconds;
 	extern int  g_travelTimeoutSeconds;
+	extern bool g_autoHuntOnLogin;
 	extern void ApplyClientSideState();
 }
 
@@ -117,6 +118,7 @@ void SaveConfig()
 	// --- Auto Hunt ---
 	WritePrivateProfileStringA("AutoHunt", "NotifyServer", AutoHunt::g_notifyServer ? "1" : "0", path);
 	WritePrivateProfileStringA("AutoHunt", "SpoofVipLevel", AutoHunt::g_spoofVipLevel ? "1" : "0", path);
+	WritePrivateProfileStringA("AutoHunt", "AutoHuntOnLogin", AutoHunt::g_autoHuntOnLogin ? "1" : "0", path);
 	WriteInt("AutoHunt", "VipLevel", AutoHunt::g_vipLevel);
 	WritePrivateProfileStringA("AutoHunt", "WaypointsEnabled", AutoHunt::g_waypointsEnabled ? "1" : "0", path);
 	WriteInt("AutoHunt", "ArrivalThreshold", AutoHunt::g_arrivalThreshold);
@@ -186,6 +188,7 @@ void LoadConfig()
 	// --- Auto Hunt ---
 	AutoHunt::g_notifyServer = GetPrivateProfileIntA("AutoHunt", "NotifyServer", 0, path) != 0;
 	AutoHunt::g_spoofVipLevel = GetPrivateProfileIntA("AutoHunt", "SpoofVipLevel", 0, path) != 0;
+	AutoHunt::g_autoHuntOnLogin = GetPrivateProfileIntA("AutoHunt", "AutoHuntOnLogin", 1, path) != 0;
 	AutoHunt::g_vipLevel = GetPrivateProfileIntA("AutoHunt", "VipLevel", 6, path);
 	if (AutoHunt::g_vipLevel < 0) AutoHunt::g_vipLevel = 0;
 	if (AutoHunt::g_vipLevel > 6) AutoHunt::g_vipLevel = 6;

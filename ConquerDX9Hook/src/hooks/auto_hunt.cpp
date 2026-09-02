@@ -63,6 +63,10 @@ namespace AutoHunt
 	// User intent - whether the hunt brain should be engaged.
 	bool g_clientSideHunting = false;
 
+	// Auto-start hunting when the character logs in (first login AND after
+	// every auto-relogin). Default ON; persisted to coinfo.ini [AutoHunt].
+	bool g_autoHuntOnLogin = true;
+
 	// VIP spoof state (independent of hunting so it can stay on for the features).
 	bool g_spoofVipLevel = false;
 	int  g_vipLevel = 6;  // max, per "nVipLev >= 0 && nVipLev <= 6"
@@ -454,6 +458,9 @@ void RenderAutoHuntInterface()
 	// it reset the XP bar). Off by default so the server treats kills as normal.
 	ImGui::Checkbox("Notify server (0x855 packet)", &AutoHunt::g_notifyServer);
 	ImGui::TextDisabled("Leave OFF so the server keeps filling XP normally");
+
+	ImGui::Checkbox("Auto-start on login", &AutoHunt::g_autoHuntOnLogin);
+	ImGui::TextDisabled("Starts hunting automatically when the character logs in");
 
 	// VIP level spoof - unlocks the client-side VIP-gated auto-hunt features
 	// (jump-search VIP3+, auto-pick VIP4+).

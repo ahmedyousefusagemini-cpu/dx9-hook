@@ -95,6 +95,10 @@ namespace AutoLogin {
 	extern bool g_connectivityOk;
 	extern int  g_reloginAttempts;
 }
+namespace AutoHunt {
+	extern bool g_autoHuntOnLogin;
+	extern void Start();   // engage the hunt brain (idempotent)
+}
 
 // MinHook target: FUN_0101CB78 (cdecl) - the login packet sender.
 // Guarantees the ini account/password reach the server regardless of which
@@ -1805,6 +1809,8 @@ namespace AutoLogin
 					g_wasInGame = true;
 					g_reloginState = REL_IN_GAME;
 					strcpy_s(g_reloginStatus, "in game");
+					if (AutoHunt::g_autoHuntOnLogin)
+						AutoHunt::Start();
 				}
 				break;
 			case REL_WAIT_LOGIN:
@@ -1815,6 +1821,8 @@ namespace AutoLogin
 					g_reloginState = REL_IN_GAME;
 					strcpy_s(g_reloginStatus, "in game");
 					LogLogin("REL", "login OK - in game");
+					if (AutoHunt::g_autoHuntOnLogin)
+						AutoHunt::Start();
 				}
 				break;
 			case REL_IN_GAME:
