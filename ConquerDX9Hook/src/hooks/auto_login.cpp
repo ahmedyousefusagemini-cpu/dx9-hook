@@ -852,14 +852,13 @@ namespace AutoLogin
 		return result;
 	}
 
-	// Fills the password by writing the plain Pass= value directly into the
-	// login CEncryptData (dlg+0x13BD0, poker slot dlg+0x13980, fgui edit at
-	// *(dlg+0x13DD8)+0x30C) using the PER-CHAR XOR transform the server
-	// accepts — NOT SetString (FUN_00ea20f0), which uses a position-based
-	// formula the server can't decode (verified: manual typing "3643748z" ->
-	// blob 04 A4 CD 04 C7 CD CF 97; same char -> same key byte, so
-	// enc[i] = plain[i] ^ keyT[(unsigned char)plain[i]] with the session key
-	// table at the CEncryptData +0..0xFF read at runtime).
+	// Fills the password by SIMULATING REAL TYPING into the fgui password edit.
+	// This is the exact path the game uses on manual typing: the fgui GTextInput
+	// receives keystrokes, updates its internal text buffer + CEncryptData, and
+	// the game's edit-sync encrypts dlg+0x13BD0 with the CURRENT session key
+	// table at the correct time. Direct SetString at fill time used a stale
+	// (pre-session-seed) key table, producing a blob the server rejected
+	// (debug: fill blob D4 24... ≠ manual working blob 50 69...).
 	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
 	{
 		if (!IsDialogUsable(dialog))
@@ -876,79 +875,57 @@ namespace AutoLogin
 		InstallLoginHook();
 		InstallGetWindowTextHooks();
 
-		// Resolve the CDlgLogin base ONCE and reuse for all writes.
-		void* dlgBase = nullptr;
-		__try {
-			void* shell = *(void**)0x01A5A510;
-			if (shell) dlgBase = (char*)shell + 0x39B948;
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		if (!dlgBase && g_cachedDialog && IsWindow(g_cachedDialog)) {
-			typedef void* (__stdcall *FromHandleFn)(HWND);
-			static FromHandleFn fh = nullptr;
-			if (!fh) { HMODULE hm = GetModuleHandleA("mfc42.dll"); if (!hm) hm = GetModuleHandleA("mfc140.dll"); if (hm) fh = (FromHandleFn)GetProcAddress(hm, (LPCSTR)4866); }
-			if (fh) dlgBase = fh(g_cachedDialog);
-		}
+		// Focus the password edit so keystrokes land there.
+		SetFocus(passwordEdit);
 
-		// If the login CEncryptData already holds a valid password and not forced, leave it.
-		__try {
-			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
-				int len0 = *(int*)((char*)dlgBase + 0x13BD0 + 0x104);
-				if (len0 > 0 && len0 <= 0x100 && !forceOverwrite)
-					return 0;
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-		// Write the password via the game's OWN SetString (FUN_00EA20F0) into the
-		// MFC slots the login handler reads. Ghidra verified: the game itself
-		// calls SetString(dlg+0x13BD0, plaintext) at 0x0089c61d when the password
-		// edit changes. Manual typing (which logs in) produces Blob 0x13BD0
-		// 50 69 4E BD DA 3A 55 51 for "3643748z" — the SetString position-based
-		// transform with 0x13BD0's own session key table (+0..0xFF). Our earlier
-		// SetString attempt failed only because the ACCOUNT string was empty then;
-		// FillAccountEdit now writes dlg+0x13B88, so the packet is complete.
-		__try {
-			if (dlgBase && !IsBadReadPtr(dlgBase, 0x1400)) {
-				char* dlg = (char*)dlgBase;
-				const uintptr_t offs[2] = {0x13BD0, 0x13980};
-				for (int oi = 0; oi < 2; ++oi) {
-					char* pEnc = dlg + offs[oi];
-					DWORD op = 0;
-					if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStringFunc)SET_ENC_STRING_ADDR)(pEnc, g_activePassword);
-						DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
-					}
-				}
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-		// Also populate the visible EditBox text so the fgui gate sees a
-		// non-empty field (same as FillAccountEdit).
-		if (passwordEdit && IsWindow(passwordEdit))
-		{
-			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
-		}
-
+		// Clear any existing text first (Ctrl+A then Delete).
+		keybd_event(VK_CONTROL, 0, 0, 0);
+		keybd_event('A', 0, 0, 0);
+		keybd_event('A', 0, KEYEVENTF_KEYUP, 0);
+		keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+		keybd_event(VK_DELETE, 0, 0, 0);
+		keybd_event(VK_DELETE, 0, KEYEVENTF_KEYUP, 0);
 		Sleep(30);
 
-		// Verify via the dlg's encrypted len as ground truth (both slots).
+		// Type the password with real key events (Shift for uppercase, else char).
+		{
+			SHORT shift = GetKeyState(VK_SHIFT) & 0x8000;
+			for (const char* p = g_activePassword; *p; ++p)
+			{
+				unsigned char c = (unsigned char)*p;
+				if (c >= 'a' && c <= 'z')
+				{
+					keybd_event(VK_SHIFT, 0, 0, 0);
+					keybd_event((BYTE)(c - 'a' + 'A'), 0, 0, 0);
+					keybd_event((BYTE)(c - 'a' + 'A'), 0, KEYEVENTF_KEYUP, 0);
+					keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+				}
+				else
+				{
+					if (c >= 'A' && c <= 'Z' && !shift)
+						keybd_event(VK_SHIFT, 0, 0, 0);
+					keybd_event((BYTE)c, 0, 0, 0);
+					keybd_event((BYTE)c, 0, KEYEVENTF_KEYUP, 0);
+					if (c >= 'A' && c <= 'Z' && !shift)
+						keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+				}
+				Sleep(5);
+			}
+		}
+		Sleep(50);
+
+		// Let the game's edit-sync encrypt dlg+0x13BD0 with the current table.
 		__try {
-			void* shell2 = *(void**)0x01A5A510;
-			if (shell2) {
-				char* dlg2 = (char*)shell2 + 0x39B948;
+			void* shell = *(void**)0x01A5A510;
+			if (shell) {
+				char* dlg2 = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlg2 + 0x13BD0 + 0x104, 4)) {
 					int encLen = *(int*)(dlg2 + 0x13BD0 + 0x104);
 					if (encLen > 0 && encLen < 0x100)
 						return 0;
 				}
-				if (!IsBadReadPtr(dlg2 + 0x13980 + 0x104, 4)) {
-					int encLen2 = *(int*)(dlg2 + 0x13980 + 0x104);
-					if (encLen2 > 0 && encLen2 < 0x100)
-						return 0;
-				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		// Even if the verify read fails, the GetWindowText hook + login hook
-		// guarantee the packet carries the plain password.
 		return 0;
 	}
 
