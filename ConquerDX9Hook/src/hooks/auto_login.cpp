@@ -79,7 +79,7 @@ static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
-	// Login-sequence log: what the game passed in, before our replacement.
+	// Login-sequence log: what the game passed in.
 	{
 		char decPwd[256] = "";
 		if (password) {
@@ -101,30 +101,42 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		LogLogin("HOOK_ENTRY", "acct=\"%s\" pwd=0x%08X dec=\"%s\" server=\"%s\" mode=%d extra=%d",
 			account ? account : "(null)", (unsigned)password, decPwd, srv, mode, extra);
 	}
-	// The fgui edit's CEncryptData at *(dlg+0x13DD8)+0x30C is encrypted with
-	// the server's session key (CanonKey). Overwrite 0x13BD0 with the edit's
-	// blob so the packet carries what the server can decrypt — the edit's key
-	// table is the one the server seeded via CMsgEncryptCode.
+	// The fgui edit's CEncryptData at *(dlg+0x13DD8)+0x30C is the one the
+	// server seeded with the session key (CanonKey) via CMsgEncryptCode.
+	// Re-encrypt the password into the edit RIGHT NOW with its CURRENT key
+	// table (which should be the session-seeded CanonKey at packet-build time),
+	// then copy the edit's fresh blob into the MFC slots the packet builder
+	// reads (0x13BD0 / 0x13980). This replicates the manual login's killfocus
+	// flow: the game reads the edit's text, SetStrings 0x13BD0 with its OWN
+	// key, then syncs 0x13BD0→edit — but we do the reverse: freshen the edit
+	// first, then copy the CanonKey-encrypted blob to the MFC slots.
 	if (AutoLogin::g_activePassword[0])
 	{
 		__try {
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
 				char* dlg = (char*)shell + 0x39B948;
+				typedef void (__thiscall* SetEncStrFn)(void*, const char*);
+				// 1. Re-encrypt the fgui edit's CEncryptData with the CURRENT
+				//    CanonKey (the edit's own key table, seeded by the server).
 				void* editCEnc = *(void**)(dlg + 0x13DD8);
 				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
 					char* editEnc = (char*)editCEnc + 0x30C;
+					DWORD op = 0;
+					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+						((SetEncStrFn)0x00EA20F0)(editEnc, AutoLogin::g_activePassword);
+						DWORD tp = 0; VirtualProtect(editEnc, 0x208, op, &tp);
+					}
+					// 2. Copy the fresh edit blob into the MFC slots.
 					int editLen = *(int*)(editEnc + 0x104);
 					if (editLen > 0 && editLen <= 0x100) {
-						// Copy the edit's blob into 0x13BD0 and 0x13980.
 						const uintptr_t offs[2] = {0x13BD0, 0x13980};
 						for (int oi = 0; oi < 2; ++oi) {
 							char* pEnc = dlg + offs[oi];
-							DWORD op = 0;
 							if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
 								*(int*)(pEnc + 0x104) = editLen;
 								memcpy(pEnc + 0x108, editEnc + 0x108, editLen + 1);
-								DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+								VirtualProtect(pEnc, 0x208, op, &tp);
 							}
 						}
 					}
