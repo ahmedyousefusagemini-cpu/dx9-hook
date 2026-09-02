@@ -77,6 +77,97 @@ static const uintptr_t LOGIN_BTN_HANDLER_ADDR = 0x008A8FCA;
 typedef void (__thiscall* SetEncStringFunc)(void* encData, const char* plain);
 static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
+// ---------------------------------------------------------------------------
+// Debug: dump the FULL state of one CEncryptData — key table (16 bytes),
+// blob (hex), len and dec — so manual vs auto-fill can be diffed byte-for-byte.
+// Also reports where the passed `password` pointer actually lives (which slot
+// the packet builder will read from).
+// ---------------------------------------------------------------------------
+static void DumpEncSlot(const char* tag, const char* label, void* enc)
+{
+	if (!enc || IsBadReadPtr(enc, 0x208)) {
+		LogLogin(tag, "%s (unreadable)", label);
+		return;
+	}
+	char* e = (char*)enc;
+	int len = *(int*)(e + 0x104);
+	char dec[256] = "";
+	__try {
+		char tmp[256];
+		((void (__thiscall*)(void*, char*))0x00EB3383)(e, tmp);
+		int cap = *(int*)(tmp + 0x14);
+		char* ps = (cap <= 15) ? tmp : *(char**)tmp;
+		int sz = *(int*)(tmp + 0x10);
+		if (sz > 0 && sz < 200 && ps && !IsBadReadPtr(ps, sz)) {
+			memcpy(dec, ps, sz); dec[sz] = 0;
+		}
+	} __except (EXCEPTION_EXECUTE_HANDLER) {}
+	char hex[200] = "";
+	{
+		int used = 0;
+		int n = (len > 0 && len <= 16) ? len : 0;
+		for (int i = 0; i < n && used < (int)sizeof(hex) - 4; i++) {
+			hex[used++] = "0123456789ABCDEF"[(unsigned char)e[0x108 + i] >> 4];
+			hex[used++] = "0123456789ABCDEF"[(unsigned char)e[0x108 + i] & 0xF];
+			hex[used++] = ' ';
+		}
+		hex[used] = 0;
+	}
+	char key[64] = "";
+	{
+		int used = 0;
+		for (int i = 0; i < 16 && used < (int)sizeof(key) - 4; i++) {
+			key[used++] = "0123456789ABCDEF"[(unsigned char)e[i] >> 4];
+			key[used++] = "0123456789ABCDEF"[(unsigned char)e[i] & 0xF];
+			key[used++] = ' ';
+		}
+		key[used] = 0;
+	}
+	LogLogin(tag, "%s ptr=0x%08X len=%d key=%s blob=%s dec=\"%s\"",
+		label, (unsigned)enc, len, key, hex, dec);
+}
+
+// Resolve which login slot `password` points to (for debug).
+static const char* IdentifyPwdSlot(void* password)
+{
+	__try {
+		void* shell = *(void**)0x01A5A510;
+		if (shell) {
+			char* dlg = (char*)shell + 0x39B948;
+			if (password == (void*)(dlg + 0x13BD0)) return "dlg+0x13BD0";
+			if (password == (void*)(dlg + 0x13980)) return "dlg+0x13980";
+			void* editCEnc = *(void**)(dlg + 0x13DD8);
+			if (editCEnc && password == (void*)((char*)editCEnc + 0x30C)) return "editCEnc+0x30C";
+		}
+	} __except (EXCEPTION_EXECUTE_HANDLER) {}
+	return "other";
+}
+
+// Dump the server's session-key state: DAT_019ec240 (16 bytes from srand(code))
+// and the stored code at the CMsgEncryptCode singleton +0x5328.
+static void DumpSessionKeyState(const char* tag)
+{
+	__try {
+		char k16[64] = "";
+		{
+			int used = 0;
+			const unsigned char* g = (const unsigned char*)0x019EC240;
+			for (int i = 0; i < 16 && used < (int)sizeof(k16) - 4; i++) {
+				k16[used++] = "0123456789ABCDEF"[g[i] >> 4];
+				k16[used++] = "0123456789ABCDEF"[g[i] & 0xF];
+				k16[used++] = ' ';
+			}
+			k16[used] = 0;
+		}
+		// Singleton at 0x01A549A0 (FUN_0043e581), code stored at +0x5328.
+		unsigned int code = 0;
+		void* sing = *(void**)0x01A549A0;
+		if (sing && !IsBadReadPtr((char*)sing + 0x5328, 4))
+			code = *(unsigned int*)((char*)sing + 0x5328);
+		LogLogin(tag, "sessKey16=%s storedCode=0x%08X", k16, code);
+	} __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
 	// Login-sequence log: what the game passed in.
@@ -98,8 +189,12 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		char srv[256] = "";
 		if (serverName && !IsBadReadPtr(serverName, 1))
 			lstrcpynA(srv, (const char*)serverName, sizeof(srv));
-		LogLogin("HOOK_ENTRY", "acct=\"%s\" pwd=0x%08X dec=\"%s\" server=\"%s\" mode=%d extra=%d",
-			account ? account : "(null)", (unsigned)password, decPwd, srv, mode, extra);
+		LogLogin("HOOK_ENTRY", "acct=\"%s\" pwd=0x%08X slot=%s dec=\"%s\" server=\"%s\" mode=%d extra=%d",
+			account ? account : "(null)", (unsigned)password, IdentifyPwdSlot(password), decPwd, srv, mode, extra);
+		if (password)
+			DumpEncSlot("HOOK_ENTRY", "pwdSlot", password);
+		DumpSessionKeyState("HOOK_ENTRY");
+		LogCredentialState("HOOK_ENTRY");
 	}
 	// The fgui edit's CEncryptData at *(dlg+0x13DD8)+0x30C is the one the
 	// server seeded with the session key (CanonKey) via CMsgEncryptCode.
@@ -160,9 +255,13 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {}
 		}
-		LogLogin("HOOK_SEND", "acct=\"%s\" pwd=0x%08X dec=\"%s\" server=\"%s\" mode=%d extra=%d",
-			account ? account : "(null)", (unsigned)password, decPwd,
+		LogLogin("HOOK_SEND", "acct=\"%s\" pwd=0x%08X slot=%s dec=\"%s\" server=\"%s\" mode=%d extra=%d",
+			account ? account : "(null)", (unsigned)password, IdentifyPwdSlot(password), decPwd,
 			serverName ? (const char*)serverName : "(null)", mode, extra);
+		if (password)
+			DumpEncSlot("HOOK_SEND", "pwdSlot", password);
+		DumpSessionKeyState("HOOK_SEND");
+		LogCredentialState("HOOK_SEND");
 	}
 	return g_originalLoginSend(account, password, serverName, mode, extra);
 }

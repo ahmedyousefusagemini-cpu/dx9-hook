@@ -172,11 +172,11 @@ void LogCredentialState(const char* tag)
 			int len = *(int*)(enc + 0x104);
 			char dec[256];
 			DecodeEnc(dec, sizeof(dec), enc);
-			char hex[80];
+			char hex[160];
 			HexDump(hex, sizeof(hex), (const unsigned char*)(enc + 0x108),
 				(len > 0 && len <= 16) ? len : 0);
-			char key[32];
-			HexDump(key, sizeof(key), (const unsigned char*)enc, 8);
+			char key[64];
+			HexDump(key, sizeof(key), (const unsigned char*)enc, 16);
 			LogLogin(tag, "pwd +0x%04X len=%d key=%s blob=%s dec=\"%s\"",
 				(unsigned)(pwdOffs[i] & 0xFFFF), len, key, hex, dec);
 		}
@@ -188,8 +188,13 @@ void LogCredentialState(const char* tag)
 			int editLen = *(int*)(editEnc + 0x104);
 			char dec[256];
 			DecodeEnc(dec, sizeof(dec), editEnc);
-			LogLogin(tag, "fgui editCEnc ptr=0x%08X len=%d dec=\"%s\"",
-				(unsigned)editCEnc, editLen, dec);
+			char hex[160];
+			HexDump(hex, sizeof(hex), (const unsigned char*)(editEnc + 0x108),
+				(editLen > 0 && editLen <= 16) ? editLen : 0);
+			char key[64];
+			HexDump(key, sizeof(key), (const unsigned char*)editEnc, 16);
+			LogLogin(tag, "fgui editCEnc ptr=0x%08X len=%d key=%s blob=%s dec=\"%s\"",
+				(unsigned)editCEnc, editLen, key, hex, dec);
 		} else {
 			LogLogin(tag, "fgui editCEnc (unreadable)");
 		}
