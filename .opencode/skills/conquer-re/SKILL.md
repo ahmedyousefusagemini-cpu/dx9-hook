@@ -1,6 +1,6 @@
 ---
 name: conquer-re
-description: Use when reverse engineering Conquer.exe (Conquer Online private server client) with Ghidra MCP, finding/verifying game offsets (AOB signatures, string/RTTI anchors, call-graph), implementing game functions in the hook modules (auto_hunt, xp_skill, speed, buffs, gear_swap), re-finding offsets after a client recompile, or documenting findings in OFFSETS.md / RESEARCH_NOTES.md. Also use when the user says "find this function", "update offsets", "client updated", "add a hook", "reverse X", or asks to implement a new game feature and commit+push it.
+description: Use when reverse engineering Conquer.exe (Conquer Online private server client) with Ghidra MCP, finding/verifying game offsets (AOB signatures, string/RTTI anchors, call-graph), implementing game functions in the hook modules (auto_hunt, xp_skill, speed, buffs, gear_swap, auto_login), re-finding offsets after a client recompile, re-calibrating the auto-login canonical password table after a client update (requires a manual-login loginlog.txt from the user), or documenting findings in OFFSETS.md / RESEARCH_NOTES.md. Also use when the user says "find this function", "update offsets", "client updated", "auto login broken", "fill password wrong", "add a hook", "reverse X", or asks to implement a new game feature and commit+push it.
 ---
 
 # Conquer.exe Reverse Engineering & Implementation Workflow
@@ -95,9 +95,91 @@ For EVERY candidate address:
    fastcall vs cdecl — check `RET` vs `RET n`), field offsets, return values.
 4. Cross-check callers/callees against the documented chain. If the docs say
    the brain calls the walk function, the found walk function must be a callee
-   of the brain, with the right pushed args (`(x, y, radius)` / `&outPair`).
+   of the brain, with the right pushed args `(x, y, radius)` / `&outPair`.
 5. Record WHAT verified it (bytes seen, decompiled behavior) — that evidence
    goes into RESEARCH_NOTES.md.
+
+## Phase 2b — Auto-login re-calibration after client update (critical)
+
+The auto-login password fill depends on TWO build-specific things that NEW
+builds break. After a client recompile, do NOT trust the password fill until
+both are re-verified.
+
+### 1. Re-derive the canonical table (user must do a manual login)
+
+The canonical encoding `X[i] = raw[i] ^ canonTable[raw[i]]` uses a **build-
+specific 256-byte table** (same as the first CEncryptData's LCG key table,
+but differs per build). The hardcoded values in `auto_login.cpp` will be
+wrong after a recompile.
+
+**Instruct the user (paste this):**
+
+> Please run the hook with a manual login, then send the `loginlog.txt` file.
+> I need one line from the log:
+> ```
+> FILL_PASSWORD | HARDCODED canonTable X=...
+> ```
+> (This only appears if you clicked "Log In" or "Fill Password" before the
+> manual login. If you want a clean manual-only trace, use the `HOOK_ENTRY`
+> line instead — it shows the `dec=` value.)
+
+**Derivation from one manual login log:**
+
+1. Find the `HOOK_ENTRY` line with `slot=dlg+0x13BD0` and `dec="..."`.
+   The `dec` value is `X` (8 bytes for the 8-char password).
+2. The password is whatever the user typed (ask them, or assume it matches
+   `accountinfo.ini` `Pass=`).
+3. For each character position `i`, the canonical table entry is:
+   `canonTable[password[i]] = password[i] ^ X[i]`.
+4. Verify char-indexed (not position): the same character at different
+   positions must give the same XOR key. If `'3'` appears at pos 0 and 3,
+   both must give the same `canonTable['3']`.
+5. Update the `canonTable` array in `WritePasswordBlob()` with the new
+   values. The entries for chars NOT in the password should be left as 0
+   (identity fallback — will fail for those chars until derived).
+
+**Example from the 7952 build (reference):**
+```
+password = "3643748z"  (33 36 34 33 37 34 38 7A)
+X        = 04 A4 CD 04 C7 CD CF 97
+canon['3'] = 0x33 ^ 0x04 = 0x37  (verified: at pos 0 AND 3 → 0x04)
+canon['6'] = 0x36 ^ 0xA4 = 0x92
+canon['4'] = 0x34 ^ 0xCD = 0xF9  (verified: at pos 2 AND 5 → 0xCD)
+canon['7'] = 0x37 ^ 0xC7 = 0xF0
+canon['8'] = 0x38 ^ 0xCF = 0xF7
+canon['z'] = 0x7A ^ 0x97 = 0xED
+```
+
+### 2. Re-verify offsets (existing offset re-find workflow)
+
+The following offsets are used by the login flow and must be re-found:
+
+| Offset | How to find |
+|---|---|
+| `FUN_0101CB78` | login-packet sender — find by string "invalid Account or Psw" or by the prologue `PUSH 0x408` (EH frame) |
+| `dlg+0x13BD0` | CEncryptData password send slot — in `FUN_008A8FCA` find `LEA EAX,[EDI+0x13BD0]` then `PUSH EAX` before `CALL FUN_0101CB78` |
+| `dlg+0x13980` | reconnect password slot — same function, `CMOVNZ EAX,0x13980` |
+| `dlg+0x13B88` | account std::string — `LEA EAX,[EDI+0x13B88]` in FUN_008A8FCA |
+| `dlg+0x13938` | reconnect account std::string |
+| `dlg+0x13DD8` | editCEnc pointer — `MOV ECX,[EDI+0x13DD8]` at killfocus/Process calls |
+| `editCEnc+0x238` | raw text buffer — `FUN_005f2380(editCEnc+0x2C)` = `editCEnc+0x2C+0x20C`. Verify FUN_005f2380 returns `this+0x20C` |
+| `editCEnc+0x30C` | display CEncryptData — `LEA ECX,[EDI+0x30C]` in FUN_00602cbb |
+| `FUN_00607CD5` | edit-sync thunk — `ADD ECX,0x30C; JMP 0x00ED3602` |
+| `FUN_005F2296` | fgui edit GetString — `CMP [EBP+0xC],0; JZ GetString; else fill '*'` |
+| `FUN_005F2380` | text buffer accessor — `return this+0x20C` |
+| `FUN_00602CBB` | mygameinput::Process — per-keystroke handler |
+| `FUN_00EA20F0` | CEncryptData::SetString |
+| `FUN_00EB3383` | CEncryptData::GetString |
+| `FUN_00E9CC3F` | CEncryptData::CEncryptData (ctor) |
+| `FUN_008A8FCA` | LoginButtonHandler |
+| `FUN_008A965F` | reconnect login path |
+| `FUN_006074ED` | fgui edit text-set helper |
+| `FUN_0089C013` | CDlgLogin::Process (killfocus) |
+| `FUN_0089C605` | call site: `FUN_005f2296(editCEnc, &out, 0)` |
+| `FUN_0089C61D` | call site: `SetString(0x13BD0, X)` |
+| `FUN_010C1C27` | CMsgEncryptCode handler |
+| `DAT_019EC240` | 16-byte session key buffer |
+| `DAT_01A549A0` | session singleton (FUN_0043e581 returns). Code stored at +0x5328 |
 
 ## Phase 3 — Implement (follow existing module conventions)
 
