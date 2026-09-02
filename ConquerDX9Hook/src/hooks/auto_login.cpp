@@ -783,6 +783,10 @@ namespace AutoLogin
 	// because the Tips dialog would otherwise be picked as the login.
 	static bool IsDialogUsable(HWND hwnd)
 	{
+		// ONLY the CDlgLogin object's own m_hWnd (visible) counts as a usable
+		// login screen. Never accept an arbitrary visible window — in-game
+		// dialogs with Edit+Button children would otherwise be mistaken for
+		// the login screen and trigger false reconnect attempts.
 		if (!hwnd || !IsWindow(hwnd)) return false;
 		__try {
 			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
@@ -800,7 +804,7 @@ namespace AutoLogin
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		return IsWindowVisible(hwnd);
+		return false;
 	}
 
 	struct ChildScan
@@ -824,44 +828,11 @@ namespace AutoLogin
 		return TRUE;
 	}
 
-	static BOOL CALLBACK ScanChildTree(HWND hwnd, LPARAM lParam)
-	{
-		ChildScan* best = (ChildScan*)lParam;
-		if (!hwnd || !IsWindow(hwnd))
-			return TRUE;
-		if (hwnd == best->dialog)
-			return TRUE;
-
-		// Only consider this process's windows.
-		DWORD pid = 0;
-		GetWindowThreadProcessId(hwnd, &pid);
-		if (pid != GetCurrentProcessId())
-			return TRUE;
-
-		// A login-dialog candidate: an own window (child of the game root)
-		// with at least one Edit (account/password) AND one Button (Login).
-		ChildScan local;
-		local.dialog = hwnd;
-		local.edits = 0;
-		local.buttons = 0;
-		EnumChildWindows(hwnd, CountChildControls, (LPARAM)&local);
-
-		if (local.edits >= 1 && local.buttons >= 1 &&
-			(local.edits > best->edits || (local.edits == best->edits && local.buttons > best->buttons)))
-		{
-			best->dialog = hwnd;
-			best->edits = local.edits;
-			best->buttons = local.buttons;
-		}
-
-		// Recurse so a WS_CHILD dialog nested deeper in the tree is found.
-		EnumChildWindows(hwnd, ScanChildTree, lParam);
-		return TRUE;
-	}
-
-	// Finds the MFC login dialog. First tries the CDlgLogin object at
-	// gpDlgShell+0x39B948 (its m_hWnd at +0x20 is the login dialog, even when a
-	// Tips dialog is on top). Fallback to the old Edit+Button enumeration.
+	// Finds the MFC login dialog. Only the CDlgLogin object at
+	// gpDlgShell+0x39B948 is authoritative — its m_hWnd at +0x20 is the
+	// login dialog when visible. The EnumWindows fallback was removed because
+	// it would pick up any in-game dialog with Edit+Button children as a
+	// "login screen", causing false disconnect detection mid-game.
 	static HWND FindLoginDialog()
 	{
 		__try {
@@ -895,16 +866,6 @@ namespace AutoLogin
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		ChildScan best;
-		best.dialog = NULL;
-		best.edits = 0;
-		best.buttons = 0;
-
-		// Search every top-level window's child tree.
-		EnumWindows(ScanChildTree, (LPARAM)&best);
-
-		if (best.dialog && IsDialogUsable(best.dialog))
-			return best.dialog;
 		return NULL;
 	}
 
