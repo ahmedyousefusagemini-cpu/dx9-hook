@@ -181,20 +181,37 @@ void LogCredentialState(const char* tag)
 				(unsigned)(pwdOffs[i] & 0xFFFF), len, key, hex, dec);
 		}
 
-		// The fgui edit's own CEncryptData at *(dlg+0x13DD8)+0x30C.
+		// The fgui edit's own CEncryptData at *(dlg+0x13DD8)+0x30C
+		// and the base CEncryptData at *(dlg+0x13DD8)+0 (the canonical encoder).
 		void* editCEnc = *(void**)(dlg + 0x13DD8);
-		if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
-			char* editEnc = (char*)editCEnc + 0x30C;
-			int editLen = *(int*)(editEnc + 0x104);
-			char dec[256];
-			DecodeEnc(dec, sizeof(dec), editEnc);
-			char hex[160];
-			HexDump(hex, sizeof(hex), (const unsigned char*)(editEnc + 0x108),
-				(editLen > 0 && editLen <= 16) ? editLen : 0);
-			char key[64];
-			HexDump(key, sizeof(key), (const unsigned char*)editEnc, 16);
-			LogLogin(tag, "fgui editCEnc ptr=0x%08X len=%d key=%s blob=%s dec=\"%s\"",
-				(unsigned)editCEnc, editLen, key, hex, dec);
+		if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208) && !IsBadReadPtr(editCEnc, 0x208)) {
+			// Base CEncryptData (canonical, used by killfocus GetString)
+			{
+				int len = *(int*)((char*)editCEnc + 0x104);
+				char dec[256];
+				DecodeEnc(dec, sizeof(dec), editCEnc);
+				char hex[160];
+				HexDump(hex, sizeof(hex), (const unsigned char*)((char*)editCEnc + 0x108),
+					(len > 0 && len <= 16) ? len : 0);
+				char key[64];
+				HexDump(key, sizeof(key), (const unsigned char*)editCEnc, 16);
+				LogLogin(tag, "editCEnc+0 base ptr=0x%08X len=%d key=%s blob=%s dec=\"%s\"",
+					(unsigned)editCEnc, len, key, hex, dec);
+			}
+			// +0x30C display CEncryptData
+			{
+				char* editEnc = (char*)editCEnc + 0x30C;
+				int editLen = *(int*)(editEnc + 0x104);
+				char dec[256];
+				DecodeEnc(dec, sizeof(dec), editEnc);
+				char hex[160];
+				HexDump(hex, sizeof(hex), (const unsigned char*)(editEnc + 0x108),
+					(editLen > 0 && editLen <= 16) ? editLen : 0);
+				char key[64];
+				HexDump(key, sizeof(key), (const unsigned char*)editEnc, 16);
+				LogLogin(tag, "editCEnc+0x30C disp ptr=0x%08X len=%d key=%s blob=%s dec=\"%s\"",
+					(unsigned)editCEnc, editLen, key, hex, dec);
+			}
 		} else {
 			LogLogin(tag, "fgui editCEnc (unreadable)");
 		}

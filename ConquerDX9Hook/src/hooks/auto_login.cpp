@@ -196,48 +196,14 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		DumpSessionKeyState("HOOK_ENTRY");
 		LogCredentialState("HOOK_ENTRY");
 	}
-	// The fgui edit's CEncryptData at *(dlg+0x13DD8)+0x30C is the one the
-	// server seeded with the session key (CanonKey) via CMsgEncryptCode.
-	// Re-encrypt the password into the edit RIGHT NOW with its CURRENT key
-	// table (which should be the session-seeded CanonKey at packet-build time),
-	// then copy the edit's fresh blob into the MFC slots the packet builder
-	// reads (0x13BD0 / 0x13980). This replicates the manual login's killfocus
-	// flow: the game reads the edit's text, SetStrings 0x13BD0 with its OWN
-	// key, then syncs 0x13BD0→edit — but we do the reverse: freshen the edit
-	// first, then copy the CanonKey-encrypted blob to the MFC slots.
+	// WritePasswordBlob (called right before the click) already stored the
+	// canonical-encoded X in all slots. No mutation needed here — the packet
+	// builder reads the send slot as-is.
 	if (AutoLogin::g_activePassword[0])
 	{
-		__try {
-			void* shell = *(void**)0x01A5A510;
-			if (shell) {
-				char* dlg = (char*)shell + 0x39B948;
-				typedef void (__thiscall* SetEncStrFn)(void*, const char*);
-				// 1. Re-encrypt the fgui edit's CEncryptData with the CURRENT
-				//    CanonKey (the edit's own key table, seeded by the server).
-				void* editCEnc = *(void**)(dlg + 0x13DD8);
-				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
-					char* editEnc = (char*)editCEnc + 0x30C;
-					DWORD op = 0, tp = 0;
-					if (VirtualProtect(editEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-						((SetEncStrFn)0x00EA20F0)(editEnc, AutoLogin::g_activePassword);
-						VirtualProtect(editEnc, 0x208, op, &tp);
-					}
-					// 2. Copy the fresh edit blob into the MFC slots.
-					int editLen = *(int*)(editEnc + 0x104);
-					if (editLen > 0 && editLen <= 0x100) {
-						const uintptr_t offs[2] = {0x13BD0, 0x13980};
-						for (int oi = 0; oi < 2; ++oi) {
-							char* pEnc = dlg + offs[oi];
-							if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-								*(int*)(pEnc + 0x104) = editLen;
-								memcpy(pEnc + 0x108, editEnc + 0x108, editLen + 1);
-								VirtualProtect(pEnc, 0x208, op, &tp);
-							}
-						}
-					}
-				}
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
+		// No-op: WritePasswordBlob already set up the slots correctly.
+		// The raw blob copy or re-encrypt at this point would corrupt the
+		// canonical-encoded value that the server validates.
 	}
 	// Login-sequence log: final values just before the packet is sent.
 	{
@@ -1041,36 +1007,68 @@ namespace AutoLogin
 	// 0x13BD0 (MFC normal path), 0x13980 (poker/reconnect), and the fgui
 	// edit's CEncryptData at *(dlg+0x13DD8)+0x30C (the EnterGame button reads
 	// from HERE — debug: successful login has EditCEnc len=8, failed has
-	// EditCEnc len=0). Uses SetString (FUN_00EA20F0) on each slot with its
-	// OWN key table, then the game's edit-sync FUN_00607cd5 to propagate
-	// 0x13BD0 → editCEnc (GetString(0x13BD0) → SetString(editCEnc+0x30C)).
+	// EditCEnc len=0).
+	//
+	// Canonical-encoding flow (verified from manual-login trace):
+	//   The game does NOT SetString the raw password into 0x13BD0. The fgui
+	//   edit's BASE CEncryptData at *(dlg+0x13DD8)+0 has the FIXED canonical
+	//   key table. SetString(edit+0, raw) produces X — the value that stays
+	//   constant across sessions for the same password (manual trace dec is
+	//   "04 A4 CD 04 C7 CD CF 97" for every manual login). Then the game
+	//   SetStrings X into 0x13BD0/0x13980 and the display copy at +0x30C.
+	//   The server validates X (not the raw password), so we must replicate:
+	//   SetString(edit+0, raw) → GetString(edit+0)=X → SetString(slots, X).
 	static void WritePasswordBlob()
 	{
 		typedef void (__thiscall* SetEncStrFn)(void*, const char*);
-		typedef void (__thiscall* EditSyncFn)(void* editCEnc, void* src);
+		typedef void (__thiscall* EncGetStringFunc)(void* encData, char* out);
 		__try {
 			void* shell = *(void**)0x01A5A510;
 			if (!shell || !g_activePassword[0]) return;
 			char* dlg = (char*)shell + 0x39B948;
-			// Write to MFC slots via SetString (uses each slot's own key table).
+			void* editCEnc = *(void**)(dlg + 0x13DD8);
+			if (!editCEnc || IsBadReadPtr(editCEnc, 0x208)) return;
+
+			// Step 1: canonical-encrypt the raw password → X via edit+0 base.
+			DWORD op = 0, tp = 0;
+			if (!VirtualProtect(editCEnc, 0x208, PAGE_EXECUTE_READWRITE, &op))
+				return;
+			((SetEncStrFn)0x00EA20F0)(editCEnc, g_activePassword);
+			VirtualProtect(editCEnc, 0x208, op, &tp);
+
+			// Step 2: GetString(edit+0) → X
+			char X[256] = "";
+			{
+				char tmp[256];
+				((EncGetStringFunc)0x00EB3383)(editCEnc, tmp);
+				int cap = *(int*)(tmp + 0x14);
+				char* ps = (cap <= 15) ? tmp : *(char**)tmp;
+				int sz = *(int*)(tmp + 0x10);
+				if (sz > 0 && sz < 200 && ps && !IsBadReadPtr(ps, sz)) {
+					memcpy(X, ps, sz); X[sz] = 0;
+				}
+			}
+			if (X[0] == 0) return;  // canonical encrypt failed
+
+			// Step 3: SetString X into the MFC slots.
 			const uintptr_t offs[2] = {0x13BD0, 0x13980};
 			for (int oi = 0; oi < 2; ++oi) {
 				void* pEnc = dlg + offs[oi];
-				DWORD op = 0;
 				if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-					((SetEncStrFn)0x00EA20F0)(pEnc, g_activePassword);
-					DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+					((SetEncStrFn)0x00EA20F0)(pEnc, X);
+					VirtualProtect(pEnc, 0x208, op, &tp);
 				}
 			}
-			// Sync 0x13BD0 → fgui edit's CEncryptData (the game's own edit-sync).
-			// This is what the game does on manual typing — the EnterGame button
-			// reads the password from HERE (debug: EditCEnc len=8 in successful
-			// manual login, len=0 in our failed fill).
-			void* editCEnc = *(void**)(dlg + 0x13DD8);
-			if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208))
-				((EditSyncFn)0x00607CD5)(editCEnc, dlg + 0x13BD0);
+			// Step 4: sync X into the display copy (edit+0x30C).
+			if (!IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
+				char* dispEnc = (char*)editCEnc + 0x30C;
+				if (VirtualProtect(dispEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+					((SetEncStrFn)0x00EA20F0)(dispEnc, X);
+					VirtualProtect(dispEnc, 0x208, op, &tp);
+				}
+			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		LogLogin("FILL_PASSWORD", "blob written to all slots");
+		LogLogin("FILL_PASSWORD", "blob written to all slots via canonical encoder");
 		LogCredentialState("FILL_PASSWORD");
 	}
 
