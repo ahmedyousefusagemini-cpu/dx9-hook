@@ -1,5 +1,8 @@
-﻿#include <windows.h>
+﻿#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <windows.h>
 #include <stdio.h>
+#include <ctype.h>
 #include "imgui.h"
 #include "MinHook.h"
 #include "login_trace.h"
@@ -85,6 +88,11 @@ namespace AutoLogin {
 	extern HWND g_dlgMemAccountHwnd;
 	extern HWND g_dlgMemPasswordHwnd;
 	extern HWND g_dlgMemTokenHwnd;
+	extern bool g_autoRelogin;
+	extern bool g_wasInGame;
+	extern int  g_reloginState;
+	extern bool g_connectivityOk;
+	extern int  g_reloginAttempts;
 }
 
 // MinHook target: FUN_0101CB78 (cdecl) - the login packet sender.
@@ -445,6 +453,246 @@ static bool InstallGetWindowTextHooks()
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Auto relogin support: internet check + disconnect-box auto-dismiss.
+// ---------------------------------------------------------------------------
+
+// Case-insensitive substring match.
+static bool ContainsI(const char* haystack, const char* needle)
+{
+	if (!haystack || !needle)
+		return false;
+	size_t hl = strlen(haystack);
+	size_t nl = strlen(needle);
+	if (nl == 0 || nl > hl)
+		return false;
+	for (size_t i = 0; i + nl <= hl; i++)
+	{
+		size_t j = 0;
+		for (; j < nl; j++)
+		{
+			if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j]))
+				break;
+		}
+		if (j == nl)
+			return true;
+	}
+	return false;
+}
+
+// True when a message-box / window title text looks like the disconnect
+// error the game shows when the server drops us:
+//   "TipError: Disconnected with game server. Please login the game again!"
+static bool IsDisconnectBoxText(const char* text)
+{
+	if (!text)
+		return false;
+	static const char* const kDisconnectKeywords[] = {
+		"disconnected with game server",
+		"please login the game again",
+		"connection with game server",
+		"disconnect from server",
+		"connection lost",
+	};
+	for (int i = 0; i < (int)(sizeof(kDisconnectKeywords) / sizeof(kDisconnectKeywords[0])); i++)
+	{
+		if (ContainsI(text, kDisconnectKeywords[i]))
+			return true;
+	}
+	return false;
+}
+
+// Non-blocking TCP connect to 8.8.8.8:53 (Google DNS) with a 3s select
+// timeout. A writable socket means the internet is reachable.
+static bool IsInternetUp()
+{
+	WSADATA wsa;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+		return false;
+	bool up = false;
+	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (s != INVALID_SOCKET)
+	{
+		u_long nonblock = 1;
+		ioctlsocket(s, FIONBIO, &nonblock);
+		sockaddr_in addr;
+		memset(&addr, 0, sizeof(addr));
+		addr.sin_family = AF_INET;
+		addr.sin_port = htons(53);
+		addr.sin_addr.s_addr = inet_addr("8.8.8.8");
+		int rc = connect(s, (sockaddr*)&addr, sizeof(addr));
+		if (rc == 0)
+		{
+			up = true;
+		}
+		else if (WSAGetLastError() == WSAEWOULDBLOCK)
+		{
+			fd_set wfds;
+			FD_ZERO(&wfds);
+			FD_SET(s, &wfds);
+			timeval tv;
+			tv.tv_sec = 3;
+			tv.tv_usec = 0;
+			rc = select(0, NULL, &wfds, NULL, &tv);
+			if (rc > 0)
+				up = true;
+		}
+		closesocket(s);
+	}
+	WSACleanup();
+	return up;
+}
+
+// MinHook on MessageBoxA/W: when the game shows the disconnect error while
+// we were in game, answer IDOK immediately (box never appears). Everything
+// else passes through untouched.
+typedef int (WINAPI *MessageBoxAFunc)(HWND, LPCSTR, LPCSTR, UINT);
+typedef int (WINAPI *MessageBoxWFunc)(HWND, LPCWSTR, LPCWSTR, UINT);
+static MessageBoxAFunc g_origMessageBoxA = NULL;
+static MessageBoxWFunc g_origMessageBoxW = NULL;
+static bool g_mbHookInstalled = false;
+
+static int WINAPI HookedMessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType)
+{
+	if (AutoLogin::g_autoRelogin && AutoLogin::g_wasInGame && lpText &&
+		IsDisconnectBoxText(lpText))
+	{
+		LogLogin("MB_AUTO", "auto-dismissed disconnect box: \"%s\"", lpText);
+		return IDOK;
+	}
+	if (g_origMessageBoxA)
+		return g_origMessageBoxA(hWnd, lpText, lpCaption, uType);
+	return MessageBoxA(hWnd, lpText, lpCaption, uType);
+}
+
+static int WINAPI HookedMessageBoxW(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType)
+{
+	if (AutoLogin::g_autoRelogin && AutoLogin::g_wasInGame && lpText)
+	{
+		char textA[512] = "";
+		int n = WideCharToMultiByte(CP_ACP, 0, lpText, -1, textA, sizeof(textA), NULL, NULL);
+		if (n > 0 && IsDisconnectBoxText(textA))
+		{
+			LogLogin("MB_AUTO", "auto-dismissed disconnect box (W): \"%s\"", textA);
+			return IDOK;
+		}
+	}
+	if (g_origMessageBoxW)
+		return g_origMessageBoxW(hWnd, lpText, lpCaption, uType);
+	return MessageBoxW(hWnd, lpText, lpCaption, uType);
+}
+
+static bool InstallMessageBoxHooks()
+{
+	if (g_mbHookInstalled)
+		return true;
+	HMODULE hUser = GetModuleHandleA("user32.dll");
+	if (!hUser)
+		return false;
+	void* pMBA = (void*)GetProcAddress(hUser, "MessageBoxA");
+	void* pMBW = (void*)GetProcAddress(hUser, "MessageBoxW");
+	if (!pMBA || !pMBW)
+		return false;
+	MH_STATUS st = MH_Initialize();
+	if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED)
+		return false;
+	if (MH_CreateHook(pMBA, (LPVOID)HookedMessageBoxA, (LPVOID*)&g_origMessageBoxA) != MH_OK)
+		return false;
+	if (MH_CreateHook(pMBW, (LPVOID)HookedMessageBoxW, (LPVOID*)&g_origMessageBoxW) != MH_OK)
+		return false;
+	if (MH_EnableHook(pMBA) != MH_OK)
+		return false;
+	if (MH_EnableHook(pMBW) != MH_OK)
+		return false;
+	g_mbHookInstalled = true;
+	LogLogin("MB_AUTO", "MessageBoxA/W hooks installed");
+	return true;
+}
+
+// Scans the process's top-level windows for a modal disconnect box (a window
+// whose title text matches IsDisconnectBoxText) and clicks its OK button.
+// Fallback for boxes the MessageBox hook cannot catch (fgui/MFC dialogs).
+static BOOL CALLBACK FindDisconnectOkProc(HWND hwnd, LPARAM lParam)
+{
+	(void)lParam;
+	char cls[32] = "";
+	if (GetClassNameA(hwnd, cls, sizeof(cls)) <= 0)
+		return TRUE;
+	if (lstrcmpiA(cls, "Button") != 0)
+		return TRUE;
+	char text[64] = "";
+	GetWindowTextA(hwnd, text, sizeof(text));
+	if (lstrcmpiA(text, "OK") == 0 || lstrcmpiA(text, "确定") == 0)
+	{
+		SendMessage(hwnd, BM_CLICK, 0, 0);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+struct DisconnectBoxScan
+{
+	HWND owner;   // the dialog owning a matching child text
+	bool matched; // title matched already
+};
+
+static BOOL CALLBACK FindDisconnectChildTextProc(HWND hwnd, LPARAM lParam)
+{
+	DisconnectBoxScan* scan = (DisconnectBoxScan*)lParam;
+	if (!hwnd)
+		return TRUE;
+	char text[256] = "";
+	if (GetWindowTextA(hwnd, text, sizeof(text)) > 0 && IsDisconnectBoxText(text))
+	{
+		scan->owner = GetAncestor(hwnd, GA_ROOT);
+		scan->matched = true;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static BOOL CALLBACK FindDisconnectBoxProc(HWND hwnd, LPARAM lParam)
+{
+	(void)lParam;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (pid != GetCurrentProcessId())
+		return TRUE;
+	if (!IsWindowVisible(hwnd))
+		return TRUE;
+	char title[256] = "";
+	if (GetWindowTextA(hwnd, title, sizeof(title)) > 0 && IsDisconnectBoxText(title))
+	{
+		LogLogin("MB_AUTO", "found disconnect box HWND=0x%08X title=\"%s\" - clicking OK", (unsigned)hwnd, title);
+		EnumChildWindows(hwnd, FindDisconnectOkProc, 0);
+		return FALSE;
+	}
+	// Title did not match - check child controls (Static text holders).
+	DisconnectBoxScan scan;
+	scan.owner = NULL;
+	scan.matched = false;
+	EnumChildWindows(hwnd, FindDisconnectChildTextProc, (LPARAM)&scan);
+	if (scan.matched && scan.owner)
+	{
+		LogLogin("MB_AUTO", "found disconnect box (child text) HWND=0x%08X - clicking OK", (unsigned)scan.owner);
+		EnumChildWindows(scan.owner, FindDisconnectOkProc, 0);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+// Dismisses the fgui/MFC disconnect dialog if it is showing. Throttled to
+// once per 400 ms (cheap: only scans while in-game or disconnected).
+static void DismissDisconnectBox()
+{
+	static DWORD s_lastScan = 0;
+	DWORD now = GetTickCount();
+	if (now - s_lastScan < 400)
+		return;
+	s_lastScan = now;
+	EnumWindows(FindDisconnectBoxProc, 0);
+}
+
 namespace AutoLogin
 {
 	// User intent - auto-click the Login button until the dialog disappears.
@@ -474,6 +722,28 @@ namespace AutoLogin
 	char g_activePassword[128] = ""; // Pass of the Use=1 section ("" if none)
 	char g_passwordSection[32] = ""; // section name for Pass
 	char g_passwordFillStatus[96] = "";// last "Fill Password" result
+
+	// ------------------------------------------------------------------
+	// Auto relogin state machine (server disconnect -> check internet ->
+	// auto login again). Toggle g_autoRelogin (default ON, ini-persisted).
+	// ------------------------------------------------------------------
+	bool g_autoRelogin = true;      // master switch: auto relogin after drop
+	// Relogin states (g_reloginState):
+	//   0 REL_IDLE         - startup, no login yet / feature off
+	//   1 REL_IN_GAME      - logged in and playing (watch for disconnect)
+	//   2 REL_DISCONNECTED - dialog reappeared after being in game
+	//   3 REL_CHECK_NET    - checking internet reachability (8.8.8.8:53)
+	//   4 REL_WAIT_NET     - internet down; backing off before re-check
+	int  g_reloginState = 0;
+	bool g_wasInGame = false;       // a login completed (dialog closed) before
+	bool g_connectivityOk = false;  // result of the last internet check
+	int  g_reloginAttempts = 0;     // reconnect attempts since the last drop
+	DWORD g_disconnectTick = 0;     // when the disconnect was first noticed
+	DWORD g_connectivityCheckTick = 0; // last time we ran the internet check
+	int  g_connectivityRetryMs = 5000; // backoff between checks (grows to 60s)
+	char g_reloginStatus[128] = "";    // UI status line ("", "checking...", etc.)
+	DWORD g_lastDisconnectTick = 0;    // for the "last disconnect" UI readout
+	bool g_seenLoginDialog = false;    // latch: login dialog seen at least once
 
 	// Runtime discovery (cached, re-validated per frame).
 	HWND g_cachedDialog = NULL;
@@ -1510,6 +1780,129 @@ namespace AutoLogin
 			}
 		}
 
+		// ------------------------------------------------------------------
+		// Auto relogin state machine. Runs BEFORE the auto-fill blocks so the
+		// arm flags land in the same frame the dialog is first seen.
+		//   g_autoRelogin on  -> the FIRST login is automatic too (fill +
+		//   click). While in game, the login dialog reappearing means the
+		//   server dropped us; we auto-dismiss the error box, wait for the
+		//   login screen, check internet (8.8.8.8:53), and when it is back
+		//   re-arm the fill+click loop.
+		// States: 0=IDLE 1=WAIT_LOGIN 2=IN_GAME 3=DISCONNECTED
+		//         4=CHECK_NET 5=WAIT_NET
+		// ------------------------------------------------------------------
+		InstallMessageBoxHooks();
+		if (g_autoRelogin)
+		{
+			const int REL_IDLE = 0;
+			const int REL_WAIT_LOGIN = 1;
+			const int REL_IN_GAME = 2;
+			const int REL_DISCONNECTED = 3;
+			const int REL_CHECK_NET = 4;
+			const int REL_WAIT_NET = 5;
+
+			bool dlgUsable = IsDialogUsable(g_cachedDialog);
+			DismissDisconnectBox(); // auto-click OK on the error box if shown
+
+			switch (g_reloginState)
+			{
+			case REL_IDLE:
+				if (dlgUsable)
+				{
+					// First time at the login screen: arm the full auto-login
+					// (fill account+password, click until the dialog closes).
+					g_seenLoginDialog = true;
+					g_autoFillAccount = true;
+					g_autoFillPassword = true;
+					g_autoClickLogin = true;
+					g_lastClickTick = now; // let the dialog settle before the first click
+					g_reloginState = REL_WAIT_LOGIN;
+					strcpy_s(g_reloginStatus, "first login armed");
+					LogLogin("REL", "login screen appeared - arming auto login");
+				}
+				else if (g_seenLoginDialog || g_loginCompleted)
+				{
+					// No dialog up and we have logged in before (or are mid
+					// session): the feature was toggled on while in game.
+					g_wasInGame = true;
+					g_reloginState = REL_IN_GAME;
+					strcpy_s(g_reloginStatus, "in game");
+				}
+				break;
+			case REL_WAIT_LOGIN:
+				if (g_seenLoginDialog && !dlgUsable)
+				{
+					// The login dialog closed = we are in game.
+					g_wasInGame = true;
+					g_reloginState = REL_IN_GAME;
+					strcpy_s(g_reloginStatus, "in game");
+					LogLogin("REL", "login OK - in game");
+				}
+				break;
+			case REL_IN_GAME:
+				if (dlgUsable)
+				{
+					// Dialog back while we were in game -> server dropped us.
+					g_wasInGame = false;
+					g_disconnectTick = now;
+					g_lastDisconnectTick = now;
+					g_connectivityRetryMs = 5000;
+					g_reloginAttempts = 0;
+					g_reloginState = REL_DISCONNECTED;
+					strcpy_s(g_reloginStatus, "disconnected");
+					LogLogin("REL", "disconnect detected - login dialog reappeared");
+				}
+				break;
+			case REL_DISCONNECTED:
+				// Wait for the login screen to fully come back, then check net.
+				if (dlgUsable)
+				{
+					g_connectivityCheckTick = 0; // force an immediate check
+					g_reloginState = REL_CHECK_NET;
+				}
+				break;
+			case REL_CHECK_NET:
+				if (g_connectivityCheckTick == 0 || now - g_connectivityCheckTick >= 3000)
+				{
+					g_connectivityCheckTick = now;
+					g_connectivityOk = IsInternetUp();
+					if (g_connectivityOk)
+					{
+						// Internet back: re-arm fill+click on the new dialog.
+						g_autoFillAccount = true;
+						g_autoFillPassword = true;
+						g_autoClickLogin = true;
+						g_filledAccountDialog = NULL;
+						g_filledPasswordDialog = NULL;
+						g_loginCompleted = false;
+						g_clickCount = 0;
+						g_lastClickTick = now; // wait a full interval before clicking
+						g_reloginAttempts++;
+						g_reloginState = REL_WAIT_LOGIN;
+						strcpy_s(g_reloginStatus, "internet OK - relogging in");
+						LogLogin("REL", "internet up - re-armed login (attempt %d)", g_reloginAttempts);
+					}
+					else
+					{
+						g_reloginState = REL_WAIT_NET;
+						strcpy_s(g_reloginStatus, "internet down - waiting");
+						LogLogin("REL", "internet DOWN - retry in %d ms", g_connectivityRetryMs);
+					}
+				}
+				break;
+			case REL_WAIT_NET:
+				if (now - g_connectivityCheckTick >= (DWORD)g_connectivityRetryMs)
+				{
+					g_connectivityRetryMs = g_connectivityRetryMs * 2;
+					if (g_connectivityRetryMs > 60000)
+						g_connectivityRetryMs = 60000;
+					g_reloginState = REL_CHECK_NET;
+					strcpy_s(g_reloginStatus, "re-checking internet...");
+				}
+				break;
+			}
+		}
+
 		// Auto-fill the account field once per login dialog instance (the
 		// login screen just appeared or reappeared after a failed login).
 		if (g_autoFillAccount && g_filledAccountDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
@@ -1636,6 +2029,44 @@ void RenderAutoLoginInterface()
 			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", AutoLogin::g_passwordFillStatus);
 	}
 
+	if (ImGui::Checkbox("Auto Relogin (fill + click after disconnect)", &AutoLogin::g_autoRelogin))
+	{
+		if (AutoLogin::g_autoRelogin)
+		{
+			// Re-arm the state machine on enable.
+			AutoLogin::g_reloginState = 0;
+			AutoLogin::g_wasInGame = false;
+			AutoLogin::g_connectivityCheckTick = 0;
+			AutoLogin::g_seenLoginDialog = true; // prevent false IDLE→IN_GAME at startup
+		}
+	}
+	if (AutoLogin::g_autoRelogin)
+	{
+		ImGui::SameLine();
+		const char* stateName = "";
+		switch (AutoLogin::g_reloginState)
+		{
+		case 0: stateName = "IDLE"; break;
+		case 1: stateName = "LOGIN"; break;
+		case 2: stateName = "IN GAME"; break;
+		case 3: stateName = "DISCONNECTED"; break;
+		case 4: stateName = "CHECK NET"; break;
+		case 5: stateName = "WAIT NET"; break;
+		}
+		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", stateName);
+		if (AutoLogin::g_reloginStatus[0])
+		{
+			ImGui::TextDisabled("%s", AutoLogin::g_reloginStatus);
+		}
+		ImGui::TextDisabled("Internet check: %s | Attempts: %d | Retry: %d ms",
+			AutoLogin::g_connectivityOk ? "UP" : "?",
+			AutoLogin::g_reloginAttempts, AutoLogin::g_connectivityRetryMs);
+		if (AutoLogin::g_lastDisconnectTick)
+		{
+			DWORD secs = (GetTickCount() - AutoLogin::g_lastDisconnectTick) / 1000;
+			ImGui::TextDisabled("Last disconnect: %u s ago", (unsigned)secs);
+		}
+	}
 	if (ImGui::Checkbox("Auto fill Account", &AutoLogin::g_autoFillAccount))
 	{
 		// Toggle on/off — no side effects needed

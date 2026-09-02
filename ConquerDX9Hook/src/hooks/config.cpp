@@ -79,6 +79,7 @@ namespace AutoLogin
 	extern int  g_buttonIdOverride;
 	extern int  g_accountEditIndex;
 	extern int  g_passwordEditIndex;
+	extern bool g_autoRelogin;
 }
 
 extern bool g_isWireframeEnabled;
@@ -162,6 +163,7 @@ void SaveConfig()
 	WritePrivateProfileStringA("AutoLogin", "AutoClick", AutoLogin::g_autoClickLogin ? "1" : "0", path);
 	WritePrivateProfileStringA("AutoLogin", "AutoFillAccount", AutoLogin::g_autoFillAccount ? "1" : "0", path);
 	WritePrivateProfileStringA("AutoLogin", "AutoFillPassword", AutoLogin::g_autoFillPassword ? "1" : "0", path);
+	WritePrivateProfileStringA("AutoLogin", "AutoRelogin", AutoLogin::g_autoRelogin ? "1" : "0", path);
 	WriteInt("AutoLogin", "ClickIntervalMs", AutoLogin::g_clickIntervalMs);
 	WriteInt("AutoLogin", "ClickMethod", AutoLogin::g_clickMethod);
 	WriteInt("AutoLogin", "ButtonIdOverride", AutoLogin::g_buttonIdOverride);
@@ -241,6 +243,7 @@ void LoadConfig()
 	AutoLogin::g_autoClickLogin = GetPrivateProfileIntA("AutoLogin", "AutoClick", 0, path) != 0;
 	AutoLogin::g_autoFillAccount = GetPrivateProfileIntA("AutoLogin", "AutoFillAccount", 0, path) != 0;
 	AutoLogin::g_autoFillPassword = GetPrivateProfileIntA("AutoLogin", "AutoFillPassword", 0, path) != 0;
+	AutoLogin::g_autoRelogin = GetPrivateProfileIntA("AutoLogin", "AutoRelogin", 1, path) != 0;
 	AutoLogin::g_clickIntervalMs = GetPrivateProfileIntA("AutoLogin", "ClickIntervalMs", 1000, path);
 	if (AutoLogin::g_clickIntervalMs < 250) AutoLogin::g_clickIntervalMs = 250;
 	if (AutoLogin::g_clickIntervalMs > 5000) AutoLogin::g_clickIntervalMs = 5000;
