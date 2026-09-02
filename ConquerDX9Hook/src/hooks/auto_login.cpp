@@ -776,6 +776,7 @@ namespace AutoLogin
 
 	static DWORD g_lastClickTick = 0;
 	static bool g_clickInProgress = false;
+	static DWORD g_autoLoginStartTick = 0; // when the login screen was first seen (5s pre-arm delay)
 
 	// ------------------------------------------------------------------
 	// Window discovery
@@ -1791,8 +1792,17 @@ namespace AutoLogin
 			case REL_IDLE:
 				if (dlgUsable)
 				{
-					// First time at the login screen: arm the full auto-login
+					// First time at the login screen: wait 5 seconds for the
+					// client to finish loading, THEN arm the full auto-login
 					// (fill account+password, click until the dialog closes).
+					if (g_autoLoginStartTick == 0)
+						g_autoLoginStartTick = now;
+					if (now - g_autoLoginStartTick < 5000)
+					{
+						strcpy_s(g_reloginStatus, "login screen up - auto login in 5s");
+						break;
+					}
+					g_autoLoginStartTick = 0;
 					g_seenLoginDialog = true;
 					g_autoFillAccount = true;
 					g_autoFillPassword = true;
