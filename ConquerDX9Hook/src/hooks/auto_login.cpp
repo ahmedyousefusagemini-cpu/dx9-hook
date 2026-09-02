@@ -78,33 +78,31 @@ static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
 {
-	// At this exact moment the packet is being built, so the CEncryptData key
-	// tables are FINAL (session seed applied). Re-encrypt the password blob
-	// right now with the CURRENT key table so the packet carries a blob the
-	// server can decrypt. Manual typing works because the game does SetString
-	// at this same late point (focus-kill handler 0x0089c61d). Our fill runs
-	// earlier, before the session seed lands in 0x13BD0's key table — so we
-	// must NOT rely on the earlier blob.
+	// The fgui edit's CEncryptData at *(dlg+0x13DD8)+0x30C is encrypted with
+	// the server's session key (CanonKey). Overwrite 0x13BD0 with the edit's
+	// blob so the packet carries what the server can decrypt — the edit's key
+	// table is the one the server seeded via CMsgEncryptCode.
 	if (AutoLogin::g_activePassword[0])
 	{
 		__try {
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
 				char* dlg = (char*)shell + 0x39B948;
-				typedef void (__thiscall* SetEncStrFn)(void*, const char*);
-				// Re-encrypt the slot the handler actually sends (0x13BD0 normal,
-				// 0x13980 reconnect). Only touch it if the game passed it as the
-				// password pointer OR it matches our written len, so manual login
-				// is never corrupted by our earlier write being overwritten.
-				const uintptr_t offs[2] = {0x13BD0, 0x13980};
-				for (int oi = 0; oi < 2; ++oi) {
-					void* pEnc = dlg + offs[oi];
-					int plen = *(int*)((char*)pEnc + 0x104);
-					if (plen > 0 && plen <= 0x100) {
-						DWORD op = 0;
-						if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
-							((SetEncStrFn)0x00EA20F0)(pEnc, AutoLogin::g_activePassword);
-							DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+				void* editCEnc = *(void**)(dlg + 0x13DD8);
+				if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
+					char* editEnc = (char*)editCEnc + 0x30C;
+					int editLen = *(int*)(editEnc + 0x104);
+					if (editLen > 0 && editLen <= 0x100) {
+						// Copy the edit's blob into 0x13BD0 and 0x13980.
+						const uintptr_t offs[2] = {0x13BD0, 0x13980};
+						for (int oi = 0; oi < 2; ++oi) {
+							char* pEnc = dlg + offs[oi];
+							DWORD op = 0;
+							if (VirtualProtect(pEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {
+								*(int*)(pEnc + 0x104) = editLen;
+								memcpy(pEnc + 0x108, editEnc + 0x108, editLen + 1);
+								DWORD tp = 0; VirtualProtect(pEnc, 0x208, op, &tp);
+							}
 						}
 					}
 				}
