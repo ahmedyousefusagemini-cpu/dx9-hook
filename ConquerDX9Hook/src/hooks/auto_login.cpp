@@ -1083,6 +1083,22 @@ namespace AutoLogin
 					VirtualProtect(dispEnc, 0x208, op, &tp);
 				}
 			}
+			// ALSO populate the fgui edit's raw text buffer at +0x20C
+			// (FUN_005f2380 returns editCEnc+0x20C; the game's killfocus /
+			// mygameinput re-encodes from this buffer). The user's
+			// "type then delete" trick works because typing fills this
+			// buffer. Without it the fgui framework treats the field as
+			// empty and the login packet carries no password.
+			if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x20C, rawLen + 1)) {
+				char* textBuf = (char*)editCEnc + 0x20C;
+				if (VirtualProtect(textBuf, rawLen + 1, PAGE_EXECUTE_READWRITE, &op)) {
+					memcpy(textBuf, raw, rawLen + 1);
+					VirtualProtect(textBuf, rawLen + 1, op, &tp);
+					LogLogin("FILL_PASSWORD", "edit text buffer +0x20C wrote \"%s\"", raw);
+				}
+			} else {
+				LogLogin("FILL_PASSWORD", "edit text buffer +0x20C (unwritable)");
+			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 		LogLogin("FILL_PASSWORD", "blob written to all slots via canonical encoder");
 		LogCredentialState("FILL_PASSWORD");
