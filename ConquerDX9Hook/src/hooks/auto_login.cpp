@@ -1,4 +1,5 @@
 ﻿#include <windows.h>
+#include <stdio.h>
 #include "imgui.h"
 #include "MinHook.h"
 #include "login_trace.h"
@@ -195,6 +196,7 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			DumpEncSlot("HOOK_ENTRY", "pwdSlot", password);
 		DumpSessionKeyState("HOOK_ENTRY");
 		LogCredentialState("HOOK_ENTRY");
+	}
 	// WritePasswordBlob (called right before the click) already stored the
 	// canonical-encoded X in all slots. No mutation needed here — the packet
 	// builder reads the send slot as-is.
