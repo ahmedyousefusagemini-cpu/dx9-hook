@@ -701,6 +701,7 @@ namespace AutoLogin
 	bool g_autoFillAccount = false;   // auto-fill account when the login dialog appears
 	bool g_autoFillPassword = false;  // auto-fill password when the login dialog appears
 	int  g_clickIntervalMs = 1000;   // min ms between automatic clicks
+	int  g_clickRetryMs = 10000;     // min ms after a click before retrying (10s)
 	int  g_clickCount = 0;           // total clicks sent this session
 	bool g_loginCompleted = false;   // a click made the login dialog disappear
 	const char* g_loginResult = "idle"; // "failed", "sent", "ok"
@@ -1953,9 +1954,9 @@ namespace AutoLogin
 			return;
 		}
 		else if (g_clickCount > 0 && g_loginCompleted == false &&
-		         now - g_lastClickTick > 3000)
+		         now - g_lastClickTick > 4000)
 		{
-			// Dialog still up 3s after a click → the server rejected the login.
+			// Dialog still up 4s after a click → the server rejected the login.
 			g_loginResult = "FAILED (dialog still open)";
 		}
 
@@ -1963,14 +1964,19 @@ namespace AutoLogin
 			return;
 
 		// Rate-limit the automatic clicks.
-		if (now - g_lastClickTick >= (DWORD)g_clickIntervalMs)
+		// The first attempt after arming uses g_clickIntervalMs (fast);
+		// every re-attempt after a failed click uses g_clickRetryMs (10s).
 		{
-			ClickLoginOnce();
-			// If the click took the dialog down, stop repeating.
-			if (g_cachedDialog && !IsWindow(g_cachedDialog))
+			DWORD minDelay = (g_clickCount > 0) ? (DWORD)g_clickRetryMs : (DWORD)g_clickIntervalMs;
+			if (now - g_lastClickTick >= minDelay)
 			{
-				g_autoClickLogin = false;
-				g_loginCompleted = true;
+				ClickLoginOnce();
+				// If the click took the dialog down, stop repeating.
+				if (g_cachedDialog && !IsWindow(g_cachedDialog))
+				{
+					g_autoClickLogin = false;
+					g_loginCompleted = true;
+				}
 			}
 		}
 	}
@@ -2085,7 +2091,8 @@ void RenderAutoLoginInterface()
 	if (AutoLogin::g_autoClickLogin)
 	{
 		ImGui::SliderInt("Click interval (ms)", &AutoLogin::g_clickIntervalMs, 250, 5000);
-		ImGui::TextDisabled("Stops automatically once the login dialog closes");
+		ImGui::SliderInt("Retry delay (ms)", &AutoLogin::g_clickRetryMs, 3000, 60000);
+		ImGui::TextDisabled("First click after arming uses Click interval; retries use Retry delay");
 	}
 
 	ImGui::Combo("Click method", &AutoLogin::g_clickMethod,

@@ -75,6 +75,7 @@ namespace AutoLogin
 	extern bool g_autoFillAccount;
 	extern bool g_autoFillPassword;
 	extern int  g_clickIntervalMs;
+	extern int  g_clickRetryMs;
 	extern int  g_clickMethod;
 	extern int  g_buttonIdOverride;
 	extern int  g_accountEditIndex;
@@ -165,6 +166,7 @@ void SaveConfig()
 	WritePrivateProfileStringA("AutoLogin", "AutoFillPassword", AutoLogin::g_autoFillPassword ? "1" : "0", path);
 	WritePrivateProfileStringA("AutoLogin", "AutoRelogin", AutoLogin::g_autoRelogin ? "1" : "0", path);
 	WriteInt("AutoLogin", "ClickIntervalMs", AutoLogin::g_clickIntervalMs);
+	WriteInt("AutoLogin", "ClickRetryMs", AutoLogin::g_clickRetryMs);
 	WriteInt("AutoLogin", "ClickMethod", AutoLogin::g_clickMethod);
 	WriteInt("AutoLogin", "ButtonIdOverride", AutoLogin::g_buttonIdOverride);
 	WriteInt("AutoLogin", "AccountEditIndex", AutoLogin::g_accountEditIndex);
@@ -247,6 +249,9 @@ void LoadConfig()
 	AutoLogin::g_clickIntervalMs = GetPrivateProfileIntA("AutoLogin", "ClickIntervalMs", 1000, path);
 	if (AutoLogin::g_clickIntervalMs < 250) AutoLogin::g_clickIntervalMs = 250;
 	if (AutoLogin::g_clickIntervalMs > 5000) AutoLogin::g_clickIntervalMs = 5000;
+	AutoLogin::g_clickRetryMs = GetPrivateProfileIntA("AutoLogin", "ClickRetryMs", 10000, path);
+	if (AutoLogin::g_clickRetryMs < 3000) AutoLogin::g_clickRetryMs = 3000;
+	if (AutoLogin::g_clickRetryMs > 60000) AutoLogin::g_clickRetryMs = 60000;
 		AutoLogin::g_clickMethod = GetPrivateProfileIntA("AutoLogin", "ClickMethod", 0, path);
 	// Old builds numbered 0 = real mouse, 1 = BM_CLICK. New: 0 = SendMessage
 	// (default), 1 = real mouse, 2 = BM_CLICK, 3 = direct handler call
