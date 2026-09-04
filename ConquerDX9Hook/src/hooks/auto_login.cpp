@@ -203,6 +203,73 @@ static const char* IdentifyPwdSlot(void* password)
 	return "other";
 }
 
+// --- Minimized-vs-foreground diagnostics (debug only, no behavior change) ---
+// Heartbeat: incremented once per ApplyClientSideState (i.e. per EndScene).
+// If EndScene stops while minimized, this stops advancing — visible in logs.
+static volatile LONG g_endSceneTick = 0;
+// Last X written by WritePasswordBlob (hex) + tick, to detect clobber/staleness.
+static char g_lastWrittenXHex[200] = "";
+static DWORD g_lastWriteTick = 0;
+static int g_lastWriteLen = 0;
+
+// Log window/focus/gate state relevant to the minimized-login bug.
+// All reads guarded; never touches game memory writes.
+static void LogWindowState(const char* tag)
+{
+	__try {
+		void* shell = IsBadReadPtr((const void*)0x01A5A510, 4) ? NULL : *(void**)0x01A5A510;
+		char* dlg = shell ? (char*)shell + 0x39B948 : NULL;
+		HWND hDlg = (dlg && !IsBadReadPtr(dlg, 0x40)) ? *(HWND*)(dlg + 0x20) : NULL;
+		HWND root = hDlg ? GetAncestor(hDlg, GA_ROOT) : NULL;
+		HWND fg = GetForegroundWindow();
+		HWND active = GetActiveWindow();
+		HWND focus = GetFocus();
+		int dlgValid = (hDlg && IsWindow(hDlg)) ? 1 : 0;
+		int dlgVis = (hDlg && IsWindowVisible(hDlg)) ? 1 : 0;
+		int rootIconic = (root && IsWindow(root)) ? (IsIconic(root) ? 1 : 0) : -1;
+		int dlgIconic = (hDlg && IsWindow(hDlg)) ? (IsIconic(hDlg) ? 1 : 0) : -1;
+		int fgIsDlg = (fg && hDlg && fg == hDlg) ? 1 : 0;
+		int fgIsRoot = (fg && root && fg == root) ? 1 : 0;
+		// Which login field has focus (account=0xCD0 / pwd=0xFE8 / token=0x1300)?
+		const char* focusField = "none";
+		if (focus && dlg && !IsBadReadPtr(dlg + 0xCD0, 0x340)) {
+			HWND hAcc = *(HWND*)(dlg + 0xCD0 + 0x20);
+			HWND hPwd = *(HWND*)(dlg + 0xFE8 + 0x20);
+			HWND hTok = *(HWND*)(dlg + 0x1300 + 0x20);
+			// Compare via CWnd::FromHandle mapping too: GetFocus returns the
+			// child HWND; direct compare is enough for the debug label.
+			if (focus == hAcc) focusField = "account(0xCD0)";
+			else if (focus == hPwd) focusField = "password(0xFE8)";
+			else if (focus == hTok) focusField = "token(0x1300)";
+			else focusField = "other";
+		}
+		// Reconnect/poker gate inputs (same ones FUN_008A8FCA reads).
+		int gateRet = -999; int pokerByte = -1; int flag13620 = -1;
+		if (dlg && !IsBadReadPtr(dlg, 0x14000)) {
+			__try {
+				int* pV = *(int**)(dlg + 0xdc68);
+				if (pV && !IsBadReadPtr(pV, 0x84)) {
+					typedef int (__stdcall* GateFn)(void);
+					GateFn fn = *(GateFn*)((char*)pV + 0x80);
+					if (fn && !IsBadCodePtr((FARPROC)fn))
+						gateRet = fn();
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {}
+			__try {
+				void* sing = *(void**)0x01A549A0;
+				if (sing && !IsBadReadPtr((char*)sing + 0x5428, 1))
+					pokerByte = *(unsigned char*)((char*)sing + 0x5428);
+			} __except (EXCEPTION_EXECUTE_HANDLER) {}
+			__try { flag13620 = *(unsigned char*)(dlg + 0x13620); }
+			__except (EXCEPTION_EXECUTE_HANDLER) {}
+		}
+		LogLogin(tag, "WINSTATE dlg=0x%08X valid=%d vis=%d dlgIconic=%d root=0x%08X rootIconic=%d fg=0x%08X(fgIsDlg=%d fgIsRoot=%d) active=0x%08X focus=0x%08X(%s) endTick=%d now=%u gate=0xDC68+0x80->%d poker+0x5428=%d flag13620=%d",
+			(unsigned)hDlg, dlgValid, dlgVis, dlgIconic, (unsigned)root, rootIconic,
+			(unsigned)fg, fgIsDlg, fgIsRoot, (unsigned)active, (unsigned)focus, focusField,
+			(int)g_endSceneTick, GetTickCount(), gateRet, pokerByte, flag13620);
+	} __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 // Dump the server's session-key state: DAT_019ec240 (16 bytes from srand(code))
 // and the stored code at the CMsgEncryptCode singleton +0x5328.
 static void DumpSessionKeyState(const char* tag)
@@ -255,6 +322,26 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			DumpEncSlot("HOOK_ENTRY", "pwdSlot", password);
 		DumpSessionKeyState("HOOK_ENTRY");
 		LogCredentialState("HOOK_ENTRY");
+		LogWindowState("HOOK_ENTRY");
+		// Staleness: ticks since WritePasswordBlob + X mismatch (clobber detect).
+		{
+			DWORD now = GetTickCount();
+			DWORD age = g_lastWriteTick ? (now - g_lastWriteTick) : 0xFFFFFFFF;
+			char curHex[200] = "";
+			if (password && !IsBadReadPtr(password, 0x208)) {
+				int len = *(int*)((char*)password + 0x104);
+				int used = 0; int n = (len > 0 && len <= 16) ? len : 0;
+				for (int i = 0; i < n && used < (int)sizeof(curHex) - 4; i++) {
+					curHex[used++] = "0123456789ABCDEF"[(unsigned char)((char*)password + 0x108)[i] >> 4];
+					curHex[used++] = "0123456789ABCDEF"[(unsigned char)((char*)password + 0x108)[i] & 0xF];
+					curHex[used++] = ' ';
+				}
+				curHex[used] = 0;
+			}
+			int match = (g_lastWrittenXHex[0] && curHex[0] && lstrcmpA(g_lastWrittenXHex, curHex) == 0) ? 1 : 0;
+			LogLogin("HOOK_ENTRY", "STALENESS ageSinceBlobMs=%u (endTick=%d) blobMatch=%d lastX=\"%s\" curX=\"%s\"",
+				(unsigned)age, (int)g_endSceneTick, match, g_lastWrittenXHex, curHex);
+		}
 	}
 	// WritePasswordBlob (called right before the click) already stored the
 	// canonical-encoded X in all slots. No mutation needed here — the packet
@@ -288,6 +375,7 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 			DumpEncSlot("HOOK_SEND", "pwdSlot", password);
 		DumpSessionKeyState("HOOK_SEND");
 		LogCredentialState("HOOK_SEND");
+		LogWindowState("HOOK_SEND");
 	}
 	return g_originalLoginSend(account, password, serverName, mode, extra);
 }
@@ -1229,21 +1317,25 @@ namespace AutoLogin
 		if (!ResolveAccountEdit(dialog, accountEdit, passwordEdit))
 			return -1;
 
+		LogWindowState("FILL_ACCOUNT_PRE");
 		int result = -1;
 		if (accountEdit && IsWindow(accountEdit))
 		{
 			char t[128] = "";
-			GetWindowTextA(accountEdit, t, sizeof(t));
+			int gtBefore = GetWindowTextA(accountEdit, t, sizeof(t));
 			if (t[0] == 0 || lstrcmpA(t, g_activeAccount) == 0)
 			{
-				SendMessage(accountEdit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
+				LRESULT smRes = SendMessage(accountEdit, WM_SETTEXT, 0, (LPARAM)g_activeAccount);
 				char after[128] = "";
-				GetWindowTextA(accountEdit, after, sizeof(after));
+				int gtAfter = GetWindowTextA(accountEdit, after, sizeof(after));
+				LogLogin("FILL_ACCOUNT", "WM_SETTEXT edit=0x%08X res=%d gtBefore=%d \"%s\" gtAfter=%d \"%s\"",
+					(unsigned)accountEdit, (int)smRes, gtBefore, t, gtAfter, after);
 				if (lstrcmpA(after, g_activeAccount) == 0)
 					result = 0;  // display shows it
 			}
 			else
 			{
+				LogLogin("FILL_ACCOUNT", "edit already has different text \"%s\" - leaving display", t);
 				result = 0;  // already a different account - leave it, hook still covers login
 			}
 		}
@@ -1305,8 +1397,16 @@ namespace AutoLogin
 		LogCredentialState("FILL_ACCOUNT");
 
 		// Move focus to the password field (user can type there).
-		if (result >= 0 && passwordEdit && IsWindow(passwordEdit))
-			SetFocus(passwordEdit);
+		// Debug: SetFocus fails when minimized/not-foreground — log it.
+		if (result >= 0 && passwordEdit && IsWindow(passwordEdit)) {
+			HWND focusBefore = GetFocus();
+			HWND sfRes = SetFocus(passwordEdit);
+			DWORD sfErr = (sfRes == NULL) ? GetLastError() : 0;
+			HWND focusAfter = GetFocus();
+			LogLogin("FILL_ACCOUNT", "SetFocus pwdEdit=0x%08X res=0x%08X err=%u focusBefore=0x%08X focusAfter=0x%08X",
+				(unsigned)passwordEdit, (unsigned)sfRes, (unsigned)sfErr, (unsigned)focusBefore, (unsigned)focusAfter);
+		}
+		LogWindowState("FILL_ACCOUNT_POST");
 		return result;
 	}
 
@@ -1357,6 +1457,23 @@ namespace AutoLogin
 			X[rawLen] = 0;
 
 			// Log the computed X for verification vs manual login.
+			// Also snapshot pre-write slot state (clobber baseline) + window state.
+			LogWindowState("FILL_PASSWORD_PRE");
+			{
+				char* pre = dlg + 0x13BD0;
+				if (!IsBadReadPtr(pre, 0x208)) {
+					int plen = *(int*)(pre + 0x104);
+					char phex[200] = "";
+					int used = 0; int n = (plen > 0 && plen <= 16) ? plen : 0;
+					for (int i = 0; i < n && used < (int)sizeof(phex) - 4; i++) {
+						phex[used++] = "0123456789ABCDEF"[(unsigned char)pre[0x108 + i] >> 4];
+						phex[used++] = "0123456789ABCDEF"[(unsigned char)pre[0x108 + i] & 0xF];
+						phex[used++] = ' ';
+					}
+					phex[used] = 0;
+					LogLogin("FILL_PASSWORD", "PRE 0x13BD0 len=%d blob=%s", plen, phex);
+				}
+			}
 			{
 				char hexX[200] = "";
 				for (int i = 0; i < rawLen; i++) {
@@ -1366,6 +1483,10 @@ namespace AutoLogin
 				}
 				LogLogin("FILL_PASSWORD", "HARDCODED canonTable X=%s (rawLen=%d)",
 					hexX, rawLen);
+				// Remember for HOOK_ENTRY staleness diff (debug only).
+				lstrcpynA(g_lastWrittenXHex, hexX, sizeof(g_lastWrittenXHex));
+				g_lastWriteTick = GetTickCount();
+				g_lastWriteLen = rawLen;
 			}
 
 			// SetString X into the send slot (0x13BD0) and the reconnect slot
@@ -1420,8 +1541,9 @@ namespace AutoLogin
 				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		LogLogin("FILL_PASSWORD", "blob written to all slots via canonical encoder");
+		LogLogin("FILL_PASSWORD", "blob written to all slots via canonical encoder (endTick=%d)", (int)g_endSceneTick);
 		LogCredentialState("FILL_PASSWORD");
+		LogWindowState("FILL_PASSWORD_POST");
 	}
 
 	static int FillPasswordEdit(HWND dialog, bool forceOverwrite)
@@ -1440,8 +1562,17 @@ namespace AutoLogin
 
 		// Also set the visible edit text so the fgui gate sees non-empty.
 		HWND passwordEdit = NULL;
-		if (ResolvePasswordEdit(dialog, passwordEdit) && passwordEdit && IsWindow(passwordEdit))
-			SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
+		if (ResolvePasswordEdit(dialog, passwordEdit) && passwordEdit && IsWindow(passwordEdit)) {
+			LRESULT smRes = SendMessageA(passwordEdit, WM_SETTEXT, 0, (LPARAM)g_activePassword);
+			char after[128] = "";
+			int gt = GetWindowTextA(passwordEdit, after, sizeof(after));
+			LogLogin("FILL_PASSWORD", "WM_SETTEXT pwdEdit=0x%08X res=%d gt=%d after=\"%s\" (fgui ignores WM_SETTEXT; memory slots carry it)",
+				(unsigned)passwordEdit, (int)smRes, gt, after);
+		} else {
+			LogLogin("FILL_PASSWORD", "password edit resolve FAILED dialog=0x%08X", (unsigned)dialog);
+		}
+		LogWindowState("FILL_PASSWORD_CLICK");
+		LogCredentialState("FILL_PASSWORD_CLICK");
 
 		Sleep(30);
 		return 0;
@@ -1462,10 +1593,17 @@ namespace AutoLogin
 			return false;
 		LPARAM pos = MAKELPARAM(rc.right / 2, rc.bottom / 2);
 
+		// Debug: capture delivery results + visibility at click time.
+		HWND root = GetAncestor(button, GA_ROOT);
 		g_suppressImGuiWndProc = true;
-		SendMessage(button, WM_LBUTTONDOWN, MK_LBUTTON, pos);
-		SendMessage(button, WM_LBUTTONUP, 0, pos);
+		LRESULT downRes = SendMessage(button, WM_LBUTTONDOWN, MK_LBUTTON, pos);
+		LRESULT upRes = SendMessage(button, WM_LBUTTONUP, 0, pos);
 		g_suppressImGuiWndProc = false;
+		LogLogin("CLICK_BTN", "button=0x%08X root=0x%08X rootIconic=%d btnVis=%d btnEn=%d downRes=%d upRes=%d endTick=%d",
+			(unsigned)button, (unsigned)root,
+			(root && IsWindow(root)) ? (IsIconic(root) ? 1 : 0) : -1,
+			IsWindowVisible(button) ? 1 : 0, IsWindowEnabled(button) ? 1 : 0,
+			(int)downRes, (int)upRes, (int)g_endSceneTick);
 		return true;
 	}
 
@@ -1517,9 +1655,14 @@ namespace AutoLogin
 			if (IsBadReadPtr(dlg, 0x40))
 				return false;
 			HWND hDlg = *(HWND*)(dlg + 0x20);
-			if (!hDlg || !IsWindow(hDlg) || !IsWindowVisible(hDlg))
+			if (!hDlg || !IsWindow(hDlg) || !IsWindowVisible(hDlg)) {
+				LogLogin("DIRECT_CALL", "skipped hDlg=0x%08X (not visible) endTick=%d", (unsigned)hDlg, (int)g_endSceneTick);
 				return false;
+			}
+			LogLogin("DIRECT_CALL", "invoking handler dlg=0x%08X hDlg=0x%08X endTick=%d", (unsigned)dlg, (unsigned)hDlg, (int)g_endSceneTick);
+			LogWindowState("DIRECT_CALL_PRE");
 			((LoginBtnHandlerFunc)LOGIN_BTN_HANDLER_ADDR)(dlg);
+			LogWindowState("DIRECT_CALL_POST");
 			return true;
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER)
@@ -1562,8 +1705,11 @@ namespace AutoLogin
 		}
 
 		InstallLoginTraceHooks();
-		LogLogin("CLICK_LOGIN", "method=%d acct=\"%s\" pwd=\"%s\"",
-			g_clickMethod, g_activeAccount, g_activePassword[0] ? "****" : "");
+		LogLogin("CLICK_LOGIN", "method=%d acct=\"%s\" pwd=\"%s\" dialog=0x%08X usable=%d endTick=%d",
+			g_clickMethod, g_activeAccount, g_activePassword[0] ? "****" : "",
+			(unsigned)dialog, IsDialogUsable(dialog) ? 1 : 0, (int)g_endSceneTick);
+		LogWindowState("CLICK_LOGIN_PRE");
+		LogCredentialState("CLICK_LOGIN_PRE");
 
 		// Ensure packet + GetWindowText hooks are up (account + password).
 		if (g_activeAccount[0] || g_activePassword[0])
@@ -1599,6 +1745,10 @@ namespace AutoLogin
 			g_lastClickTick = GetTickCount();
 			g_loginResult = "sent";
 		}
+		LogLogin("CLICK_LOGIN", "POST button=0x%08X ok=%d clickCount=%d endTick=%d",
+			(unsigned)button, ok ? 1 : 0, g_clickCount, (int)g_endSceneTick);
+		LogWindowState("CLICK_LOGIN_POST");
+		LogCredentialState("CLICK_LOGIN_POST");
 
 		g_cachedDialog = dialog;
 		g_cachedButton = button;
@@ -1666,6 +1816,9 @@ namespace AutoLogin
 
 	void ApplyClientSideState()
 	{
+		// Heartbeat for minimized-diagnostics (debug only): proves EndScene
+		// still fires while minimized. Logged at each fill/click/hook stage.
+		InterlockedIncrement(&g_endSceneTick);
 		// Install the login trace hooks (send/recv + log file) unconditionally,
 		// once — covers MANUAL login too (the log file must capture a hand-typed
 		// login attempt, which never goes through ClickLoginOnce).
