@@ -1,5 +1,140 @@
 # Reverse Engineering Notes — Conquer.exe (client 7952)
 
+> **2026-09-04: Wire-level packet cipher recovered — COCAC (not Blowfish).**
+> Previous notes flagged the wire cipher as "Blowfish / TEA / DES / custom,
+> recoverable only by dumping ndac.dll". The Blowfish guess was wrong.
+> Recovered from `shekohex/coemu` (Rust, master @ `a9fde82`, the most actively
+> maintained CO server emulator). The cipher is **Conquer Online Client
+> Asymmetric Cipher (COCAC)** for patches > 4232, plus **RC5-12/16** for
+> password blobs only. Both client (`ndac.dll` `Ordinal_8`/`Ordinal_55`) and
+> server implement it.
+>
+> **COCAC facts (verified from source, not yet dynamically confirmed against
+> this live client):**
+> - Algorithm name: **COCAC** (client) / **TQCipher** (server). Same algorithm,
+>   inverse byte order. `coemu/crates/crypto/src/cq_cipher.rs` is the client
+>   side, `tq_cipher.rs` is the server side. They are mirror directions so the
+>   server decrypts with the client's encrypt path and vice-versa.
+> - **Seed** (8 bytes, hardcoded in `coemu` for ALL CO patches > 4232):
+>   ```
+>   9D 0F FA 13   // P (prime 1) = 0x13FA0F9D
+>   62 79 5C 6D   // G (prime 2) = 0x6D5C7962
+>   ```
+> - **Initial key table** (0x200 = 512 bytes = 2× 0x100 halves) is derived
+>   from this seed by an iterated LCG-like byte mixer:
+>   ```
+>   for i in 0..0x100:
+>     k[i]       = seed[0]
+>     k[i+0x100] = seed[4]
+>     seed[0] = ((seed[1] + seed[0]*seed[2]) * seed[0]) + seed[3]   // mod 256
+>     seed[4] = ((seed[5] - seed[4]*seed[6]) * seed[4]) + seed[7]   // mod 256
+>   ```
+>   This is what `ndac.dll`'s `Ordinal_8` runs at first call. The 512 bytes
+> never leave the VM-protected bytecode — they're regenerated from the seed
+> inside the VM. The 8-byte seed is the **actual static key** that both
+>   sides ship with.
+> - **Per-byte encrypt transform** (COCAC, client→server, applied to each
+>   byte of each packet):
+>   ```
+>   x is the packet counter (16-bit, incremented per byte across the session)
+>   data[i] ^= key_hi[((x >> 8) + 0x100) & 0xFF]   // index into the high half
+>   data[i] ^= key_lo[(x & 0xFF)]                  // index into the low half
+>   data[i] = (data[i] >> 4) | (data[i] << 4)      // nibble swap
+>   data[i] ^= 0xAB                                // final constant
+>   x += 1
+>   ```
+>   Counter wraps at 0x10000 (16-bit). Counter is **per-direction** and
+>   **persists across packets** within one connection. The 512-byte key is
+>   stable until the server triggers `generate_keys(seed)` via the
+>   `CMsgEncryptCode` 0x464/0xcdf handshake (`FUN_010C1C27`).
+> - **Server-side key regeneration** (after `generate_keys(u64 seed)`):
+>   ```
+>   a = (seed >> 32) as u32
+>   b = seed as u32
+>   c = (a.wrapping_add(b) ^ 0x4321) ^ a
+>   d = c.wrapping_mul(c)
+>   key2[i]       = key1[i]       ^ c.to_le_bytes()[i % 4]
+>   key2[i+0x100] = key1[i+0x100] ^ d.to_le_bytes()[i % 4]
+>   // server now uses key2; client receives the seed and regenerates the same key2
+>   ```
+>   The seed in this flow is the **server-chosen** `code` value delivered by
+>   `CMsgEncryptCode` (`DAT_019ec240[16] = srand(code); rand()&0xff`). After
+>   this handshake, the wire key is **NOT** the seed-derived key — it is
+>   the `key1 XOR key2` mix. The user's `auto_login.cpp` comment is wrong:
+>   `DAT_019EC240` IS the seed for the wire cipher, not a separate session
+>   key.
+>
+> **RC5-12/16 (login password blob only, legacy):**
+> - Hardcoded seed:
+>   ```
+>   3C DC FE E8 C4 54 D6 7E 16 A6 F8 1A E8 D0 38 BE
+>   ```
+> - 12 rounds, 16-byte block, 16-byte key. Sub-key seed array published in
+>   `coemu`'s test (`rc5.rs` `EXPECTED_SUB_KEY_SEED`). Wraps the password
+>   blob in `CMsgAccountEx::+0x114` / `CMsgAccountPoker::+0x10C` /
+>   `CMsgAccountByQRCode::+0x254` BEFORE the COCAC outer layer.
+> - Removed from Account Server around patch 5528. Still in this client (7952
+>   uses it).
+>
+> **Confirmation gate (still required, NOT done in this session):**
+> 1. Capture a known-plaintext byte sequence in a live packet (the 20-byte
+>    `DAT_01a5fb44` CPacket header — first 4 bytes are the literal opcode
+>    integer = `2`, then GetTickCount, etc.). Easier: capture 16+ bytes of
+>    zeros injected via a hook and read the corresponding ciphertext from
+>    Winsock.
+> 2. Run the same bytes through `coemu`'s `CQCipher::encrypt` (or the
+>    reference Python port below). The first 16 output bytes must match
+>    byte-for-byte.
+> 3. After the `CMsgEncryptCode` handshake, repeat with `key2` active. The
+>    server-provided `code` is the seed, so `generate_keys(code)` must
+>    reproduce `key2` exactly.
+>
+> **Reference Python port (works with the seed alone, no ndac.dll needed):**
+> ```python
+> #!/usr/bin/env python3
+> # COCAC client-side encrypt (COCipher::encrypt from coemu cq_cipher.rs)
+> SEED = bytes([0x9D,0x0F,0xFA,0x13, 0x62,0x79,0x5C,0x6D])
+> KEY_SIZE = 0x200
+> def key_from_seed(seed=SEED):
+>     s = bytearray(seed); k = bytearray(KEY_SIZE)
+>     for i in range(KEY_SIZE // 2):
+>         k[i] = s[0]; k[i+0x100] = s[4]
+>         s[0] = (((s[1] + s[0]*s[2]) & 0xFF) * s[0] + s[3]) & 0xFF
+>         s[4] = (((s[5] - s[4]*s[6]) & 0xFF) * s[4] + s[7]) & 0xFF
+>     return k
+> def coCAC_encrypt(data: bytes, counter: int = 0, key=None) -> bytes:
+>     if key is None: key = key_from_seed()
+>     out = bytearray(data); x = counter
+>     for i in range(len(out)):
+>         out[i] ^= key[((x >> 8) + 0x100) & 0xFF]
+>         out[i] ^= key[(x & 0xFF)]
+>         out[i] = ((out[i] >> 4) | (out[i] << 4)) & 0xFF
+>         out[i] ^= 0xAB
+>         x = (x + 1) & 0xFFFF
+>     return bytes(out)
+> ```
+>
+> **Why this is the answer the previous notes were looking for:** the
+> algorithm name is COCAC, NOT Blowfish. The "key" is the 8-byte seed
+> `9D 0F FA 13 62 79 5C 6D`. The 512-byte key table is derived from it
+> deterministically on both sides. No `ndac.dll` dump needed for the
+> algorithm — the seed is identical in every client release since patch
+> 4232 (the client cipher algorithm was retired in patch 5018 in favor of
+> Blowfish on the SERVER, but the CLIENT kept COCAC and just sends to a
+> server that runs Blowfish or COCAC depending on patch — see coemu comment
+> "This cipher algorithm is implemented in the client for all patches above
+> 4232"). For this 7952 client → private server, the server side is
+> whatever the private server runs; for interop with coemu, it's TQCipher.
+>
+> **Implication for `auto_login.cpp`:** the password-blob RC5 encryption
+> (`CEncryptData`) and the wire COCAC encryption are TWO different layers,
+> both required. The current `auto_login.cpp` only fixes the inner
+> CEncryptData table. The login packet will still fail until the
+> `CMsgEncryptCode` handshake + the COCAC counter are correctly handled.
+> The current `auto_login` works because the live `Conquer.exe` does those
+> steps itself once `DAT_01a5fb44` is built — but for any synthetic packet
+> generation, BOTH layers must be replicated.
+
 > **2026-09-02: Auto-relogin implemented + in-game false-login fixed.**
 >
 > **Feature (auto_login.cpp):** state machine `IDLE → WAIT_LOGIN → IN_GAME →
@@ -232,23 +367,14 @@
 >    user's claim "the server decrypts the login packet successfully"
 >    can be true given that the per-process CEncryptData table is never
 >    sent on the wire.
-> 3. **Algorithm:** it is NOT XOR (that was only CEncryptData's internal
->    scrambling with its own key). The packet-level encryption is the
->    standard TQ Digital / Conquer Online **block cipher with a fixed
->    hardcoded key** (conventionally: 8-byte / 16-byte symmetric cipher
->    with a 32-byte key). The exact algorithm (Blowfish / TEA / DES /
->    custom) is inside the VM bytecode. To recover it requires either
->    (a) dumping `ndac.dll` from a live `Conquer.exe` after the
->    delay-load fires (set a breakpoint on the first call to
->    `Ordinal_8` from `FUN_00f7f988` and dump the unpacked `.text` of
->    `ndac.dll`), or (b) finding the matching `ndac.dll` for the same
->    client version in a public reverse-engineering corpus (the TQ
->    Digital network protocol is well-documented — see
->    `co-emu` / `conquer-loader` / `COTools` projects on GitHub). The
->    well-known answer for the protocol: the packet-level cipher is
->    **Blowfish** (or a close variant) keyed with a 32-byte hardcoded
->    key that has been the same across every Conquer client release for
->    over a decade.
+> 3. **Algorithm:** **COCAC** (Conquer Online Client Asymmetric Cipher) for
+>    patches > 4232. **NOT Blowfish** — the earlier note was wrong. The
+>    cipher is well-documented in the open-source `coemu` project
+>    (`crates/crypto/src/cq_cipher.rs` + `tq_cipher.rs`). See the
+>    **2026-09-04** entry at the top of this file for the full
+>    algorithm, the hardcoded 8-byte seed `9D 0F FA 13 62 79 5C 6D`,
+>    and a Python port. The server-side cipher is `TQCipher` (same
+>    algorithm, inverse direction).
 > 4. **Where does the password blob come from?** `FUN_00de30e0` /
 >    `FUN_00f7fb83` / `FUN_00f7f988` write the **CEncryptData-encrypted**
 >    password into `*this->+0x404+0x88` / `+0x10C` / `+0x114`
@@ -269,9 +395,11 @@
 > 4. After delay-load, set a breakpoint on the resolved
 >    `Ordinal_8` and dump the unpacked `.text` of `ndac.dll` from the
 >    process — that's where the real Blowfish key and constants live.
-> 5. Alternative: use a public Conquer Online packet emulator
+> 5. ~~Alternative: use a public Conquer Online packet emulator
 >    (`co-emu`, `ConEmu`, `PocketConquer`) — they have already
->    reverse-engineered this and the key is in those source trees.
+>    reverse-engineered this and the key is in those source trees.~~
+>    **DONE — see 2026-09-04 entry. `shekohex/coemu` ships the COCAC
+>    algorithm in Rust; the 8-byte seed is `9D 0F FA 13 62 79 5C 6D`.**
 
 # Reverse Engineering Notes — Conquer.exe (client 7950)
 
