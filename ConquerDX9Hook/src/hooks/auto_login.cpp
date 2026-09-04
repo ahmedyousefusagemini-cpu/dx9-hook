@@ -1706,6 +1706,24 @@ namespace AutoLogin
 						LogLogin("FILL_PASSWORD", "edit base +0x2C wrote \"%s\"", raw);
 					}
 				}
+				// Focus-free fgui ingestion (experiment, Ghidra-verified call shape):
+				// CDlgLogin::Process always starts its edit sync with
+				//   006074ED(editCEnc, 0x81)  [= Ordinal_133(editCEnc+4, 0x81)]
+				// (disasm @ 0089C583-8E: PUSH 0x81; MOV ECX,[EDI+0x13DD8]; CALL).
+				// It flushes the +0x238 text buffer into the fgui framework
+				// state with no focus/keystroke needed. Runs right after our
+				// +0x238 write, mirroring the game's own order. Guarded.
+				if (editCEnc && !IsBadReadPtr(editCEnc, 0x40)) {
+					typedef void (__thiscall* FguiSyncFn)(void* editCEnc, int msg);
+					__try {
+						((FguiSyncFn)0x006074ED)(editCEnc, 0x81);
+						LogLogin("FILL_PASSWORD", "fgui ingest 006074ED(editCEnc=0x%08X, 0x81) done", (unsigned)editCEnc);
+					} __except (EXCEPTION_EXECUTE_HANDLER) {
+						LogLogin("FILL_PASSWORD", "fgui ingest 006074ED threw (ignored)");
+					}
+				} else {
+					LogLogin("FILL_PASSWORD", "fgui ingest skipped (editCEnc unreadable)");
+				}
 			}
 		} __except(EXCEPTION_EXECUTE_HANDLER) {}
 		LogLogin("FILL_PASSWORD", "blob written to all slots via canonical encoder (endTick=%d)", (int)g_endSceneTick);
