@@ -1855,6 +1855,30 @@ namespace AutoLogin
 		return MessageClickButton(button);
 	}
 
+	// True when the game is not the foreground window (debug-verified via
+	// WINSTATE: fg != game root). Background, the fgui button layer validates
+	// the edit's framework-internal state, which stays empty without
+	// focus/keystroke processing (SetFocus fails err=87, no dots painted) and
+	// the login never reaches the game server. The button handler itself is
+	// focus-independent (Ghidra-verified: no focus/visibility API in its body;
+	// sole static call site is LEA ECX,[dlg]; CALL), so a direct call is safe.
+	// Read-only; never writes game memory.
+	static bool IsGameBackground()
+	{
+		__try {
+			void* shell = IsBadReadPtr((const void*)0x01A5A510, 4) ? NULL : *(void**)0x01A5A510;
+			if (!shell) return false;
+			char* dlg = (char*)shell + 0x39B948;
+			if (IsBadReadPtr(dlg, 0x40)) return false;
+			HWND hDlg = *(HWND*)(dlg + 0x20);
+			if (!hDlg || !IsWindow(hDlg)) return false;
+			HWND root = GetAncestor(hDlg, GA_ROOT);
+			if (!root || !IsWindow(root)) return false;
+			HWND fg = GetForegroundWindow();
+			return (fg != root);  // NULL fg also counts as background
+		} __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+	}
+
 	void ClickLoginOnce()
 	{
 		if (g_clickInProgress)
@@ -1896,12 +1920,22 @@ namespace AutoLogin
 		HWND button = dialog ? FindLoginButton(dialog) : NULL;
 
 		bool ok = false;
-		// The REAL button click is the proven-working path (the fgui gate reads
-		// the visible edits which we already populated via WM_SETTEXT + the
-		// GetWindowText hooks). Prefer it over DirectLoginCall — calling the
-		// handler directly hits the reconnect gate (mode 1) that sends an empty
-		// QR packet. Only method 3 explicitly wants the direct call.
-		if (button && g_clickMethod != 3)
+		// Foreground: the REAL button click is the proven-working path (the
+		// fgui gate reads the visible edits which we already populated via
+		// WM_SETTEXT + the GetWindowText hooks).
+		// Background + default method: call the handler directly FIRST.
+		// Ghidra-verified: FUN_008A8FCA reads credentials purely from memory
+		// (no focus/visibility dependency; reconnect gate returns 0 in the
+		// logs so it takes the normal mode-0 path), while the fgui button
+		// layer validates framework-internal edit state that stays empty
+		// without focus (login then never reaches the game server). An
+		// explicit user method choice (1/2/3) is always respected.
+		if (IsGameBackground() && g_clickMethod == 0)
+		{
+			LogLogin("CLICK_LOGIN", "background detected (fg != game root) - direct handler first");
+			ok = DirectLoginCall();
+		}
+		if (!ok && button && g_clickMethod != 3)
 			ok = ClickButtonMethod(button);
 		if (!ok && (g_clickMethod == 3 || g_activePassword[0]))
 			ok = DirectLoginCall();
