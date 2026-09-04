@@ -14,6 +14,7 @@
 //   CEncryptData::GetString @ 0x00EB3383 - __thiscall(void* this, char* out[256])
 // ============================================================================
 
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
