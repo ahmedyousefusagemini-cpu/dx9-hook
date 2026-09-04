@@ -94,6 +94,9 @@ namespace AutoLogin {
 	extern int  g_reloginState;
 	extern bool g_connectivityOk;
 	extern int  g_reloginAttempts;
+	extern int  g_clickCount;
+	extern bool g_loginCompleted;
+	extern HWND g_cachedDialog;
 }
 namespace AutoHunt {
 	extern bool g_autoHuntOnLogin;
@@ -244,17 +247,22 @@ static void LogWindowState(const char* tag)
 			else focusField = "other";
 		}
 		// Reconnect/poker gate inputs (same ones FUN_008A8FCA reads).
-		int gateRet = -999; int pokerByte = -1; int flag13620 = -1;
+		// Game disasm: LEA ECX,[EDI+0xdc68]; MOV EAX,[ECX]; CALL [EAX+0x80]
+		// i.e. __thiscall with this=dlg+0xdc68 (NOT __stdcall — that was junk).
+		int gateRet = -999; int gateWhy = 0; int pokerByte = -1; int flag13620 = -1;
 		if (dlg && !IsBadReadPtr(dlg, 0x14000)) {
 			__try {
-				int* pV = *(int**)(dlg + 0xdc68);
-				if (pV && !IsBadReadPtr(pV, 0x84)) {
-					typedef int (__stdcall* GateFn)(void);
+				void* thisPtr = (void*)((char*)dlg + 0xdc68);
+				int* pV = *(int**)thisPtr;
+				if (!pV) gateWhy = 1;                       // embedded vptr slot is null
+				else if (IsBadReadPtr(pV, 0x84)) gateWhy = 2; // vtable unreadable
+				else {
+					typedef int (__thiscall* GateFn)(void* thisptr);
 					GateFn fn = *(GateFn*)((char*)pV + 0x80);
-					if (fn && !IsBadCodePtr((FARPROC)fn))
-						gateRet = fn();
+					if (!fn || IsBadCodePtr((FARPROC)fn)) gateWhy = 3; // slot null/bad
+					else { gateRet = fn(thisPtr); gateWhy = 4; }       // called correctly
 				}
-			} __except (EXCEPTION_EXECUTE_HANDLER) {}
+			} __except (EXCEPTION_EXECUTE_HANDLER) { if (gateWhy == 0) gateWhy = 5; }
 			__try {
 				void* sing = *(void**)0x01A549A0;
 				if (sing && !IsBadReadPtr((char*)sing + 0x5428, 1))
@@ -263,10 +271,46 @@ static void LogWindowState(const char* tag)
 			__try { flag13620 = *(unsigned char*)(dlg + 0x13620); }
 			__except (EXCEPTION_EXECUTE_HANDLER) {}
 		}
-		LogLogin(tag, "WINSTATE dlg=0x%08X valid=%d vis=%d dlgIconic=%d root=0x%08X rootIconic=%d fg=0x%08X(fgIsDlg=%d fgIsRoot=%d) active=0x%08X focus=0x%08X(%s) endTick=%d now=%u gate=0xDC68+0x80->%d poker+0x5428=%d flag13620=%d",
+		LogLogin(tag, "WINSTATE dlg=0x%08X valid=%d vis=%d dlgIconic=%d root=0x%08X rootIconic=%d fg=0x%08X(fgIsDlg=%d fgIsRoot=%d) active=0x%08X focus=0x%08X(%s) endTick=%d now=%u gateRet=%d gateWhy=%d poker+0x5428=%d flag13620=%d",
 			(unsigned)hDlg, dlgValid, dlgVis, dlgIconic, (unsigned)root, rootIconic,
 			(unsigned)fg, fgIsDlg, fgIsRoot, (unsigned)active, (unsigned)focus, focusField,
-			(int)g_endSceneTick, GetTickCount(), gateRet, pokerByte, flag13620);
+			(int)g_endSceneTick, GetTickCount(), gateRet, gateWhy, pokerByte, flag13620);
+	} __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Log the remaining FUN_008A8FCA inputs the packet depends on: server group/
+// server ints (dlg+0x135F8/0x135FC), token string (dlg+0x13BB8, flag 0x13BC8).
+// All reads guarded; debug only.
+static void LogHandlerInputs(const char* tag)
+{
+	__try {
+		void* shell = IsBadReadPtr((const void*)0x01A5A510, 4) ? NULL : *(void**)0x01A5A510;
+		char* dlg = shell ? (char*)shell + 0x39B948 : NULL;
+		if (!dlg || IsBadReadPtr(dlg, 0x14000)) {
+			LogLogin(tag, "INPUTS (no dlg)");
+			return;
+		}
+		int grp = -1, srv = -1;
+		__try { grp = *(int*)(dlg + 0x135F8); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+		__try { srv = *(int*)(dlg + 0x135FC); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+		int tokFlag = -1;
+		__try { tokFlag = *(int*)(dlg + 0x13BC8); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+		char tokRaw[48] = "";
+		int tsize = -1, tcap = -1;
+		__try {
+			char* tp = dlg + 0x13BB8;
+			if (!IsBadReadPtr(tp, 0x18)) {
+				tsize = *(int*)(tp + 0x10);
+				tcap = *(int*)(tp + 0x14);
+				char* p = tp;
+				if (tcap > 0xF) p = *(char**)tp;
+				if (tsize > 0 && tsize < (int)sizeof(tokRaw) && p && !IsBadReadPtr(p, tsize)) {
+					memcpy(tokRaw, p, tsize); tokRaw[tsize] = 0;
+				}
+			}
+		} __except (EXCEPTION_EXECUTE_HANDLER) {}
+		LogLogin(tag, "INPUTS group=0x135F8:%d server=0x135FC:%d token=0x13BB8:\"%s\"(size=%d cap=%d flag=%d)",
+			grp, srv, tokRaw, tsize, tcap, tokFlag);
 	} __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
@@ -293,6 +337,34 @@ static void DumpSessionKeyState(const char* tag)
 			code = *(unsigned int*)((char*)sing + 0x5328);
 		LogLogin(tag, "sessKey16=%s storedCode=0x%08X", k16, code);
 	} __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Decode a CEncryptData slot via GetString and format the plaintext bytes as
+// hex ("04 A4 CD ... " uppercase, trailing space) — byte-exact compare of the
+// canonical value X across foreground/background runs. Rendered dec="..." is
+// lossy (non-printables), this is not. Returns byte count (0 on failure).
+static int GetDecHex(void* enc, char* outHex, size_t outLen)
+{
+	if (!outHex || outLen < 4) return 0;
+	outHex[0] = 0;
+	if (!enc || IsBadReadPtr(enc, 0x208)) return 0;
+	__try {
+		typedef void (__thiscall* EncGetStringFunc)(void* encData, char* out);
+		char tmp[256];
+		((EncGetStringFunc)0x00EB3383)(enc, tmp);
+		int cap = *(int*)(tmp + 0x14);
+		char* ps = (cap <= 15) ? tmp : *(char**)tmp;
+		int sz = *(int*)(tmp + 0x10);
+		if (sz <= 0 || sz >= 200 || !ps || IsBadReadPtr(ps, sz)) return 0;
+		int used = 0;
+		for (int i = 0; i < sz && used < (int)outLen - 4; i++) {
+			outHex[used++] = "0123456789ABCDEF"[(unsigned char)ps[i] >> 4];
+			outHex[used++] = "0123456789ABCDEF"[(unsigned char)ps[i] & 0xF];
+			outHex[used++] = ' ';
+		}
+		outHex[used] = 0;
+		return sz;
+	} __except (EXCEPTION_EXECUTE_HANDLER) { outHex[0] = 0; return 0; }
 }
 
 static int __cdecl HookedLoginSend(const char* account, void* password, void* serverName, int mode, int extra)
@@ -323,24 +395,19 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		DumpSessionKeyState("HOOK_ENTRY");
 		LogCredentialState("HOOK_ENTRY");
 		LogWindowState("HOOK_ENTRY");
-		// Staleness: ticks since WritePasswordBlob + X mismatch (clobber detect).
+		LogHandlerInputs("HOOK_ENTRY");
+		// X-as-hex (byte-exact foreground vs background compare) + staleness:
+		// compare GetString output now vs X computed at fill time.
 		{
+			char decHex[200] = "";
+			GetDecHex(password, decHex, sizeof(decHex));
+			if (decHex[0])
+				LogLogin("HOOK_ENTRY", "decHex=\"%s\"", decHex);
 			DWORD now = GetTickCount();
 			DWORD age = g_lastWriteTick ? (now - g_lastWriteTick) : 0xFFFFFFFF;
-			char curHex[200] = "";
-			if (password && !IsBadReadPtr(password, 0x208)) {
-				int len = *(int*)((char*)password + 0x104);
-				int used = 0; int n = (len > 0 && len <= 16) ? len : 0;
-				for (int i = 0; i < n && used < (int)sizeof(curHex) - 4; i++) {
-					curHex[used++] = "0123456789ABCDEF"[(unsigned char)((char*)password + 0x108)[i] >> 4];
-					curHex[used++] = "0123456789ABCDEF"[(unsigned char)((char*)password + 0x108)[i] & 0xF];
-					curHex[used++] = ' ';
-				}
-				curHex[used] = 0;
-			}
-			int match = (g_lastWrittenXHex[0] && curHex[0] && lstrcmpA(g_lastWrittenXHex, curHex) == 0) ? 1 : 0;
-			LogLogin("HOOK_ENTRY", "STALENESS ageSinceBlobMs=%u (endTick=%d) blobMatch=%d lastX=\"%s\" curX=\"%s\"",
-				(unsigned)age, (int)g_endSceneTick, match, g_lastWrittenXHex, curHex);
+			int match = (g_lastWrittenXHex[0] && decHex[0] && lstrcmpA(g_lastWrittenXHex, decHex) == 0) ? 1 : 0;
+			LogLogin("HOOK_ENTRY", "STALENESS ageSinceBlobMs=%u (endTick=%d) xMatch=%d lastX=\"%s\" curX=\"%s\"",
+				(unsigned)age, (int)g_endSceneTick, match, g_lastWrittenXHex, decHex);
 		}
 	}
 	// WritePasswordBlob (called right before the click) already stored the
@@ -784,6 +851,106 @@ static void DismissDisconnectBox()
 		return;
 	s_lastScan = now;
 	EnumWindows(FindDisconnectBoxProc, 0);
+}
+
+// --- Login-failure dialog watcher (debug only: log, never dismiss) ---
+// The server's "invalid username or password" comes back as an in-game dialog.
+// Log when it appears (which attempt, what text) so fg/bg runs can be compared.
+// Gated to attempt-pending windows to avoid matching unrelated UI.
+static bool IsLoginFailBoxText(const char* text)
+{
+	if (!text)
+		return false;
+	static const char* const kFailKeywords[] = {
+		"invalid username",
+		"invalid password",
+		"username or password",
+		"user name or password",
+		"account or password",
+		"name or password",
+		"wrong password",
+		"incorrect password",
+	};
+	for (int i = 0; i < (int)(sizeof(kFailKeywords) / sizeof(kFailKeywords[0])); i++)
+	{
+		if (ContainsI(text, kFailKeywords[i]))
+			return true;
+	}
+	return false;
+}
+
+struct FailBoxScan
+{
+	HWND owner;
+	char text[256];
+	bool matched;
+};
+
+static BOOL CALLBACK FindFailBoxChildTextProc(HWND hwnd, LPARAM lParam)
+{
+	FailBoxScan* scan = (FailBoxScan*)lParam;
+	if (!hwnd)
+		return TRUE;
+	char text[256] = "";
+	if (GetWindowTextA(hwnd, text, sizeof(text)) > 0 && IsLoginFailBoxText(text))
+	{
+		scan->owner = GetAncestor(hwnd, GA_ROOT);
+		lstrcpynA(scan->text, text, sizeof(scan->text));
+		scan->matched = true;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static BOOL CALLBACK FindFailBoxProc(HWND hwnd, LPARAM lParam)
+{
+	FailBoxScan* out = (FailBoxScan*)lParam;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (pid != GetCurrentProcessId())
+		return TRUE;
+	if (!IsWindowVisible(hwnd))
+		return TRUE;
+	char title[256] = "";
+	if (GetWindowTextA(hwnd, title, sizeof(title)) > 0 && IsLoginFailBoxText(title))
+	{
+		out->owner = hwnd;
+		lstrcpynA(out->text, title, sizeof(out->text));
+		out->matched = true;
+		return FALSE;
+	}
+	EnumChildWindows(hwnd, FindFailBoxChildTextProc, lParam);
+	return out->matched ? FALSE : TRUE;
+}
+
+// Throttled to ~500ms; logs once per dialog HWND. Call from the per-frame
+// state while a login attempt is pending (dialog still up after clicks).
+static void WatchLoginFailBox()
+{
+	static DWORD s_lastScan = 0;
+	static HWND s_lastLogged = NULL;
+	DWORD now = GetTickCount();
+	if (now - s_lastScan < 500)
+		return;
+	s_lastScan = now;
+	if (AutoLogin::g_clickCount <= 0 || AutoLogin::g_loginCompleted)
+		return;
+	HWND dlg = AutoLogin::g_cachedDialog;
+	if (!dlg || !IsWindow(dlg) || !IsWindowVisible(dlg))
+		return;
+	FailBoxScan scan;
+	scan.owner = NULL;
+	scan.text[0] = 0;
+	scan.matched = false;
+	EnumWindows(FindFailBoxProc, (LPARAM)&scan);
+	if (scan.matched && scan.owner && scan.owner != s_lastLogged)
+	{
+		s_lastLogged = scan.owner;
+		LogLogin("FAILBOX", "login-failure dialog HWND=0x%08X text=\"%s\" after %d clicks endTick=%d",
+			(unsigned)scan.owner, scan.text, AutoLogin::g_clickCount, (int)g_endSceneTick);
+	}
+	if (!scan.matched)
+		s_lastLogged = NULL; // re-arm: log again if it reappears
 }
 
 namespace AutoLogin
@@ -1829,6 +1996,10 @@ namespace AutoLogin
 		// is empty until the INI is loaded, so it's safe to have the hook up.
 		InstallLoginHook();
 		InstallGetWindowTextHooks();
+		// Recv-loop heartbeat only matters at the login screen (debug only).
+		SetLoginTraceVerbose(IsDialogUsable(g_cachedDialog));
+		// Watch for the server's invalid-password dialog (log only, debug).
+		WatchLoginFailBox();
 		// Keep resolved HWNDs up to date for the GetWindowText hook (needs HWND match).
 		if (IsDialogUsable(g_cachedDialog))
 		{

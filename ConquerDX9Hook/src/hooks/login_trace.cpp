@@ -14,6 +14,7 @@
 //   CEncryptData::GetString @ 0x00EB3383 - __thiscall(void* this, char* out[256])
 // ============================================================================
 
+#include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -232,6 +233,15 @@ void LogCredentialState(const char* tag)
 	} __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+static volatile LONG g_sendCount = 0;
+static volatile LONG g_recvCount = 0;
+static bool g_traceVerbose = true;
+
+void SetLoginTraceVerbose(bool v)
+{
+	g_traceVerbose = v;
+}
+
 static int __fastcall HookedSendLoop(void* thisPtr, void* /*edx*/, char* buf, int len)
 {
 	if (buf && len > 0) {
@@ -240,8 +250,27 @@ static int __fastcall HookedSendLoop(void* thisPtr, void* /*edx*/, char* buf, in
 				char hex[256];
 				int showLen = (len < 64) ? len : 64;
 				HexDump(hex, sizeof(hex), (const unsigned char*)buf, showLen);
-				LogLogin("SEND", "sock=0x%08X len=%d bytes=%s",
-					(unsigned)(thisPtr ? *(unsigned*)((char*)thisPtr + 4) : 0), len, hex);
+				// Peer identity: proves fg/bg runs talk to the same account server.
+				char peer[64] = "unknown";
+				__try {
+					SOCKET s = thisPtr ? *(SOCKET*)((char*)thisPtr + 4) : INVALID_SOCKET;
+					if (s != INVALID_SOCKET) {
+						sockaddr_in sa;
+						memset(&sa, 0, sizeof(sa));
+						int saLen = sizeof(sa);
+						if (getpeername(s, (sockaddr*)&sa, &saLen) == 0) {
+							char* ip = inet_ntoa(sa.sin_addr);
+							_snprintf_s(peer, sizeof(peer), _TRUNCATE, "%s:%u",
+								ip ? ip : "?", (unsigned)ntohs(sa.sin_port));
+						} else {
+							_snprintf_s(peer, sizeof(peer), _TRUNCATE, "unconnected(err=%d)",
+								WSAGetLastError());
+						}
+					}
+				} __except (EXCEPTION_EXECUTE_HANDLER) {}
+				long n = InterlockedIncrement(&g_sendCount);
+				LogLogin("SEND", "#%d sock=0x%08X peer=%s len=%d bytes=%s", (int)n,
+					(unsigned)(thisPtr ? *(unsigned*)((char*)thisPtr + 4) : 0), peer, len, hex);
 			}
 		} __except (EXCEPTION_EXECUTE_HANDLER) {}
 	}
@@ -252,6 +281,18 @@ static int __fastcall HookedSendLoop(void* thisPtr, void* /*edx*/, char* buf, in
 
 static void __fastcall HookedRecvLoop(void* thisPtr, void* /*edx*/, void* msgHandler, int maxPackets)
 {
+	// Throttled heartbeat (<=1 line/s, login screen only): proves the server
+	// is answering at all. Silence after SEND 472 = server never replies.
+	if (g_traceVerbose) {
+		long n = InterlockedIncrement(&g_recvCount);
+		static DWORD s_lastRecvLog = 0;
+		DWORD now = GetTickCount();
+		if (now - s_lastRecvLog >= 1000) {
+			s_lastRecvLog = now;
+			LogLogin("RECV", "loop #%d handler=0x%08X max=%d", (int)n,
+				(unsigned)msgHandler, maxPackets);
+		}
+	}
 	if (g_origRecvLoop)
 		g_origRecvLoop(thisPtr, msgHandler, maxPackets);
 }
