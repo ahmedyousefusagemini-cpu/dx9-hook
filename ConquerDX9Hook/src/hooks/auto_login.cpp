@@ -54,6 +54,27 @@
 //   the canonical table (that gave X=1C EF... ≠ 04 A4 CD...). The
 //   canonical table is separately hardcoded in WritePasswordBlob.
 //
+// NDAC VM KEYSTROKE FEED IS MANDATORY (Ghidra 2026-09-08, loginlog-proven):
+//   The loginlog diff of failed (memory-only fill) vs successful (fill +
+//   the user's manual "add a char then delete it") attempts shows ALL
+//   CEncryptData slots byte-identical — the memory state was correct, yet
+//   the server rejected. The missing piece: real typing feeds the ndac VM
+//   per keystroke (mygameinput::Process FUN_00602cbb @ 006034b4):
+//     FUN_005f48b7(dik):                       [__thiscall(editCEnc, dik)]
+//       ndac!#54(dik, 1)                       [JMP [0x01A544AC] @ 0x00D02F9C]
+//       shift = FUN_005f47ba(editCEnc+0x2C, dik)  [game key state, __thiscall]
+//       FUN_005f48e4(dik, shift):              [__cdecl @ 0x005F48E4]
+//         ndac!#42(dik, shift)                 [JMP [0x01A544B0] @ 0x00D02F8C]
+//         ndac!#85()                           [JMP [0x01A544C8] @ 0x00D02F2C]
+//   ndac.dll is TqNDProtect VM'd (exports = PUSH id + encrypted bytecode) so
+//   the VM session can only be driven by CALLING these in-process. The
+//   packet builder ndac!Ordinal_55 consumes that keystroke-session state
+//   when building CMsgAccountEx; skipping the feed leaves the VM unprimed
+//   and the server reads a different password payload -> "wrong password"
+//   even though every slot decodes to the right X. WritePasswordBlob now
+//   replays the EXACT per-char feed (account chars first, then password,
+//   mirroring human typing order) before writing any slot.
+//
 // CRITICAL SLOTS:
 //   dlg+0x13BD0  — CEncryptData, password send slot (normal path, mode 0)
 //                   Its key table is SESSION-RANDOM (re-seeded by CDlgLogin
@@ -73,6 +94,9 @@
 //                   this buffer when the user types.
 //
 // WritePasswordBlob:
+//   0. Replay the ndac VM keystroke feed for every account+password char
+//      (FUN_005f48b7 via NdacFeedChar) — primes the VM session the packet
+//      builder consumes (the user's "add a char then delete" trick).
 //   1. Compute X = raw[i] ^ canonTable[raw[i]] (hardcoded table).
 //   2. SetString X into dlg+0x13BD0 and dlg+0x13980 (send slots).
 //   3. SetString X into editCEnc+0x30C (display copy).
@@ -1577,6 +1601,83 @@ namespace AutoLogin
 		return result;
 	}
 
+	// ------------------------------------------------------------------
+	// ndac VM keystroke feed (Ghidra 2026-09-08 - the add-char-and-delete fix).
+	// Real typing reaches ndac.dll through exactly one path (mygameinput
+	// password branch @ 006034b4):
+	//   FUN_005f48b7(editCEnc, dik)  __thiscall:
+	//     ndac!#54(dik, 1)                     thunk 0x00D02F9C -> JMP [0x01A544AC]
+	//     shift = FUN_005f47ba(editCEnc+0x2C, dik)   __thiscall, game key state
+	//     FUN_005f48e4(dik, shift)  __cdecl:
+	//       ndac!#42(dik, shift)               thunk 0x00D02F8C -> JMP [0x01A544B0]
+	//       ndac!#85()                         thunk 0x00D02F2C -> JMP [0x01A544C8]
+	// The trio primes the ndac VM keystroke session that Ordinal_55 reads at
+	// packet-build time. Memory-only fills skipped it (server-side reject);
+	// the user's manual "add a char then delete it" worked because those two
+	// real keystrokes performed the feed. We replay it here with the shift
+	// bit from VkKeyScanA (the game's own FUN_005f47ba checks live Shift/Caps
+	// state - equivalent for non-shifted chars).
+	// ------------------------------------------------------------------
+	typedef unsigned char (__thiscall* GameKeypressFn)(void* editCEnc, int dik);
+	typedef int  (__thiscall* GameShiftFn)(void* sub, int dik);
+	typedef void (__cdecl* GameRelease3497Fn)(int dik);
+	typedef void (__cdecl* GameRelease4196Fn)(int dik, int shift);
+	static const uintptr_t GAME_KEYPRESS_FN  = 0x005F48B7; // FUN_005f48b7 (#54+#42+#85)
+	static const uintptr_t GAME_SHIFT_FN     = 0x005F47BA; // FUN_005f47ba
+	static const uintptr_t GAME_REL3497_FN   = 0x00606E5C; // FUN_00606e5c (#34+#97)
+	static const uintptr_t GAME_REL4196_FN   = 0x005F48FA; // FUN_005f48fa (#41+#96)
+
+	// Replays one keystroke's ndac feed for password char `ch`. editCEnc =
+	// *(dlg+0x13DD8) - the game passes it as 'this'. Returns the encoded byte
+	// ndac!#85 pulled for this key (0 on refusal/failure).
+	static unsigned char NdacFeedChar(void* editCEnc, char ch)
+	{
+		__try {
+			if (!editCEnc) return 0;
+			// FUN_005f48b7 prologue: PUSH EBP; MOV EBP,ESP; PUSH ESI (55 8B EC 56).
+			const unsigned char* kp = (const unsigned char*)GAME_KEYPRESS_FN;
+			if (IsBadReadPtr(kp, 4) || !(kp[0] == 0x55 && kp[1] == 0x8B && kp[2] == 0xEC && kp[3] == 0x56))
+				return 0;
+
+			SHORT vs = VkKeyScanA(ch);
+			if (vs == (SHORT)-1) return 0;
+			UINT vk = (UINT)(vs & 0xFF);
+			UINT dik = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+			if (dik == 0 || dik > 0xFF) return 0;
+
+			// The game's own per-keystroke encoder: ndac!#54(dik,1) +
+			// FUN_005f47ba + FUN_005f48e4 (ndac!#42+#85). Called with the
+			// same ECX context the real input path uses.
+			return ((GameKeypressFn)GAME_KEYPRESS_FN)(editCEnc, (int)dik);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return 0;
+		}
+	}
+
+	// Replays the killfocus ndac cycle (what the real Login click runs inside
+	// CDlgLogin::Process -> Process(editCEnc, sel, sel, param_4=1, ...,
+	// accountStr) @ 00603461/00603491):
+	//   FUN_00606e5c(accountCStr)  = ndac!#34(accountStr) + ndac!#97()
+	//   FUN_005f48fa(0, shift)     = ndac!#41 + ndac!#96   (empty text buffer)
+	// shift comes from FUN_005f47ba exactly like the game. Guarded, best-effort.
+	static void NdacKillfocusReplay(void* editCEnc, const char* accountCStr)
+	{
+		__try {
+			if (!editCEnc) return;
+			const unsigned char* r1 = (const unsigned char*)GAME_REL3497_FN;
+			const unsigned char* r2 = (const unsigned char*)GAME_REL4196_FN;
+			const unsigned char* sf = (const unsigned char*)GAME_SHIFT_FN;
+			if (IsBadReadPtr(r1, 3) || IsBadReadPtr(r2, 3) || IsBadReadPtr(sf, 3))
+				return;
+			if (!(r1[0] == 0x55 && r1[1] == 0x8B && r1[2] == 0xEC)) return;
+			if (!(r2[0] == 0x55 && r2[1] == 0x8B && r2[2] == 0xEC)) return;
+			if (!(sf[0] == 0x55 && sf[1] == 0x8B && sf[2] == 0xEC)) return;
+			((GameRelease3497Fn)GAME_REL3497_FN)(accountCStr ? (int)accountCStr : 0);
+			int shift = ((GameShiftFn)GAME_SHIFT_FN)((char*)editCEnc + 0x2C, 0);
+			((GameRelease4196Fn)GAME_REL4196_FN)(0, shift);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {}
+	}
+
 	// Write the password blob into all three slots the game reads.
 	// The game's manual-typing flow:
 	//   1. fgui framework computes X[i] = raw[i] ^ canonTable[raw[i]] (FIXED
@@ -1599,6 +1700,43 @@ namespace AutoLogin
 			void* shell = *(void**)0x01A5A510;
 			if (!shell || !g_activePassword[0]) return;
 			char* dlg = (char*)shell + 0x39B948;
+			void* editCEnc = *(void**)(dlg + 0x13DD8);
+			if (!editCEnc || IsBadReadPtr(editCEnc, 0x300)) {
+				LogLogin("FILL_PASSWORD", "editCEnc unreadable - ndac feed skipped");
+				return;
+			}
+
+			// STEP 0 (NEW, 2026-09-08): replay the ndac VM keystroke feed for
+			// every account+password char BEFORE touching any slot. This is
+			// what the user's manual "add a char then delete it" did - two
+			// real keystrokes through FUN_005f48b7 priming the ndac VM
+			// session that Ordinal_55 reads when building CMsgAccountEx.
+			// Account first (typing order), then password.
+			{
+				const char* accPtr = dlg + 0x13B88;
+				if (!IsBadReadPtr(accPtr, 24)) {
+					int accCap = *(int*)(accPtr + 0x14);
+					if (accCap > 15) accPtr = *(const char**)accPtr;
+					if (accPtr && IsBadReadPtr(accPtr, 1)) accPtr = NULL;
+				} else {
+					accPtr = NULL;
+				}
+				int fedOk = 0, fedBad = 0;
+				if (accPtr) {
+					for (const char* p = accPtr; *p; ++p) {
+						if (NdacFeedChar(editCEnc, *p)) fedOk++; else fedBad++;
+					}
+				}
+				LogLogin("NDAC_FEED", "account fed %d ok %d refused (acct=\"%s\")",
+					fedOk, fedBad, accPtr ? accPtr : "(none)");
+				fedOk = 0; fedBad = 0;
+				for (const char* p = g_activePassword; *p; ++p) {
+					if (NdacFeedChar(editCEnc, *p)) fedOk++; else fedBad++;
+				}
+				LogLogin("NDAC_FEED", "password fed %d ok %d refused (len=%d)",
+					fedOk, fedBad, (int)strlen(g_activePassword));
+				NdacKillfocusReplay(editCEnc, accPtr);
+			}
 
 			// HARDCODED canonical table (per-character XOR key).
 			// Indexed by the CHARACTER VALUE. Verified from manual login trace:
@@ -1669,7 +1807,6 @@ namespace AutoLogin
 				}
 			}
 			// Sync X into the display copy (editCEnc+0x30C).
-			void* editCEnc = *(void**)(dlg + 0x13DD8);
 			if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
 				char* dispEnc = (char*)editCEnc + 0x30C;
 				if (VirtualProtect(dispEnc, 0x208, PAGE_EXECUTE_READWRITE, &op)) {

@@ -1,5 +1,62 @@
 # Reverse Engineering Notes — Conquer.exe (client 7952)
 
+> **2026-09-08: auto-login "add a char then delete it" root-caused — the ndac VM
+> keystroke feed. Fixed by replaying `FUN_005F48B7` per char in
+> `WritePasswordBlob` (no more manual touching of the password box).**
+>
+> **Symptom.** The auto-fill wrote the byte-correct canonical X into every
+> CEncryptData slot (`dlg+0x13BD0`, `dlg+0x13980`, `editCEnc+0x30C`), but the
+> server still answered "invalid password" — UNLESS the user manually clicked
+> into the password box, typed one character and deleted it. That trivial
+> action reliably turned the same auto-click into a successful login.
+>
+> **The decisive evidence (loginlog.txt, 2026-09-08 20:04-20:05).** The
+> `HOOK_ENTRY` dumps of a FAILED attempt (20:04:46) and the SUCCEEDED attempt
+> (20:05:13, after the user's manual touch) are **byte-identical** for every
+> dumped field: `0x13BD0 len=8 key=86 B9 B5 E5... blob=3B 4C 5F 7A E2 DB 83 17`,
+> `decHex="04 A4 CD 04 C7 CD CF 97"`, `xMatch=1`. So the visible memory state
+> was correct in both cases — the difference lives OUTSIDE the CEncryptData
+> slots, inside ndac.dll's VM session.
+>
+> **Root cause (Ghidra).** Real typing reaches ndac.dll through exactly one
+> path — `mygameinput::Process` password branch (`FUN_00602CBB` @ `006034b4`):
+> ```
+> FUN_005F48B7(editCEnc, dik)              ; __thiscall, RET 4
+>   ndac!#54(dik, 1)                       ; 0x00D02F9C -> IAT 0x01A544AC
+>   shift = FUN_005F47BA(editCEnc+0x2C, dik)
+>   FUN_005F48E4(dik, shift)               ; __cdecl
+>     ndac!#42(dik, shift)                 ; 0x00D02F8C -> IAT 0x01A544B0
+>     ndac!#85()                           ; 0x00D02F2C -> IAT 0x01A544C8
+> ```
+> The CMsgAccountEx builder (`FUN_00F7F988`) then runs `FUN_00ED3DCA(pwd)` which
+> feeds the VM the encBuf state (`ndac!#47/#1(0xC8F0B8CC)/#65` via IAT
+> `0x01A54474/7C/78`) right before `Ordinal_55` builds the RC5 wire blob
+> (`CMsgAccountEx+0x114`). The VM keystroke-session state primed by `#54/#42/#85`
+> participates in that wrap: no feed -> the wire blob the server decrypts is not
+> the password -> "invalid password" even though every client-side slot decodes
+> to the right X. The user's "add a char then delete it" worked because those
+> two REAL keystrokes performed the feed. (This also explains why the old
+> SendInput-typing fill worked and the direct-memory fill did not.)
+>
+> **Fix (`auto_login.cpp`, `WritePasswordBlob` STEP 0).** Before writing any
+> slot, replay the exact per-keystroke feed through the game's own wrapper:
+> `NdacFeedChar(editCEnc, ch)` = `FUN_005F48B7(editCEnc, dik)` with
+> `dik = MapVirtualKeyA(VkKeyScanA(ch), MAPVK_VK_TO_VSC)` — account chars first
+> (typing order), then password chars. Then one `NdacKillfocusReplay` =
+> `FUN_00606E5C(accountCStr)` (#34+#97) + `FUN_005F48FA(0, shift)` (#41+#96),
+> replicating the killfocus cycle the real click runs. All calls prologue-checked
+> (`55 8B EC...`) and `__try`-guarded; every call runs on the render/game thread
+> inside `ApplyAutoLoginState`, same as the game's own input pump.
+> The direct-IAT attempt from 2026-09-07 (`NdacEncodeChar`, commits 4023dd7/
+> fe1e70b) failed because it called the ndac thunks WITHOUT the game's ECX/edit
+> context — ndac returned the identity byte and was (correctly) treated as
+> refusal. Going through `FUN_005F48B7` supplies that context.
+>
+> **Verification hooks added:** `NDAC_FEED` log lines report fed-ok/refused per
+> string. If a future build refuses (fedBad > 0), check the `FUN_005F48B7`
+> prologue bytes first (55 8B EC 56) and re-derive the wrapper via the
+> mygameinput password branch (`FUN_00602CBB` @ `006034b4`).
+
 > **2026-09-02: Auto-relogin implemented + in-game false-login fixed.**
 >
 > **Feature (auto_login.cpp):** state machine `IDLE → WAIT_LOGIN → IN_GAME →
