@@ -851,6 +851,7 @@ REL_CHECK_NET ──internet down──► REL_WAIT_NET (5) ──backoff expire
 | Login dialog usability | — | `IsDialogUsable(hwnd)`: true ONLY if `hwnd == *(gpDlgShell+0x39B948+0x20)` AND `IsWindowVisible`. The EnumWindows shape-fallback was REMOVED (it picked up in-game dialogs with Edit+Button children → false disconnect). |
 | Login button handler | `0x008A8FCA` | `FUN_LoginButtonHandler` — reads account `dlg+0x13B88`, password `dlg+0x13BD0` (CEncryptData), sends via `FUN_0101CB78` mode 0. Reconnect gate virtual `(*(dlg+0xdc68)+0x80)()` + `FUN_0111a10b` (byte `obj+0x5428`) → QR path `FUN_008A965F` (mode 1, slots `0x13938`/`0x13980`). Poker path selects via `dlg+0x13620`. |
 | Login packet sender | `0x0101CB78` | `login(account, pwd, serverName, mode, extra)` — MinHook target (`HookedLoginSend`), forced to log + pass-through; slots pre-filled by `WritePasswordBlob` (canonical X). |
+| **DEFAULT LOGIN METHOD** | `0x005F48B7` | **ndac VM keystroke feed** (confirmed working 2026-09-08 — replaces the manual "add a char then delete it" step). `WritePasswordBlob` STEP 0 replays `FUN_005F48B7(editCEnc, dik)` per char (account chars first, then password, typing order) with `dik = MapVirtualKeyA(VkKeyScanA(ch), MAPVK_VK_TO_VSC)`, then one killfocus replay `FUN_00606E5C(accountCStr)` + `FUN_005F48FA(0, shift)`. Without this feed the server rejects the login ("invalid password") even though every CEncryptData slot is byte-correct — the ndac VM keystroke-session state primes the RC5 wire-blob wrap (`CMsgAccountEx+0x114`). |
 | `CEncryptData::SetString` | `0x00EA20F0` | canonical-encoded X write into `dlg+0x13BD0` / `0x13980` / `editCEnc+0x30C`; raw text into `editCEnc+0x238`. |
 | `CEncryptData::GetString` | `0x00EB3383` | debug decode. |
 | Disconnect error key | `0x0165DFEC` | UTF-16 string KEY `STR_LOGIN_GAME_SERVER` (text "Disconnected with game server..." resolved at runtime by `CStringManagerW::GetStr` from game data — NOT in the binary). |
@@ -862,16 +863,22 @@ REL_CHECK_NET ──internet down──► REL_WAIT_NET (5) ──backoff expire
 | MessageBoxA/W | user32 | MinHook — auto-return IDOK for disconnect-keyword text while `g_wasInGame` (box never appears). |
 | Window scan | `EnumWindows` | `DismissDisconnectBox()` (400ms) finds the box by title/child text, BM_CLICKs its OK — fallback for fgui/MFC boxes the API hook can't catch. |
 
-### Verified behavior (live log 2026-09-02)
+### Verified behavior (live log 2026-09-02, ndac feed confirmed 2026-09-08)
 
 ```
 REL | login screen appeared - arming auto login
 FILL_ACCOUNT | account written (0x13938 cleared)
+NDAC_FEED    | account fed 5 ok 0 refused (acct="halms")
+NDAC_FEED    | password fed 8 ok 0 refused (len=8)
 FILL_PASSWORD | canonical X=04 A4 CD 04 C7 CD CF 97
 CLICK_LOGIN | method=0
 HOOK_ENTRY | acct="halms" slot=dlg+0x13BD0 server="DuneWanderer" mode=0
-(no further REL lines while in game)
+REL | login OK - in game          <-- WITHOUT touching the password box
 ```
+
+If `NDAC_FEED ... refused` appears after a client recompile: re-verify the
+`FUN_005F48B7` prologue (`55 8B EC 56`) and re-derive the feed wrapper from
+the mygameinput password branch (`FUN_00602CBB` @ `006034b4`).
 
 ### Gotchas (learned this round)
 
@@ -882,5 +889,11 @@ HOOK_ENTRY | acct="halms" slot=dlg+0x13BD0 server="DuneWanderer" mode=0
   persistent state.
 * Only the exact CDlgLogin HWND + `IsWindowVisible` decides "at login screen".
 * The DLL loads twice (proxy + injected) — hooks are idempotent, single-owner.
+* **Password fills MUST replay the ndac VM keystroke feed** (`FUN_005F48B7`
+  per char, see DEFAULT LOGIN METHOD above). A memory-only fill with
+  byte-correct slots is still rejected by the server. The old direct-IAT
+  variant (calling ndac thunks `0x00D02F9C/0x00D02F8C/0x00D02F2C` without the
+  game's ECX context) returns identity bytes — always go through the game's
+  own wrapper `FUN_005F48B7(editCEnc, dik)`.
 
 

@@ -101,9 +101,30 @@ For EVERY candidate address:
 
 ## Phase 2b — Auto-login re-calibration after client update (critical)
 
-The auto-login password fill depends on TWO build-specific things that NEW
+The auto-login password fill depends on THREE build-specific things that NEW
 builds break. After a client recompile, do NOT trust the password fill until
-both are re-verified.
+all are re-verified.
+
+### 0. Re-verify the ndac VM keystroke feed wrapper (DEFAULT METHOD, mandatory)
+
+The default login method (confirmed 2026-09-08) replays the ndac VM keystroke
+feed through the game's own wrapper `FUN_005F48B7(editCEnc, dik)` — WITHOUT it
+the server rejects every login ("invalid password") even with byte-correct
+CEncryptData slots. After a recompile:
+
+1. Check the `NDAC_FEED` lines in `loginlog.txt`: `password fed N ok M refused`
+   — `refused > 0` means the wrapper moved or its prologue changed.
+2. Prologue gate in `auto_login.cpp` expects `FUN_005F48B7` = `55 8B EC 56`
+   (PUSH EBP; MOV EBP,ESP; PUSH ESI). If it differs, re-find via the
+   mygameinput password branch: in `FUN_00602CBB` (find via
+   `myshell\mygameinput.cpp` string) locate the keystroke encoder call
+   `PUSH <dik>; MOV ECX,EDI; CALL FUN_005F48B7` (the `__thiscall(editCEnc, dik)`
+   wrapper whose body is `ndac!#54(dik,1)` thunk + `FUN_005F47BA` +
+   `FUN_005F48E4`).
+3. Also re-verify the killfocus replay pair `FUN_00606E5C` (#34+#97) /
+   `FUN_005F48FA` (#41+#96) inside `Process(..., param_4=1, ..., accountStr)`.
+4. Do NOT call the raw ndac IAT thunks (`0x01A544AC/B0/C8`) directly — without
+   the game's ECX context ndac returns the identity byte.
 
 ### 1. Re-derive the canonical table (user must do a manual login)
 
@@ -168,6 +189,9 @@ The following offsets are used by the login flow and must be re-found:
 | `FUN_005F2296` | fgui edit GetString — `CMP [EBP+0xC],0; JZ GetString; else fill '*'` |
 | `FUN_005F2380` | text buffer accessor — `return this+0x20C` |
 | `FUN_00602CBB` | mygameinput::Process — per-keystroke handler |
+| `FUN_005F48B7` | **ndac VM keystroke feed wrapper** (DEFAULT METHOD) — `__thiscall(editCEnc, dik)`, prologue `55 8B EC 56`; body = `ndac!#54(dik,1)` + `FUN_005F47BA` + `FUN_005F48E4` (#42+#85). WritePasswordBlob replays it per char |
+| `FUN_00606E5C` / `FUN_005F48FA` | killfocus ndac replay pair — #34+#97 (account c-str) / #41+#96 (0, shift) |
+| `FUN_00ED3DCA` | packet-build ndac pre-feed — #47/#1(0xC8F0B8CC)/#65 via IAT `0x01A54474/7C/78`, called by CMsgAccountEx builder |
 | `FUN_00EA20F0` | CEncryptData::SetString |
 | `FUN_00EB3383` | CEncryptData::GetString |
 | `FUN_00E9CC3F` | CEncryptData::CEncryptData (ctor) |

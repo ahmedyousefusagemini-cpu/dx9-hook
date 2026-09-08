@@ -93,15 +93,21 @@
 //                   FUN_005f2380 returns +0x20C). The game re-encodes from
 //                   this buffer when the user types.
 //
-// WritePasswordBlob:
+// WritePasswordBlob (DEFAULT LOGIN METHOD — confirmed working 2026-09-08,
+// requires NO manual password-box interaction):
 //   0. Replay the ndac VM keystroke feed for every account+password char
 //      (FUN_005f48b7 via NdacFeedChar) — primes the VM session the packet
-//      builder consumes (the user's "add a char then delete" trick).
+//      builder consumes. MANDATORY: without it the server rejects the login
+//      even with byte-correct slots (this was the "add a char then delete
+//      it" manual workaround, now automated).
 //   1. Compute X = raw[i] ^ canonTable[raw[i]] (hardcoded table).
 //   2. SetString X into dlg+0x13BD0 and dlg+0x13980 (send slots).
 //   3. SetString X into editCEnc+0x30C (display copy).
 //   4. Write raw password into editCEnc+0x238 (mygameinput text buffer).
 //   5. Clear dlg+0x13938 (reconnect account) to empty.
+// Verification: NDAC_FEED log lines ("password fed 8 ok 0 refused") in
+// loginlog.txt; refused > 0 after a recompile means FUN_005f48b7 moved —
+// re-derive from the mygameinput password branch (FUN_00602cbb @ 006034b4).
 // ============================================================================
 
 extern volatile bool g_suppressImGuiWndProc;
@@ -2490,7 +2496,7 @@ void RenderAutoLoginInterface()
 	{
 		AutoLogin::FillPasswordNow();
 	}
-	ImGui::TextDisabled("(Fill Account types User, Fill Password writes Pass= into dialog memory — no cursor movement, no keyboard emulation)");
+	ImGui::TextDisabled("(Fill Account types User; Fill Password replays the ndac VM keystroke feed + writes Pass= into dialog memory — fully automatic, no password-box interaction)");
 	if (AutoLogin::g_fillStatus[0])
 	{
 		bool ok = strstr(AutoLogin::g_fillStatus, "OK") != NULL;

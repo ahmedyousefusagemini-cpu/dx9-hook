@@ -2,7 +2,14 @@
 
 > **2026-09-08: auto-login "add a char then delete it" root-caused — the ndac VM
 > keystroke feed. Fixed by replaying `FUN_005F48B7` per char in
-> `WritePasswordBlob` (no more manual touching of the password box).**
+> `WritePasswordBlob`. CONFIRMED WORKING LIVE — this is now the DEFAULT
+> auto-login method (no manual password-box touching required).**
+>
+> **Live confirmation.** After deploying the STEP-0 feed replay, the full
+> auto sequence (arm → fill account → ndac feed → fill password slots →
+> message-click) logs `NDAC_FEED | password fed 8 ok 0 refused` and reaches
+> `REL | login OK - in game` with the password box NEVER touched by hand.
+> The manual "add a char then delete it" step is obsolete.
 >
 > **Symptom.** The auto-fill wrote the byte-correct canonical X into every
 > CEncryptData slot (`dlg+0x13BD0`, `dlg+0x13980`, `editCEnc+0x30C`), but the
@@ -56,6 +63,34 @@
 > string. If a future build refuses (fedBad > 0), check the `FUN_005F48B7`
 > prologue bytes first (55 8B EC 56) and re-derive the wrapper via the
 > mygameinput password branch (`FUN_00602CBB` @ `006034b4`).
+>
+> **Default-method pipeline (the complete manual-equivalent flow, in order):**
+>   1. `FillAccountEdit`: WM_SETTEXT account, write `dlg+0x13B88` std::string,
+>      clear `0x13938` (reconnect slot must stay empty).
+>   2. `WritePasswordBlob` STEP 0: `NdacFeedChar` × account chars, × password
+>      chars (`FUN_005F48B7(editCEnc, dik)`), then `NdacKillfocusReplay`.
+>   3. Compute X from the hardcoded canonTable, SetString X into
+>      `0x13BD0` / `0x13980` / `editCEnc+0x30C`.
+>   4. Write raw password into `editCEnc+0x238`, ingest `006074ED(editCEnc, 0x81)`.
+>   5. Message-click the Login button → `FUN_008A8FCA` → `FUN_0101CB78` →
+>      `FUN_00ed3dca` (VM encBuf feed) → `Ordinal_55` builds/encrypts with the
+>      primed VM session → server accepts.
+>
+> **Why the earlier attempts failed (full post-mortem):**
+> - **SendInput per-char typing (2026-08-28)** worked — REAL keystrokes flow
+>   through mygameinput → `FUN_005F48B7` → ndac feed. Replaced by memory-only
+>   writes, which silently dropped the VM feed.
+> - **Direct ndac thunk calls (2026-09-07, commits 4023dd7/fe1e70b)** — called
+>   `ndac!#54/#42/#85` via the raw IAT thunks (`0x00D02F9C/0x00D02F8C/
+>   0x00D02F2C`) WITHOUT the game's ECX/edit context → ndac returned the
+>   identity byte → correctly treated as refusal → fell back to the hardcoded
+>   canonTable (X was right, the VM feed was still missing).
+> - **b417846 experiment (text-buffer + `Ordinal_133(0x81)` ingest)** — the
+>   ingest flushes the +0x238 buffer into the fgui state but never touches the
+>   VM keystroke session → still rejected.
+> - **The fix (current)** — `FUN_005F48B7(editCEnc, dik)` supplies the exact
+>   ECX context the real input path uses. Byte-correct slots + primed VM
+>   session = accepted login, first attempt, no user interaction.
 
 > **2026-09-02: Auto-relogin implemented + in-game false-login fixed.**
 >
