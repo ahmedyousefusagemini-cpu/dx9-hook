@@ -222,7 +222,13 @@ void DrainIpcQueue()
 }
 
 // ---------------------------------------------------------------------------
-// Message-only window (runs on the init thread)
+// IPC thread: owns the message-only window and pumps its messages
+// ----------------------------------------------------------------------------
+// WM_COPYDATA is a cross-thread SendMessage: the receiving thread must pump
+// messages or the sender blocks forever. The init thread's Sleep(16) loop
+// never pumps, so the window lives on this dedicated thread instead. The
+// manager finds it with FindWindowEx(HWND_MESSAGE, ...) - message-only
+// windows are invisible to EnumWindows and never receive broadcasts.
 // ---------------------------------------------------------------------------
 static const char* kIpcClassName = "ConquerDX9HookIPCWnd";
 static const char* kIpcWinName   = "ConquerDX9HookIPC";
@@ -268,6 +274,47 @@ static LRESULT CALLBACK IpcWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
+static DWORD WINAPI IpcThread(LPVOID)
+{
+    // Message-only windows are children of the pseudo-parent HWND_MESSAGE,
+    // NOT EnumWindows-visible top-level windows; only a pumping thread +
+    // FindWindowEx(HWND_MESSAGE, ...) pairing works as a cross-process
+    // channel.
+    WNDCLASSEXA wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = IpcWndProc;
+    wc.hInstance     = GetModuleHandleA(NULL);
+    wc.lpszClassName = kIpcClassName;
+    if (!RegisterClassExA(&wc))
+    {
+        LogIpc("RegisterClass failed (err %lu)", GetLastError());
+        return 1;
+    }
+
+    g_ipcWnd = CreateWindowExA(0, kIpcClassName, kIpcWinName, 0,
+        0, 0, 0, 0, HWND_MESSAGE, NULL, wc.hInstance, NULL);
+    if (!g_ipcWnd)
+    {
+        LogIpc("CreateWindow failed (err %lu)", GetLastError());
+        return 1;
+    }
+    LogIpc("IPC window ready hwnd=%p tid=%lu", g_ipcWnd, GetCurrentThreadId());
+
+    // Pump until WM_QUIT (posted by UninstallIpcWindow).
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0) > 0)
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    LogIpc("IPC thread exiting");
+    return 0;
+}
+
+static HANDLE g_ipcThread = NULL;
+static DWORD  g_ipcTid = 0;
+
 bool InstallIpcWindow()
 {
     if (g_ipcWnd)
@@ -276,35 +323,36 @@ bool InstallIpcWindow()
     InitializeCriticalSection(&g_ipcCs);
     g_ipcCsReady = true;
 
-    WNDCLASSEXA wc;
-    memset(&wc, 0, sizeof(wc));
-    wc.cbSize        = sizeof(wc);
-    wc.lpfnWndProc   = IpcWndProc;
-    wc.hInstance     = GetModuleHandleA(NULL);
-    wc.lpszClassName = kIpcClassName;
-    if (!RegisterClassExA(&wc))
-        return false;
-
-    // HWND_MESSAGE = message-only window: invisible, not enumerable as a
-    // top-level window, but reachable by the manager's broadcast.
-    g_ipcWnd = CreateWindowExA(0, kIpcClassName, kIpcWinName, 0,
-        0, 0, 0, 0, HWND_MESSAGE, NULL, wc.hInstance, NULL);
-    if (!g_ipcWnd)
+    g_ipcThread = CreateThread(NULL, 0, IpcThread, NULL, 0, &g_ipcTid);
+    if (!g_ipcThread)
     {
-        LogIpc("CreateWindow failed (err %lu)", GetLastError());
+        LogIpc("CreateThread failed (err %lu)", GetLastError());
         return false;
     }
-    LogIpc("IPC window ready hwnd=%p", g_ipcWnd);
-    return true;
+
+    // Wait until the window exists so the manager sees it immediately after
+    // InstallIpcWindow returns (it may still retry for late loads).
+    for (int i = 0; i < 100 && !g_ipcWnd; i++)
+        Sleep(10);
+    return g_ipcWnd != NULL;
 }
 
 void UninstallIpcWindow()
 {
-    if (g_ipcWnd)
+    // WM_QUIT must go to the thread's own queue (PostMessage(hwnd, WM_QUIT)
+    // is not supported). The pump loop exits, and the thread's windows are
+    // destroyed automatically when the thread exits - DestroyWindow from
+    // another thread is not allowed anyway.
+    if (g_ipcTid)
+        PostThreadMessage(g_ipcTid, WM_QUIT, 0, 0);
+    if (g_ipcThread)
     {
-        DestroyWindow(g_ipcWnd);
-        g_ipcWnd = NULL;
+        WaitForSingleObject(g_ipcThread, 2000);
+        CloseHandle(g_ipcThread);
+        g_ipcThread = NULL;
     }
+    g_ipcWnd = NULL;
+    g_ipcTid = 0;
     if (g_ipcCsReady)
     {
         DeleteCriticalSection(&g_ipcCs);

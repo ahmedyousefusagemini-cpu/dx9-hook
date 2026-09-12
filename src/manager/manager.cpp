@@ -569,29 +569,27 @@ static void KillSelectedClient(HWND hMain)
 // needs a moment to load), so SendIpcToAccount retries briefly.
 
 static const UINT_PTR kIpcSignature = 0x434F4E51; // 'CONQ'
+static const char* kIpcWinName = "ConquerDX9HookIPC";
+
+// Message-only windows are NOT visible to EnumWindows and never receive
+// HWND_BROADCAST - the only cross-process lookup is FindWindowEx under the
+// HWND_MESSAGE pseudo-parent. The window title identifies the DLL instance;
+// NULL hwndParent finds any process's window (single-client machine).
+static HWND FindIpcWindow()
+{
+    return FindWindowExA(HWND_MESSAGE, NULL, NULL, kIpcWinName);
+}
 
 static bool SendIpcLines(HWND hMain, const std::string& payload)
 {
     if (payload.empty())
         return true;
 
-    // Broadcast: only the DLL's IPC window answers (message-only windows
-    // receive HWND_BROADCAST WM_COPYDATA even though they are hidden).
-    struct Cb
-    {
-        static BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lp)
-        {
-            char name[64];
-            if (GetWindowTextA(hwnd, name, sizeof(name)) && _stricmp(name, "ConquerDX9HookIPC") == 0)
-                *(HWND*)lp = hwnd;
-            return TRUE;
-        }
-    };
     HWND target = NULL;
     DWORD deadline = GetTickCount() + 5000;
     for (;;)
     {
-        EnumWindows(Cb::EnumProc, (LPARAM)&target);
+        target = FindIpcWindow();
         if (target)
             break;
         if (GetTickCount() >= deadline)
@@ -983,7 +981,7 @@ static void LaunchSelectedClient(HWND hMain)
     UpdateStatusColumn(hMain);
 
     // Push the live settings into the DLL via IPC right after launch. The
-    // proxy DLL needs a moment to create its window; retry for up to ~6s in
+    // proxy DLL needs a moment to create its window; retry for up to ~8s in
     // a worker thread so a slow startup never freezes the manager UI.
     struct PushCtx { int idx; };
     PushCtx* ctx = new PushCtx{ g_selAccount };
@@ -995,30 +993,7 @@ static void LaunchSelectedClient(HWND hMain)
         Sleep(1500); // give the DLL time to create its IPC window
         if (idx < 0 || idx >= (int)g_accounts.size())
             return 0;
-        std::string s = BuildIpcPayload(g_accounts[idx]);
-
-        HWND found = NULL;
-        struct Cb { static BOOL CALLBACK Enum(HWND hwnd, LPARAM lp)
-        {
-            char name[64];
-            if (GetWindowTextA(hwnd, name, sizeof(name))
-                && _stricmp(name, "ConquerDX9HookIPC") == 0)
-                *(HWND*)lp = hwnd;
-            return TRUE;
-        } };
-        DWORD deadline = GetTickCount() + 5000;
-        for (;;)
-        {
-            EnumWindows(Cb::Enum, (LPARAM)&found);
-            if (found) break;
-            if (GetTickCount() >= deadline) return 0;
-            Sleep(100);
-        }
-        COPYDATASTRUCT cds;
-        cds.dwData = 0x434F4E51; // 'CONQ'
-        cds.cbData = (DWORD)s.size();
-        cds.lpData = (void*)s.c_str();
-        SendMessageA(found, WM_COPYDATA, 0, (LPARAM)&cds);
+        SendIpcLines(NULL, BuildIpcPayload(g_accounts[idx]));
         return 0;
     }, ctx, 0, NULL);
 
