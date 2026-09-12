@@ -3,20 +3,24 @@
 // ----------------------------------------------------------------------------
 // Single config file: accounts.txt next to this exe. Holds [Global] (ClientPath,
 // LastSelected) and one [Account:<name>] section per account, each with its own
-// complete settings set (login automation + per-feature toggles). No registry,
-// no other files owned by the manager.
+// complete settings set: login automation (top-level keys) + every bot feature
+// setting the ImGui overlay exposes (Feature.<Key> rows - checkboxes, ints and
+// the waypoint list). No registry, no other files owned by the manager.
 //
 // Launch flow: auto-save selected account -> validate client path -> write
 // transient accountinfo.ini / coinfo.ini into the client dir (regenerated every
-// launch; the hook DLL reads those two files from the game dir at load) ->
+// launch; the hook DLL reads those two files from the game dir at load; key
+// names/sections match the hook's config.cpp LoadConfig exactly) ->
 // CreateProcess("\"<ClientPath>\" blacknull") with the client dir as CWD.
+// The launched process handle is kept so the Status column shows live
+// "Running (pid N)" and the Kill button can stop it.
 // ============================================================================
 
 // Deliberately ANSI translation unit: every call below uses the A-suffix APIs
 // (accounts.txt, client paths, window text are ANSI). The project builds with
 // CharacterSet=Unicode, so kill the Unicode macros BEFORE windows.h - this
-// makes the generic ListView_*/SNDMSG macros resolve to their ANSI forms
-// (LV_ITEM/LVITEMA + LVM_*A) and stay consistent with the explicit *A calls.
+// makes the generic ListView_*/TabCtrl_*/SNDMSG macros resolve to their ANSI
+// forms and stay consistent with the explicit *A calls.
 #ifdef UNICODE
 #undef UNICODE
 #endif
@@ -57,11 +61,81 @@
 #define IDC_CHK_FILL_PASS  1012
 #define IDC_CHK_AUTOCLICK  1013
 #define IDC_CHK_RELOGIN    1014
-// Per-account bot feature checkboxes (extensible): add one entry in kFeatures
-// below; the Feature.<Key> line round-trips in accounts.txt automatically.
-#define IDC_CHK_FEAT_FIRST 1100   // feature i -> IDC_CHK_FEAT_FIRST + i
-#define IDC_LBL_FIRST      2000   // static labels 2000..2003
+// Login-tab int edits (top-level keys in accounts.txt).
+#define IDC_ED_CLICKINT    1015
+#define IDC_ED_CLICKRETRY  1016
+#define IDC_ED_BTNOR       1017
+#define IDC_ED_ACCTIDX     1018
+#define IDC_ED_PASSIDX     1019
+#define IDC_TABS           1020
+#define IDC_BTN_KILL       1021
 #define IDC_STATIC_STATUS  1900
+// Feature controls: table row i -> checkbox 1100+i, edit 1300+i, label 2100+i.
+#define IDC_FEAT_CHK_FIRST  1100
+#define IDC_FEAT_EDIT_FIRST 1300
+#define IDC_FEAT_LBL_FIRST  2100
+#define IDC_LBL_FIRST       2000  // static labels 2000..2004 (edits/combo/login)
+#define IDC_LBL_LOGININT    2050  // login int labels 2050..2054
+
+// ---------------------------------------------------------------------------
+// Per-account feature settings table (the ImGui control surface)
+// ----------------------------------------------------------------------------
+// One row per Feature.<Key> line in accounts.txt. coinSection/coinKey = where
+// the value lands in the transient coinfo.ini written to the client dir - key
+// names/sections must match the hook's config.cpp LoadConfig/SaveConfig.
+// Tabs: 0=Login (login table rows live there too), 1=Auto Hunt, 2=Speed,
+// 3=XP / Buffs / Gear. Defaults mirror config.cpp LoadConfig (a missing key
+// behaves exactly like a fresh hook install), except the original seven
+// checkbox features which default 0 per the accounts.txt spec.
+enum FeatKind { K_CHECK, K_INT, K_TEXT };
+
+struct FeatDef
+{
+    const char* key;         // Feature.<Key> in accounts.txt
+    const char* label;       // GUI text
+    FeatKind    kind;
+    const char* coinSection; // coinfo.ini section ("" = manager-only/special)
+    const char* coinKey;     // coinfo.ini key
+    const char* def;         // default value string
+    int         tab;
+};
+
+static const FeatDef gFeats[] =
+{
+    // --- Auto Hunt (tab 1) ---
+    { "AutoHuntOnLogin",     "Auto Hunt On Login",  K_CHECK, "AutoHunt", "AutoHuntOnLogin",     "0",  1 },
+    { "NotifyServer",        "Notify Server",       K_CHECK, "AutoHunt", "NotifyServer",        "0",  1 },
+    { "SpoofVipLevel",       "Spoof Vip Level",     K_CHECK, "AutoHunt", "SpoofVipLevel",       "0",  1 },
+    { "WaypointsEnabled",    "Waypoints Enabled",   K_CHECK, "AutoHunt", "WaypointsEnabled",    "0",  1 },
+    { "VipLevel",            "Vip Level (0-6)",     K_INT,   "AutoHunt", "VipLevel",            "6",  1 },
+    { "ArrivalThreshold",    "Arrival Threshold",   K_INT,   "AutoHunt", "ArrivalThreshold",    "4",  1 },
+    { "ClearedSeconds",      "Cleared Seconds",     K_INT,   "AutoHunt", "ClearedSeconds",      "5",  1 },
+    { "TravelTimeoutSeconds","Travel Timeout (s)",  K_INT,   "AutoHunt", "TravelTimeoutSeconds","30", 1 },
+    { "Waypoints",           "Waypoints (x,y;x,y)",K_TEXT,  "",         "",                    "",   1 },
+    // --- Speed (tab 2) ---
+    { "SpeedEnabled",        "Speed Enabled",       K_CHECK, "Speed",    "SpeedEnabled",        "0",  2 },
+    { "FastLootTick",        "Fast Loot Tick",      K_CHECK, "Speed",    "FastLootTick",        "0",  2 },
+    { "AutoMoveSpeedEnabled","Auto Move Enabled",   K_CHECK, "Speed",    "AutoMoveSpeedEnabled","0",  2 },
+    { "AttackSpeedEnabled",  "Attack Speed Enabled", K_CHECK, "Speed",    "AttackSpeedEnabled",  "0",  2 },
+    { "SpeedPercent",        "Speed Percent",        K_INT,   "Speed",    "SpeedPercent",        "200",2 },
+    { "FastLootIntervalMs",  "Fast Loot Interval",  K_INT,   "Speed",    "FastLootIntervalMs",  "50", 2 },
+    { "AutoMovePercent",     "Auto Move Percent",    K_INT,   "Speed",    "AutoMovePercent",     "500",2 },
+    { "AttackSpeedPercent",  "Attack Speed Percent", K_INT,   "Speed",    "AttackSpeedPercent",  "500",2 },
+    { "AttackIntervalMs",    "Attack Interval (ms)",K_INT,   "Speed",    "AttackIntervalMs",    "650",2 },
+    // --- XP / Buffs / GearSwap / General (tab 3) ---
+    { "AllowXpSkills",       "Allow XP Skills",     K_CHECK, "XpSkill",  "AllowXpSkills",       "0",  3 },
+    { "AutoXpSkill",         "Auto XP Skill",       K_CHECK, "XpSkill",  "AutoXpSkill",         "0",  3 },
+    { "AutoXpOnlyWhileHunting","Auto XP Only Hunt", K_CHECK, "XpSkill",  "AutoXpOnlyWhileHunting","1",3 },
+    { "ForceXpSkillId",      "Force XP Skill Id",   K_CHECK, "XpSkill",  "ForceXpSkillId",      "1",  3 },
+    { "ForcedXpSkillId",     "Forced Skill Id",     K_INT,   "XpSkill",  "ForcedXpSkillId",     "6011",3 },
+    { "BuffsEnabled",        "Buffs Enabled",       K_CHECK, "Buffs",    "BuffsEnabled",        "0",  3 },
+    { "GearSwap",            "Gear Swap",           K_CHECK, "GearSwap", "AutoSwap",            "0",  3 },
+    { "IconStatusIdA",       "Swap Icon Id A",      K_INT,   "GearSwap", "IconStatusIdA",       "10", 3 },
+    { "IconStatusIdB",       "Swap Icon Id B",      K_INT,   "GearSwap", "IconStatusIdB",       "5",  3 },
+    { "Wireframe",           "Wireframe",           K_CHECK, "General",  "Wireframe",           "0",  3 },
+};
+static const int kFeatCount = sizeof(gFeats) / sizeof(gFeats[0]);
+static const char* kTabNames[4] = { "Login", "Auto Hunt", "Speed", "XP / Buffs / Gear" };
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -82,39 +156,19 @@ struct Settings
     int  passwordEditIndex;
 };
 
-// One checkbox-backed feature. coinSection/coinKey = where it lands inside the
-// transient coinfo.ini written to the client dir (must match the hook DLL's
-// config.cpp LoadConfig key names).
-struct FeatureInfo
-{
-    const char* iniKey;       // Feature.<Key> in accounts.txt
-    const char* label;        // checkbox text
-    const char* coinSection;  // coinfo.ini section
-    const char* coinKey;      // coinfo.ini key
-    bool        def;          // default when the key is missing
-};
-
-static const FeatureInfo kFeatures[] =
-{
-    { "AutoHuntOnLogin", "Auto Hunt On Login", "AutoHunt", "AutoHuntOnLogin", false },
-    { "NotifyServer",    "Notify Server",      "AutoHunt", "NotifyServer",    false },
-    { "SpoofVipLevel",   "Spoof Vip Level",    "AutoHunt", "SpoofVipLevel",   false },
-    { "SpeedEnabled",    "Speed Enabled",      "Speed",    "SpeedEnabled",    false },
-    { "AllowXpSkills",   "Allow XP Skills",    "XpSkill",  "AllowXpSkills",    false },
-    { "BuffsEnabled",    "Buffs Enabled",       "Buffs",    "BuffsEnabled",    false },
-    { "GearSwap",        "Gear Swap",          "GearSwap", "AutoSwap",        false },
-};
-static const int kFeatureCount = sizeof(kFeatures) / sizeof(kFeatures[0]);
-
 struct Account
 {
     char name[64];
     char pass[128];
     char token[64];
     Settings s;
-    bool feature[kFeatureCount];
-    std::vector<std::pair<std::string, std::string>> extraKeys; // unknown Feature.*
-    bool hasStatus;   // launched at least once this session -> "Last used"
+    // ALL Feature.<Key> rows (suffix key -> raw value string), known and
+    // unknown. Unknown keys round-trip untouched; known ones feed the GUI and
+    // the transient coinfo.ini export.
+    std::vector<std::pair<std::string, std::string>> feats;
+    // Live client tracking (in-memory only, never persisted).
+    DWORD   pid;      // last launched client pid (0 = never launched)
+    HANDLE  hProc;    // open handle while that client is running (NULL = dead)
 };
 
 // ---------------------------------------------------------------------------
@@ -191,10 +245,37 @@ static void ClearAccount(Account& a)
     memset(a.pass, 0, sizeof(a.pass));
     memset(a.token, 0, sizeof(a.token));
     Defaults(a.s);
-    for (int i = 0; i < kFeatureCount; i++)
-        a.feature[i] = false;
-    a.extraKeys.clear();
-    a.hasStatus = false;
+    a.feats.clear();
+    a.pid = 0;
+    a.hProc = NULL;
+}
+
+// Feature.<Key> accessors over the feats vector.
+static bool IsKnownFeatKey(const char* suffix)
+{
+    for (int i = 0; i < kFeatCount; i++)
+        if (_stricmp(suffix, gFeats[i].key) == 0)
+            return true;
+    return false;
+}
+
+static std::string GetFeat(const Account& a, const char* suffix, const char* def)
+{
+    for (size_t i = 0; i < a.feats.size(); i++)
+        if (_stricmp(a.feats[i].first.c_str(), suffix) == 0)
+            return a.feats[i].second;
+    return std::string(def);
+}
+
+static void SetFeat(Account& a, const char* suffix, const char* val)
+{
+    for (size_t i = 0; i < a.feats.size(); i++)
+        if (_stricmp(a.feats[i].first.c_str(), suffix) == 0)
+        {
+            a.feats[i].second = val;
+            return;
+        }
+    a.feats.push_back({ std::string(suffix), std::string(val) });
 }
 
 // ---------------------------------------------------------------------------
@@ -250,11 +331,7 @@ static void LoadAll()
         a.s.accountEditIndex  = GetPrivateProfileIntA(sec, "AccountEditIndex", -1, g_cfgPath);
         a.s.passwordEditIndex = GetPrivateProfileIntA(sec, "PasswordEditIndex", -1, g_cfgPath);
 
-        for (int i = 0; i < kFeatureCount; i++)
-            a.feature[i] = GetPrivateProfileIntA(sec, kFeatures[i].iniKey,
-                kFeatures[i].def ? 1 : 0, g_cfgPath) != 0;
-
-        // Round-trip unknown Feature.* keys untouched.
+        // Every Feature.<Key> row (known and unknown) - stored raw by suffix.
         char secbuf[8192];
         DWORD got = GetPrivateProfileSectionA(sec, secbuf, sizeof(secbuf), g_cfgPath);
         if (got > 0 && got < sizeof(secbuf) - 2)
@@ -270,15 +347,7 @@ static void LoadAll()
                 *eq = '=';
                 if (_strnicmp(k.c_str(), "Feature.", 8) != 0)
                     continue;
-                bool known = false;
-                for (int i = 0; i < kFeatureCount; i++)
-                    if (_stricmp(k.c_str() + 8, kFeatures[i].iniKey) == 0)
-                    {
-                        known = true;
-                        break;
-                    }
-                if (!known)
-                    a.extraKeys.push_back({ k, v });
+                a.feats.push_back({ k.substr(8), v });
             }
         }
         g_accounts.push_back(a);
@@ -303,15 +372,12 @@ static void WriteAccountIni(const Account& a)
     WriteIntKey(sec, "ButtonIdOverride", a.s.buttonIdOverride, g_cfgPath);
     WriteIntKey(sec, "AccountEditIndex", a.s.accountEditIndex, g_cfgPath);
     WriteIntKey(sec, "PasswordEditIndex", a.s.passwordEditIndex, g_cfgPath);
-    for (int i = 0; i < kFeatureCount; i++)
+    for (size_t i = 0; i < a.feats.size(); i++)
     {
-        char key[80];
-        _snprintf_s(key, sizeof(key), _TRUNCATE, "Feature.%s", kFeatures[i].iniKey);
-        WritePrivateProfileStringA(sec, key, a.feature[i] ? "1" : "0", g_cfgPath);
+        char key[96];
+        _snprintf_s(key, sizeof(key), _TRUNCATE, "Feature.%s", a.feats[i].first.c_str());
+        WritePrivateProfileStringA(sec, key, a.feats[i].second.c_str(), g_cfgPath);
     }
-    for (size_t i = 0; i < a.extraKeys.size(); i++)
-        WritePrivateProfileStringA(sec, a.extraKeys[i].first.c_str(),
-            a.extraKeys[i].second.c_str(), g_cfgPath);
 }
 
 static bool FindAccountByName(const char* name, int* idxOut = NULL)
@@ -329,7 +395,9 @@ static bool FindAccountByName(const char* name, int* idxOut = NULL)
 // ---------------------------------------------------------------------------
 // GUI <-> account transfers
 // ---------------------------------------------------------------------------
-static Account AccountFromGui(HWND hMain, const char* name)
+// Builds an account from the GUI. pid/hProc (live client tracking) are copied
+// from `old` when provided.
+static Account AccountFromGui(HWND hMain, const char* name, const Account* old = NULL)
 {
     Account a;
     ClearAccount(a);
@@ -342,9 +410,34 @@ static Account AccountFromGui(HWND hMain, const char* name)
     a.s.autoRelogin       = (IsDlgButtonChecked(hMain, IDC_CHK_RELOGIN) == BST_CHECKED);
     LRESULT cm = SendMessage(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_GETCURSEL, 0, 0);
     a.s.clickMethod = (cm >= 0 && cm <= 3) ? (int)cm : 0;
-    for (int i = 0; i < kFeatureCount; i++)
-        a.feature[i] = (IsDlgButtonChecked(hMain, IDC_CHK_FEAT_FIRST + i) == BST_CHECKED);
-    a.hasStatus = false;
+    a.s.clickIntervalMs   = GetDlgItemInt(hMain, IDC_ED_CLICKINT, NULL, FALSE);
+    a.s.clickRetryMs      = GetDlgItemInt(hMain, IDC_ED_CLICKRETRY, NULL, FALSE);
+    a.s.buttonIdOverride  = GetDlgItemInt(hMain, IDC_ED_BTNOR, NULL, FALSE);
+    a.s.accountEditIndex  = GetDlgItemInt(hMain, IDC_ED_ACCTIDX, NULL, TRUE);
+    a.s.passwordEditIndex = GetDlgItemInt(hMain, IDC_ED_PASSIDX, NULL, TRUE);
+    if (old)
+    {
+        a.pid = old->pid;
+        a.hProc = old->hProc;
+    }
+
+    // Feature table controls -> Feature.<Key> rows (all of them, every save).
+    for (int i = 0; i < kFeatCount; i++)
+    {
+        char val[512] = { 0 };
+        if (gFeats[i].kind == K_CHECK)
+            _snprintf_s(val, sizeof(val), _TRUNCATE, "%d",
+                IsDlgButtonChecked(hMain, IDC_FEAT_CHK_FIRST + i) == BST_CHECKED ? 1 : 0);
+        else
+            GetDlgItemTextA(hMain, IDC_FEAT_EDIT_FIRST + i, val, sizeof(val));
+        SetFeat(a, gFeats[i].key, val);
+    }
+
+    // Unknown Feature.* rows round-trip untouched.
+    if (old)
+        for (size_t i = 0; i < old->feats.size(); i++)
+            if (!IsKnownFeatKey(old->feats[i].first.c_str()))
+                SetFeat(a, old->feats[i].first.c_str(), old->feats[i].second.c_str());
     return a;
 }
 
@@ -364,8 +457,20 @@ static void GuiShowAccount(HWND hMain, int idx)
     int cm = a.s.clickMethod;
     if (cm < 0 || cm > 3) cm = 0; // combo index == ClickMethod value (0-3)
     SendMessage(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_SETCURSEL, (WPARAM)cm, 0);
-    for (int i = 0; i < kFeatureCount; i++)
-        CheckDlgButton(hMain, IDC_CHK_FEAT_FIRST + i, a.feature[i] ? BST_CHECKED : BST_UNCHECKED);
+    SetDlgItemInt(hMain, IDC_ED_CLICKINT, (UINT)a.s.clickIntervalMs, FALSE);
+    SetDlgItemInt(hMain, IDC_ED_CLICKRETRY, (UINT)a.s.clickRetryMs, FALSE);
+    SetDlgItemInt(hMain, IDC_ED_BTNOR, (UINT)a.s.buttonIdOverride, FALSE);
+    SetDlgItemInt(hMain, IDC_ED_ACCTIDX, (UINT)a.s.accountEditIndex, TRUE);
+    SetDlgItemInt(hMain, IDC_ED_PASSIDX, (UINT)a.s.passwordEditIndex, TRUE);
+    for (int i = 0; i < kFeatCount; i++)
+    {
+        std::string v = GetFeat(a, gFeats[i].key, gFeats[i].def);
+        if (gFeats[i].kind == K_CHECK)
+            CheckDlgButton(hMain, IDC_FEAT_CHK_FIRST + i,
+                atoi(v.c_str()) != 0 ? BST_CHECKED : BST_UNCHECKED);
+        else
+            SetDlgItemTextA(hMain, IDC_FEAT_EDIT_FIRST + i, v.c_str());
+    }
     // Name is read-only while a row is selected.
     SendMessage(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, TRUE, 0);
     g_loading = false;
@@ -382,11 +487,81 @@ static void GuiClearFields(HWND hMain)
     CheckDlgButton(hMain, IDC_CHK_AUTOCLICK, BST_UNCHECKED);
     CheckDlgButton(hMain, IDC_CHK_RELOGIN, BST_CHECKED);
     SendMessage(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_SETCURSEL, 0, 0);
-    for (int i = 0; i < kFeatureCount; i++)
-        CheckDlgButton(hMain, IDC_CHK_FEAT_FIRST + i, kFeatures[i].def ? BST_CHECKED : BST_UNCHECKED);
+    SetDlgItemInt(hMain, IDC_ED_CLICKINT, 1000, FALSE);
+    SetDlgItemInt(hMain, IDC_ED_CLICKRETRY, 10000, FALSE);
+    SetDlgItemInt(hMain, IDC_ED_BTNOR, 0, FALSE);
+    SetDlgItemInt(hMain, IDC_ED_ACCTIDX, (UINT)-1, TRUE);
+    SetDlgItemInt(hMain, IDC_ED_PASSIDX, (UINT)-1, TRUE);
+    for (int i = 0; i < kFeatCount; i++)
+    {
+        if (gFeats[i].kind == K_CHECK)
+            CheckDlgButton(hMain, IDC_FEAT_CHK_FIRST + i,
+                atoi(gFeats[i].def) != 0 ? BST_CHECKED : BST_UNCHECKED);
+        else
+            SetDlgItemTextA(hMain, IDC_FEAT_EDIT_FIRST + i, gFeats[i].def);
+    }
     // Name is editable when no row is selected (add mode).
     SendMessage(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, FALSE, 0);
     g_loading = false;
+}
+
+// ---------------------------------------------------------------------------
+// Live client status
+// ---------------------------------------------------------------------------
+static const char* StatusText(const Account& a, char* buf, size_t bufsz)
+{
+    if (a.hProc)
+    {
+        if (WaitForSingleObject(a.hProc, 0) == WAIT_TIMEOUT)
+        {
+            _snprintf_s(buf, bufsz, _TRUNCATE, "Running (pid %lu)", a.pid);
+            return buf;
+        }
+        // Signaled - the client exited; caller closes the handle.
+        return "Last used";
+    }
+    return a.pid ? "Last used" : "";
+}
+
+// Reap dead handles and refresh only the Status column (no list rebuild, so
+// the selection is untouched).
+static void UpdateStatusColumn(HWND hMain)
+{
+    HWND lv = GetDlgItem(hMain, IDC_LIST);
+    for (size_t i = 0; i < g_accounts.size(); i++)
+    {
+        if (g_accounts[i].hProc
+            && WaitForSingleObject(g_accounts[i].hProc, 0) != WAIT_TIMEOUT)
+        {
+            CloseHandle(g_accounts[i].hProc);
+            g_accounts[i].hProc = NULL;
+        }
+        char buf[64];
+        ListView_SetItemText(lv, (int)i, 1, (LPSTR)StatusText(g_accounts[i], buf, sizeof(buf)));
+    }
+}
+
+static void KillSelectedClient(HWND hMain)
+{
+    if (g_selAccount < 0 || g_selAccount >= (int)g_accounts.size())
+    {
+        SetStatus(hMain, "No account selected");
+        return;
+    }
+    Account& a = g_accounts[g_selAccount];
+    if (!a.hProc || WaitForSingleObject(a.hProc, 0) != WAIT_TIMEOUT)
+    {
+        SetStatus(hMain, "No running client for %s", a.name);
+        return;
+    }
+    if (TerminateProcess(a.hProc, 0))
+    {
+        WaitForSingleObject(a.hProc, 3000);
+        SetStatus(hMain, "Killed client (pid %lu) for %s", a.pid, a.name);
+    }
+    else
+        SetStatus(hMain, "Kill failed (error %lu)", GetLastError());
+    UpdateStatusColumn(hMain);
 }
 
 // ---------------------------------------------------------------------------
@@ -406,8 +581,11 @@ static void RefreshList(HWND hMain)
         it.pszText = (LPSTR)g_accounts[i].name;
         int row = ListView_InsertItem(lv, &it);
         if (row >= 0)
+        {
+            char buf[64];
             ListView_SetItemText(lv, row, 1,
-                (LPSTR)(g_accounts[i].hasStatus ? "Last used" : ""));
+                (LPSTR)StatusText(g_accounts[i], buf, sizeof(buf)));
+        }
     }
     if (g_selAccount >= (int)g_accounts.size())
         g_selAccount = -1;
@@ -497,6 +675,33 @@ static void ExportAccountInfoIni(const Account& a, const char* clientDir)
     WritePrivateProfileStringA("Account1", "Use", "1", path);
 }
 
+// Waypoints: "x,y;x,y;..." in accounts.txt -> WaypointCount/Waypoint0..N in
+// coinfo.ini (the format the hook's LoadConfig parses).
+static void ExportWaypoints(const Account& a, const char* path)
+{
+    std::string v = GetFeat(a, "Waypoints", "");
+    int count = 0;
+    if (!v.empty())
+    {
+        char buf[2048];
+        strncpy_s(buf, v.c_str(), _TRUNCATE);
+        char* ctx = NULL;
+        for (char* tok = strtok_s(buf, ";", &ctx); tok; tok = strtok_s(NULL, ";", &ctx))
+        {
+            int x = 0, y = 0;
+            if (sscanf_s(tok, " %d , %d", &x, &y) == 2)
+            {
+                char key[16], val[32];
+                _snprintf_s(key, sizeof(key), _TRUNCATE, "Waypoint%d", count);
+                _snprintf_s(val, sizeof(val), _TRUNCATE, "%d,%d", x, y);
+                WritePrivateProfileStringA("AutoHunt", key, val, path);
+                count++;
+            }
+        }
+    }
+    WriteIntKey("AutoHunt", "WaypointCount", count, path);
+}
+
 static void ExportCoinfoIni(const Account& a, const char* clientDir)
 {
     char path[MAX_PATH];
@@ -514,19 +719,27 @@ static void ExportCoinfoIni(const Account& a, const char* clientDir)
     WriteIntKey("AutoLogin", "AccountEditIndex", a.s.accountEditIndex, path);
     WriteIntKey("AutoLogin", "PasswordEditIndex", a.s.passwordEditIndex, path);
 
-    // Feature.* -> [AutoHunt]/[Speed]/[XpSkill]/[Buffs]/[GearSwap].
-    for (int i = 0; i < kFeatureCount; i++)
-        WritePrivateProfileStringA(kFeatures[i].coinSection, kFeatures[i].coinKey,
-            a.feature[i] ? "1" : "0", path);
+    // Feature.* -> their coinfo.ini sections/keys (the Waypoints row expands
+    // to WaypointCount/WaypointN below).
+    for (int i = 0; i < kFeatCount; i++)
+    {
+        if (gFeats[i].kind == K_TEXT)
+            continue;
+        std::string v = GetFeat(a, gFeats[i].key, gFeats[i].def);
+        if (gFeats[i].kind == K_CHECK)
+            WritePrivateProfileStringA(gFeats[i].coinSection, gFeats[i].coinKey,
+                atoi(v.c_str()) != 0 ? "1" : "0", path);
+        else
+            WritePrivateProfileStringA(gFeats[i].coinSection, gFeats[i].coinKey,
+                v.c_str(), path);
+    }
+    ExportWaypoints(a, path);
 
     // Unknown Feature.* keys round-trip under [AutoHunt] with the suffix name.
-    for (size_t i = 0; i < a.extraKeys.size(); i++)
-    {
-        const char* dot = strchr(a.extraKeys[i].first.c_str(), '.');
-        if (dot)
-            WritePrivateProfileStringA("AutoHunt", dot + 1,
-                a.extraKeys[i].second.c_str(), path);
-    }
+    for (size_t i = 0; i < a.feats.size(); i++)
+        if (!IsKnownFeatKey(a.feats[i].first.c_str()))
+            WritePrivateProfileStringA("AutoHunt", a.feats[i].first.c_str(),
+                a.feats[i].second.c_str(), path);
 }
 
 // ---------------------------------------------------------------------------
@@ -540,10 +753,28 @@ static void LaunchSelectedClient(HWND hMain)
         return;
     }
 
+    // 0. Guard against double-launching a still-running client.
+    {
+        Account& cur = g_accounts[g_selAccount];
+        if (cur.hProc && WaitForSingleObject(cur.hProc, 0) == WAIT_TIMEOUT)
+        {
+            char msg[256];
+            _snprintf_s(msg, sizeof(msg), _TRUNCATE,
+                "Client for \"%s\" is already running (pid %lu).\nLaunch another one?",
+                cur.name, cur.pid);
+            if (MessageBoxA(hMain, msg, "Account Manager",
+                    MB_YESNO | MB_ICONQUESTION) != IDYES)
+            {
+                SetStatus(hMain, "Launch cancelled: client already running (pid %lu)", cur.pid);
+                return;
+            }
+            CloseHandle(cur.hProc);
+            cur.hProc = NULL;
+        }
+    }
+
     // 1. Auto-save the selected account's current GUI state first.
-    Account a = AccountFromGui(hMain, g_accounts[g_selAccount].name);
-    a.extraKeys = g_accounts[g_selAccount].extraKeys;
-    a.hasStatus = g_accounts[g_selAccount].hasStatus;
+    Account a = AccountFromGui(hMain, g_accounts[g_selAccount].name, &g_accounts[g_selAccount]);
     g_accounts[g_selAccount] = a;
     WriteAccountIni(a);
     WritePrivateProfileStringA("Global", "LastSelected", a.name, g_cfgPath);
@@ -606,11 +837,15 @@ static void LaunchSelectedClient(HWND hMain)
         return;
     }
 
-    CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    g_accounts[g_selAccount].hasStatus = true;
-    RefreshList(hMain);
+    // Keep the process handle so the Status column can track it live.
+    g_accounts[g_selAccount].pid = pi.dwProcessId;
+    g_accounts[g_selAccount].hProc = pi.hProcess;
+    a.pid = pi.dwProcessId;
+    a.hProc = pi.hProcess;
+
+    UpdateStatusColumn(hMain);
     SetStatus(hMain, "Launched pid %lu with account %s", pi.dwProcessId, a.name);
 }
 
@@ -619,6 +854,8 @@ static void LaunchSelectedClient(HWND hMain)
 // ---------------------------------------------------------------------------
 static const int MARGIN = 10;
 
+// Position the controls of every tab inside the tab control's display rect
+// (hidden tabs are moved too - harmless, keeps WM_SIZE simple).
 static void Layout(HWND hMain)
 {
     RECT rc;
@@ -627,9 +864,9 @@ static void Layout(HWND hMain)
     int h = rc.bottom;
     int y = MARGIN;
 
-    int listH = (int)(h * 0.38);
+    int listH = 190;
     MoveWindow(GetDlgItem(hMain, IDC_LIST), MARGIN, y, w - MARGIN * 2, listH, TRUE);
-    y += listH + 12;
+    y += listH + 10;
 
     // Left column: account / password / token edits.
     int labelW = 110;
@@ -642,35 +879,133 @@ static void Layout(HWND hMain)
     MoveWindow(GetDlgItem(hMain, IDC_EDIT_TOKEN), MARGIN + labelW, y + 56, editW, 22, TRUE);
 
     // Right column: buttons.
-    int bx = w - 170 - MARGIN, bw = 170;
+    int bx = w - 180 - MARGIN, bw = 180;
     MoveWindow(GetDlgItem(hMain, IDC_BTN_ADD), bx, y, bw, 26, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_BTN_SAVE), bx, y + 30, bw, 26, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_BTN_DELETE), bx, y + 60, bw, 26, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_BTN_LAUNCH), bx, y + 90, bw, 30, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_BTN_PATH), bx, y + 126, bw, 26, TRUE);
+    MoveWindow(GetDlgItem(hMain, IDC_BTN_KILL), bx, y + 124, bw, 26, TRUE);
+    MoveWindow(GetDlgItem(hMain, IDC_BTN_PATH), bx, y + 154, bw, 26, TRUE);
+    y += 190;
 
-    // Auto-login settings.
-    int gy = y + 90;
-    MoveWindow(GetDlgItem(hMain, IDC_CHK_FILL_ACCT), MARGIN, gy, 130, 20, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_CHK_FILL_PASS), MARGIN + 135, gy, 140, 20, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_CHK_AUTOCLICK), MARGIN, gy + 24, 130, 20, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_CHK_RELOGIN), MARGIN + 135, gy + 24, 140, 20, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_LBL_FIRST + 3), MARGIN, gy + 50, labelW, 18, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_COMBO_METHOD), MARGIN + labelW, gy + 48, 160, 200, TRUE);
+    // Tab control fills the rest above the status bar.
+    HWND tab = GetDlgItem(hMain, IDC_TABS);
+    MoveWindow(tab, MARGIN, y, w - MARGIN * 2, h - y - 32, TRUE);
 
-    // Feature checkbox grid.
-    int fy = gy + 78;
-    MoveWindow(GetDlgItem(hMain, IDC_LBL_FIRST + 4), MARGIN, fy, 200, 18, TRUE);
-    fy += 22;
-    int perRow = 3;
-    int cellW = (w - MARGIN * 2) / perRow;
-    for (int i = 0; i < kFeatureCount; i++)
-        MoveWindow(GetDlgItem(hMain, IDC_CHK_FEAT_FIRST + i),
-            MARGIN + (i % perRow) * cellW, fy + (i / perRow) * 24,
-            cellW - 4, 20, TRUE);
+    // Tab display area (in main-window client coords).
+    RECT dr;
+    GetClientRect(tab, &dr);
+    SendMessage(tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&dr);
+    POINT p0 = { dr.left, dr.top };
+    ClientToScreen(tab, &p0);
+    ScreenToClient(hMain, &p0);
+    int tx = p0.x + 4, ty = p0.y + 4;
+    int tw = (dr.right - dr.left) - 8;
+    int rowH = 22;
+
+    // --- Tab 0: Login ---
+    int lx = tx, ly = ty;
+    MoveWindow(GetDlgItem(hMain, IDC_CHK_FILL_ACCT), lx, ly, 130, 20, TRUE);
+    MoveWindow(GetDlgItem(hMain, IDC_CHK_FILL_PASS), lx + 140, ly, 140, 20, TRUE);
+    MoveWindow(GetDlgItem(hMain, IDC_CHK_AUTOCLICK), lx, ly + rowH, 130, 20, TRUE);
+    MoveWindow(GetDlgItem(hMain, IDC_CHK_RELOGIN), lx + 140, ly + rowH, 140, 20, TRUE);
+    ly += rowH * 2 + 6;
+    MoveWindow(GetDlgItem(hMain, IDC_LBL_FIRST + 3), lx, ly + 3, 100, 18, TRUE);
+    MoveWindow(GetDlgItem(hMain, IDC_COMBO_METHOD), lx + 105, ly, 170, 200, TRUE);
+    ly += 30;
+    struct LoginInt { int ed; int lbl; const char* text; };
+    const LoginInt lints[5] =
+    {
+        { IDC_ED_CLICKINT,   IDC_LBL_LOGININT + 0, "Click Interval (ms)" },
+        { IDC_ED_CLICKRETRY, IDC_LBL_LOGININT + 1, "Click Retry (ms)" },
+        { IDC_ED_BTNOR,      IDC_LBL_LOGININT + 2, "Button Id Override" },
+        { IDC_ED_ACCTIDX,    IDC_LBL_LOGININT + 3, "Account Edit Index" },
+        { IDC_ED_PASSIDX,    IDC_LBL_LOGININT + 4, "Password Edit Index" },
+    };
+    for (int i = 0; i < 5; i++)
+    {
+        int col = i % 2, row = i / 2;
+        int cx = lx + col * (tw / 2), cy = ly + row * 28;
+        MoveWindow(GetDlgItem(hMain, lints[i].lbl), cx, cy + 3, 130, 18, TRUE);
+        MoveWindow(GetDlgItem(hMain, lints[i].ed), cx + 135, cy, 70, 22, TRUE);
+    }
+
+    // --- Feature tabs (1..3): checkboxes flow 3-per-row, then int pairs
+    // 2-per-row, then the waypoints text row (table order guarantees
+    // checks -> ints -> text within each tab). ---
+    for (int t = 1; t < 4; t++)
+    {
+        int fx = tx, fy = ty;
+        int chkCols = 3, nInt = 0;
+        for (int i = 0; i < kFeatCount; i++)
+            if (gFeats[i].tab == t && gFeats[i].kind == K_INT) nInt++;
+        int placed = 0;
+        for (int i = 0; i < kFeatCount; i++)
+        {
+            if (gFeats[i].tab != t || gFeats[i].kind != K_CHECK)
+                continue;
+            int col = placed % chkCols, row = placed / chkCols;
+            MoveWindow(GetDlgItem(hMain, IDC_FEAT_CHK_FIRST + i),
+                fx + col * (tw / chkCols), fy + row * rowH,
+                (tw / chkCols) - 4, 20, TRUE);
+            placed++;
+        }
+        fy += ((placed + chkCols - 1) / chkCols) * rowH + 6;
+        // Int fields: label + edit, 2 per row.
+        placed = 0;
+        for (int i = 0; i < kFeatCount; i++)
+        {
+            if (gFeats[i].tab != t || gFeats[i].kind != K_INT)
+                continue;
+            int col = placed % 2, row = placed / 2;
+            int cx = fx + col * (tw / 2), cy = fy + row * 28;
+            MoveWindow(GetDlgItem(hMain, IDC_FEAT_LBL_FIRST + i), cx, cy + 3, 135, 18, TRUE);
+            MoveWindow(GetDlgItem(hMain, IDC_FEAT_EDIT_FIRST + i), cx + 140, cy, 70, 22, TRUE);
+            placed++;
+        }
+        if (nInt)
+            fy += ((nInt + 1) / 2) * 28 + 6;
+        // Text row (waypoints): label + wide edit.
+        for (int i = 0; i < kFeatCount; i++)
+        {
+            if (gFeats[i].tab != t || gFeats[i].kind != K_TEXT)
+                continue;
+            MoveWindow(GetDlgItem(hMain, IDC_FEAT_LBL_FIRST + i), fx, fy + 3, 135, 18, TRUE);
+            MoveWindow(GetDlgItem(hMain, IDC_FEAT_EDIT_FIRST + i), fx + 140, fy, tw - 145, 22, TRUE);
+        }
+    }
 
     // Status bar.
     MoveWindow(GetDlgItem(hMain, IDC_STATIC_STATUS), MARGIN, h - 26, w - MARGIN * 2, 20, TRUE);
+}
+
+// Show/hide per-tab controls for the currently selected tab.
+static void ApplyTabVisibility(HWND hMain)
+{
+    HWND tab = GetDlgItem(hMain, IDC_TABS);
+    int cur = (int)SendMessage(tab, TCM_GETCURSEL, 0, 0);
+    for (int i = 0; i < kFeatCount; i++)
+    {
+        BOOL vis = (gFeats[i].tab == cur) ? SW_SHOW : SW_HIDE;
+        if (gFeats[i].kind == K_CHECK)
+            ShowWindow(GetDlgItem(hMain, IDC_FEAT_CHK_FIRST + i), vis);
+        else
+        {
+            ShowWindow(GetDlgItem(hMain, IDC_FEAT_EDIT_FIRST + i), vis);
+            ShowWindow(GetDlgItem(hMain, IDC_FEAT_LBL_FIRST + i), vis);
+        }
+    }
+    // Login-tab controls (table rows 0-4 chks, combo, login ints).
+    BOOL vis = (cur == 0) ? SW_SHOW : SW_HIDE;
+    for (int id = IDC_CHK_FILL_ACCT; id <= IDC_CHK_RELOGIN; id++)
+        ShowWindow(GetDlgItem(hMain, id), vis);
+    ShowWindow(GetDlgItem(hMain, IDC_COMBO_METHOD), vis);
+    ShowWindow(GetDlgItem(hMain, IDC_LBL_FIRST + 3), vis);
+    for (int i = 0; i < 5; i++)
+    {
+        ShowWindow(GetDlgItem(hMain, IDC_LBL_LOGININT + i), vis);
+        ShowWindow(GetDlgItem(hMain, IDC_ED_CLICKINT + i), vis);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -699,7 +1034,7 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
         ListView_InsertColumn(lv, 0, &col);
         memset(&col, 0, sizeof(col));
         col.mask = LVCF_WIDTH | LVCF_TEXT;
-        col.cx = 120;
+        col.cx = 150;
         col.pszText = (LPSTR)"Status";
         ListView_InsertColumn(lv, 1, &col);
 
@@ -725,15 +1060,16 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
 
         // Buttons.
         struct BtnDef { int id; const char* label; };
-        const BtnDef btns[5] =
+        const BtnDef btns[6] =
         {
             { IDC_BTN_ADD,    "Add" },
             { IDC_BTN_SAVE,   "Save" },
             { IDC_BTN_DELETE, "Delete" },
             { IDC_BTN_LAUNCH, "Launch Client" },
+            { IDC_BTN_KILL,   "Kill Client" },
             { IDC_BTN_PATH,   "Change Client Path" },
         };
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 6; i++)
         {
             HWND hB = CreateWindowExA(0, "BUTTON", btns[i].label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -741,7 +1077,21 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             SendMessage(hB, WM_SETFONT, (WPARAM)hf, TRUE);
         }
 
-        // Auto-login checkboxes.
+        // Tab control.
+        HWND tab = CreateWindowExA(0, WC_TABCONTROLA, "",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_FIXEDWIDTH,
+            0, 0, 100, 100, hMain, (HMENU)(INT_PTR)IDC_TABS, hInst, NULL);
+        SendMessage(tab, WM_SETFONT, (WPARAM)hf, TRUE);
+        for (int i = 0; i < 4; i++)
+        {
+            TCITEMA tci;
+            memset(&tci, 0, sizeof(tci));
+            tci.mask = TCIF_TEXT;
+            tci.pszText = (LPSTR)kTabNames[i];
+            SendMessage(tab, TCM_INSERTITEM, (WPARAM)i, (LPARAM)&tci);
+        }
+
+        // Login-tab controls: 4 checkboxes, combo + label, 5 int pairs.
         struct ChkDef { int id; const char* label; };
         const ChkDef chks[4] =
         {
@@ -757,8 +1107,6 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
                 0, 0, 130, 20, hMain, (HMENU)(INT_PTR)chks[i].id, hInst, NULL);
             SendMessage(hC, WM_SETFONT, (WPARAM)hf, TRUE);
         }
-
-        // ClickMethod combo.
         HWND hS3 = CreateWindowExA(0, "STATIC", "Click method:",
             WS_CHILD | WS_VISIBLE, 0, 0, 100, 18, hMain,
             (HMENU)(INT_PTR)(IDC_LBL_FIRST + 3), hInst, NULL);
@@ -777,19 +1125,51 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)methods[i]);
         SendMessage(hCombo, CB_SETCURSEL, 0, 0);
         SendMessage(hCombo, WM_SETFONT, (WPARAM)hf, TRUE);
-
-        // Feature checkboxes.
-        HWND hS4 = CreateWindowExA(0, "STATIC", "Bot features:",
-            WS_CHILD | WS_VISIBLE, 0, 0, 100, 18, hMain,
-            (HMENU)(INT_PTR)(IDC_LBL_FIRST + 4), hInst, NULL);
-        SendMessage(hS4, WM_SETFONT, (WPARAM)hf, TRUE);
-        for (int i = 0; i < kFeatureCount; i++)
+        struct LoginIntDef { const char* label; };
+        const LoginIntDef lints[5] =
         {
-            HWND hC = CreateWindowExA(0, "BUTTON", kFeatures[i].label,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                0, 0, 130, 20, hMain,
-                (HMENU)(INT_PTR)(IDC_CHK_FEAT_FIRST + i), hInst, NULL);
-            SendMessage(hC, WM_SETFONT, (WPARAM)hf, TRUE);
+            { "Click Interval (ms)" },
+            { "Click Retry (ms)" },
+            { "Button Id Override" },
+            { "Account Edit Index" },
+            { "Password Edit Index" },
+        };
+        for (int i = 0; i < 5; i++)
+        {
+            HWND hL = CreateWindowExA(0, "STATIC", lints[i].label,
+                WS_CHILD | WS_VISIBLE, 0, 0, 130, 18, hMain,
+                (HMENU)(INT_PTR)(IDC_LBL_LOGININT + i), hInst, NULL);
+            HWND hE = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                0, 0, 70, 22, hMain, (HMENU)(INT_PTR)(IDC_ED_CLICKINT + i), hInst, NULL);
+            SendMessage(hL, WM_SETFONT, (WPARAM)hf, TRUE);
+            SendMessage(hE, WM_SETFONT, (WPARAM)hf, TRUE);
+        }
+
+        // Feature controls from the table (created hidden; the tab logic
+        // shows the active tab's rows).
+        for (int i = 0; i < kFeatCount; i++)
+        {
+            if (gFeats[i].kind == K_CHECK)
+            {
+                HWND hC = CreateWindowExA(0, "BUTTON", gFeats[i].label,
+                    WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+                    0, 0, 130, 20, hMain,
+                    (HMENU)(INT_PTR)(IDC_FEAT_CHK_FIRST + i), hInst, NULL);
+                SendMessage(hC, WM_SETFONT, (WPARAM)hf, TRUE);
+            }
+            else
+            {
+                HWND hL = CreateWindowExA(0, "STATIC", gFeats[i].label,
+                    WS_CHILD, 0, 0, 135, 18, hMain,
+                    (HMENU)(INT_PTR)(IDC_FEAT_LBL_FIRST + i), hInst, NULL);
+                HWND hE = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+                    WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+                    0, 0, 70, 22, hMain,
+                    (HMENU)(INT_PTR)(IDC_FEAT_EDIT_FIRST + i), hInst, NULL);
+                SendMessage(hL, WM_SETFONT, (WPARAM)hf, TRUE);
+                SendMessage(hE, WM_SETFONT, (WPARAM)hf, TRUE);
+            }
         }
 
         // Status bar.
@@ -807,6 +1187,8 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
         else
             GuiClearFields(hMain); // add-mode defaults
         EnsureClientPath(hMain);
+        ApplyTabVisibility(hMain);
+        SetTimer(hMain, 1, 2000, NULL); // live client status poll
         SetStatus(hMain, "%d account(s) loaded", (int)g_accounts.size());
         return 0;
     }
@@ -816,11 +1198,16 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             Layout(hMain);
         return 0;
 
+    case WM_TIMER:
+        if (wParam == 1)
+            UpdateStatusColumn(hMain);
+        return 0;
+
     case WM_GETMINMAXINFO:
     {
         MINMAXINFO* mmi = (MINMAXINFO*)lParam;
-        mmi->ptMinTrackSize.x = 620;
-        mmi->ptMinTrackSize.y = 540;
+        mmi->ptMinTrackSize.x = 660;
+        mmi->ptMinTrackSize.y = 640;
         return 0;
     }
 
@@ -849,6 +1236,11 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
                 GuiClearFields(hMain);
                 SetStatus(hMain, "No account selected (name editable - type one and press Add)");
             }
+        }
+        else if (nm->idFrom == IDC_TABS && nm->code == TCN_SELCHANGE)
+        {
+            ApplyTabVisibility(hMain);
+            return 0;
         }
         return 0;
     }
@@ -899,12 +1291,11 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
                 SetStatus(hMain, "No account selected - nothing to save");
                 return 0;
             }
-            Account a = AccountFromGui(hMain, g_accounts[g_selAccount].name);
-            a.extraKeys = g_accounts[g_selAccount].extraKeys;
-            a.hasStatus = g_accounts[g_selAccount].hasStatus;
+            Account a = AccountFromGui(hMain, g_accounts[g_selAccount].name, &g_accounts[g_selAccount]);
             g_accounts[g_selAccount] = a;
             WriteAccountIni(a);
             RefreshList(hMain);
+            GuiShowAccount(hMain, g_selAccount);
             SetStatus(hMain, "Saved account: %s", a.name);
             return 0;
         }
@@ -926,7 +1317,7 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
                 SetStatus(hMain, "Delete cancelled");
                 return 0;
             }
-            // Wipe every key (incl. unknown Feature.*), then drop the section.
+            // Wipe every key (incl. Feature.*), then drop the section.
             char sec[96];
             _snprintf_s(sec, sizeof(sec), _TRUNCATE, "Account:%s", name);
             char secbuf[8192];
@@ -944,6 +1335,9 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
             WritePrivateProfileStringA(sec, NULL, NULL, g_cfgPath);
+            // Release the client handle (a running client keeps running).
+            if (g_accounts[g_selAccount].hProc)
+                CloseHandle(g_accounts[g_selAccount].hProc);
             g_accounts.erase(g_accounts.begin() + g_selAccount);
             g_selAccount = -1;
             RefreshList(hMain);
@@ -962,10 +1356,18 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_BTN_LAUNCH:
             LaunchSelectedClient(hMain);
             return 0;
+
+        case IDC_BTN_KILL:
+            KillSelectedClient(hMain);
+            return 0;
         }
         break;
 
     case WM_DESTROY:
+        KillTimer(hMain, 1);
+        for (size_t i = 0; i < g_accounts.size(); i++)
+            if (g_accounts[i].hProc)
+                CloseHandle(g_accounts[i].hProc);
         PostQuitMessage(0);
         return 0;
     }
@@ -981,7 +1383,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES;
     InitCommonControlsEx(&icc);
 
     WNDCLASSEXA wc;
@@ -998,7 +1400,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
         return 1;
 
     HWND hMain = CreateWindowExA(0, wc.lpszClassName, "Account Manager",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 620, 540,
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 760,
         NULL, NULL, hInst, NULL);
     if (!hMain)
         return 1;
