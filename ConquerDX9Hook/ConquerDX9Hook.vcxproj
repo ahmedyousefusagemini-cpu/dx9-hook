@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -100,7 +100,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs\imgui;$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
@@ -122,7 +122,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs\imgui;$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
@@ -144,7 +144,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs\imgui;$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
@@ -166,7 +166,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs\imgui;$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs\minhook\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
@@ -179,14 +179,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="libs\imgui\imconfig.h" />
-    <ClInclude Include="libs\imgui\imgui.h" />
-    <ClInclude Include="libs\imgui\imgui_impl_dx9.h" />
-    <ClInclude Include="libs\imgui\imgui_impl_win32.h" />
-    <ClInclude Include="libs\imgui\imgui_internal.h" />
-    <ClInclude Include="libs\imgui\imstb_rectpack.h" />
-    <ClInclude Include="libs\imgui\imstb_textedit.h" />
-    <ClInclude Include="libs\imgui\imstb_truetype.h" />
     <ClInclude Include="libs\minhook\include\MinHook.h" />
     <ClInclude Include="src\hooks\common.h" />
     <ClInclude Include="src\hooks\config.h" />
@@ -197,7 +189,6 @@
     <ClCompile Include="src\hooks\proxy.cpp" />
     <ClCompile Include="src\hooks\utils.cpp" />
     <ClCompile Include="src\hooks\directx_hooks.cpp" />
-    <ClCompile Include="src\hooks\imgui_interface.cpp" />
     <ClCompile Include="src\hooks\always_jump.cpp" />
     <ClCompile Include="src\hooks\auto_hunt.cpp" />
     <ClCompile Include="src\hooks\auto_login.cpp" />
@@ -209,12 +200,6 @@
     <ClCompile Include="src\hooks\gear_swap.cpp" />
     <ClCompile Include="src\hooks\config.cpp" />
     <ClCompile Include="src\hooks\ipc.cpp" />
-    <ClCompile Include="libs\imgui\imgui.cpp" />
-    <ClCompile Include="libs\imgui\imgui_draw.cpp" />
-    <ClCompile Include="libs\imgui\imgui_impl_dx9.cpp" />
-    <ClCompile Include="libs\imgui\imgui_impl_win32.cpp" />
-    <ClCompile Include="libs\imgui\imgui_tables.cpp" />
-    <ClCompile Include="libs\imgui\imgui_widgets.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Library Include="libs\minhook\libMinHook.x86.lib" />

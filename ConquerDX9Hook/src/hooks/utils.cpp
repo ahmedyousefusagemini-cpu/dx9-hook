@@ -1,9 +1,8 @@
 #include "common.h"
 
 
-GameWindowInfo g_gameWindow;                                    
-bool g_isImGuiInitialized = false;                              
-EndSceneFunc g_originalEndSceneFunction = nullptr;              
+GameWindowInfo g_gameWindow;
+EndSceneFunc g_originalEndSceneFunction = nullptr;
 ResetFunc g_originalResetFunction = nullptr;                   
 LPVOID g_originalEndSceneAddress = nullptr;                    
 LPVOID g_originalResetAddress = nullptr;                       

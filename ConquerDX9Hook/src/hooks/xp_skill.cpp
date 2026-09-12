@@ -1,6 +1,5 @@
 #include <windows.h>
 #include <stdint.h>
-#include "imgui.h"
 
 // Shared status lookups from buffs.cpp (names from ini/Cn_Res.ini, live
 // buff timers from the active-icon vectors).
@@ -445,7 +444,7 @@ namespace XpSkill
 	}
 }
 
-// Free wrapper so imgui_interface.cpp can run the per-frame auto-pop tick
+// Free wrapper so EndScene can run the per-frame auto-pop tick
 // (like ApplyAutoHuntClientState for the hunt flags).
 void ApplyXpSkillClientState()
 {
@@ -475,106 +474,3 @@ bool GetLastXpFire(unsigned int* outMagicId, unsigned int* outDurationSec, unsig
 	return XpSkill::g_lastFire.tick != 0;
 }
 
-void RenderXpSkillInterface()
-{
-	ImGui::Text("XP Skills");
-	ImGui::Separator();
-
-	if (!XpSkill::IsClientSupported() && !XpSkill::g_patchesApplied)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Unsupported client build - XP unlock unavailable");
-		return;
-	}
-
-	if (ImGui::Checkbox("Allow XP skills while hunting", &XpSkill::g_allowXpSkills))
-		XpSkill::ApplyXpSkillState();
-
-	ImGui::TextDisabled("Removes the \"no XP skills when auto-fighting\" block");
-	ImGui::TextDisabled("Bar also charges while hunting. Client-side only.");
-
-	ImGui::Spacing();
-
-	// Auto-pop. Enabling it also turns the unlock on: without the fill patch
-	// the bar never charges while hunting, so auto-pop could never trigger.
-	// Fires the instant the game's XP pop icon appears (bar-full as fallback).
-	if (ImGui::Checkbox("Auto XP skill on XP icon", &XpSkill::g_autoXpSkill))
-	{
-		if (XpSkill::g_autoXpSkill)
-		{
-			if (!XpSkill::g_allowXpSkills)
-			{
-				XpSkill::g_allowXpSkills = true;
-				XpSkill::ApplyXpSkillState();
-			}
-		}
-		else
-		{
-			XpSkill::g_fireCount = 0;
-			XpSkill::g_lastFiredId = 0;
-			XpSkill::g_waitingReset = false;
-		}
-	}
-
-	if (XpSkill::g_autoXpSkill)
-	{
-		ImGui::Checkbox("Only while auto-hunting", &XpSkill::g_autoXpOnlyWhileHunting);
-
-		// Forced skill id (default 6011 = Fatal Strike, ninja XP skill): when
-		// enabled, the auto-pop always fires this id, even if another XP
-		// skill is learned.
-		ImGui::Checkbox("Force XP skill id (6011 = Fatal Strike)", &XpSkill::g_forceXpSkillId);
-		if (XpSkill::g_forceXpSkillId)
-		{
-			ImGui::InputInt("XP skill id", &XpSkill::g_forcedXpSkillId);
-			if (XpSkill::g_forcedXpSkillId < 0)
-				XpSkill::g_forcedXpSkillId = 0;
-			if (XpSkill::g_forcedXpSkillId > 0xFFFF)
-				XpSkill::g_forcedXpSkillId = 0xFFFF;
-			ImGui::TextDisabled("Always fires this skill id, ignoring detected XP skills.");
-		}
-
-		int client = XpSkill::GetClientObject();
-		if (XpSkill::IsClientValid(client))
-		{
-			ImGui::Text("XP bar: %u / 100", XpSkill::GetXpBarValue(client));
-			ImGui::Text("XP icon: %s", IsXpIconVisible() ? "ON SCREEN" : "off");
-			ImGui::Text("XP pops sent: %lu", XpSkill::g_fireCount);
-			if (XpSkill::g_lastFiredId != 0)
-				ImGui::Text("Last pop id: 0x%04X", XpSkill::g_lastFiredId);
-
-			if (ImGui::TreeNode("XP Debug"))
-			{
-				ImGui::Text("Learned magics: %u", XpSkill::g_learnedCount);
-				ImGui::Text("XP skills found: %u", XpSkill::g_xpIdCount);
-				// XP skills apply statuses with the same id, so the STATUSTIPS
-				// name (ini/Cn_Res.ini) and the live buff timer apply to them.
-				for (unsigned int i = 0; i < XpSkill::g_xpIdCount; i++)
-				{
-					unsigned int id = XpSkill::g_xpIds[i];
-					const char* name = GetStatusName((int)id);
-					unsigned long endMs = GetStatusEndMs((int)id);
-					unsigned long now = GetTickCount();
-					if (name && endMs != 0 && now < endMs)
-					{
-						unsigned long secs = (endMs - now + 500) / 1000;
-						ImGui::BulletText("%s (0x%04X) - buff active, %lu s", name, id, secs);
-					}
-					else if (name)
-					{
-						ImGui::BulletText("%s (0x%04X)", name, id);
-					}
-					else
-					{
-						ImGui::BulletText("0x%04X", id);
-					}
-				}
-				if (XpSkill::g_xpIdCount == 0)
-					ImGui::TextDisabled("(none detected - list rescans every 5s)");
-				ImGui::TreePop();
-			}
-		}
-	}
-
-	ImGui::TextDisabled("Pops the instant the XP icon appears while auto-hunting");
-	ImGui::TextDisabled("(bar-full as fallback). Fires one pop per icon.");
-}

@@ -10,8 +10,7 @@
 // payloads of one or more newline-separated "key=value" lines, where key
 // matches the coinfo.ini LoadConfig key names (see ApplyIpcCommand). The
 // WM_COPYDATA handler enqueues lines; HookedEndScene drains the queue each
-// frame so every state mutation happens on the same thread the ImGui
-// toggles run on.
+// frame so every state mutation happens on the same thread run on.
 // ============================================================================
 
 #include <windows.h>
@@ -65,8 +64,9 @@ namespace AutoHunt
 	extern int  g_clearedSeconds;
 	extern int  g_travelTimeoutSeconds;
 	extern bool g_autoHuntOnLogin;
-	extern bool g_clientSideHunting;
 	extern void ApplyClientSideState();
+	extern void Start();
+	extern void Stop();
 }
 
 namespace Speed
@@ -175,8 +175,8 @@ void DrainIpcQueue()
             }
         }
         // --- Auto Hunt run control (commands, not settings) ---
-        else if (key == "AutoHuntStart")        AutoHunt::g_clientSideHunting = true;
-        else if (key == "AutoHuntStop")         AutoHunt::g_clientSideHunting = false;
+        else if (key == "AutoHuntStart")        AutoHunt::Start();
+        else if (key == "AutoHuntStop")         AutoHunt::Stop();
         // --- Speed ---
         else if (key == "SpeedEnabled")          Speed::SetSpeedEnabled(num != 0);
         else if (key == "SpeedPercent")          Speed::g_speedPercent = num;
@@ -216,8 +216,8 @@ void DrainIpcQueue()
     }
 
     // The hunt flags are asserted per frame by ApplyClientSideState; the
-    // cap tables / byte patches are re-applied here so a command takes effect
-    // on this frame, not just when the next ImGui pass runs.
+    // cap tables / byte patches are re-applied here so a command takes
+    // effect on this frame.
     AutoHunt::ApplyClientSideState();
 }
 

@@ -145,15 +145,11 @@ void HookInitializationThread()
 	}
 	InstallDrawIndexedPrimitiveHook();
 
+	// All management now flows from the AccountManager over IPC; the INSERT
+	// hotkey/overlay loop is gone with the ImGui menu.
 	while (true) 
 	{
-		Sleep(16);
-
-		if (GetAsyncKeyState(VK_INSERT) & 1) 
-		{
-			g_gameWindow.isGuiWindowOpen = !g_gameWindow.isGuiWindowOpen;
-			Sleep(200); 
-		}
+		Sleep(1000);
 	}
 }
 

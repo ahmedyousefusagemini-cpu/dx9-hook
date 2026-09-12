@@ -5,20 +5,20 @@
 #include <stdlib.h>
 #include <vector>
 #include <map>
-#include "imgui.h"
-#include "imgui_impl_dx9.h"
-#include "imgui_impl_win32.h"
 #include "MinHook.h"
 #include "common.h"
 
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern GameWindowInfo g_gameWindow;
-extern bool g_isImGuiInitialized;
 extern EndSceneFunc g_originalEndSceneFunction;
 extern ResetFunc g_originalResetFunction;
 extern LPVOID g_originalEndSceneAddress;
-extern void RenderImGuiInterface();
 extern void DrainIpcQueue();
+extern void ApplyAutoHuntClientState();
+extern void ApplyXpSkillClientState();
+extern void ApplySpeedClientState();
+extern void ApplyBuffsClientState();
+extern void ApplyGearSwapClientState();
+extern void ApplyAutoLoginState();
 extern HWND FindGameWindowHandle();
 
 // Original window procedure of the render window. The root window's
@@ -39,20 +39,10 @@ static DWORD g_lastSubclassEnumTick = 0;
 // 0: opt-out back to only render+root. Hot-reloaded every enum tick.
 bool g_subclassAllWindows = true;
 
-// Diagnostics: live counters of messages reaching the WndProc hook,
-// displayed at the top of the overlay window.
+// Diagnostics: live counters of messages reaching the WndProc hook.
 unsigned long g_debugMouseMessageCount = 0;
 unsigned long g_debugKeyboardMessageCount = 0;
 unsigned long g_debugSubclassedWindowCount = 0;
-
-// When set, HookedWindowProcedure skips the ImGui WndProc handling for
-// in-flight messages. The ImGui handler calls SetCapture()/AddMouseButtonEvent()
-// on every WM_LBUTTONDOWN, which corrupts the fgui controls' click handling
-// when the overlay is open (the auto-login button click fails with the overlay
-// up but works with it closed). The auto-login module sets this around its
-// synchronous synthetic clicks so the game's own WndProc sees the raw
-// messages exactly like a real click.
-volatile bool g_suppressImGuiWndProc = false;
 
 // Reads the flag tolerating ANSI, UTF-8 and UTF-16 files (Notepad defaults
 // to UTF-16, which GetPrivateProfileIntA silently fails on -> flag stuck off).
@@ -124,8 +114,9 @@ static void LoadOverlayConfig()
 		if (fopen_s(&f, iniPath, "w")==0 && f) {
 			fprintf(f,
 				"; Overlay config - next to Conquer.exe\n"
-				"; subclass_all_windows=1 (default) subclasses every window so ImGui is interactive even on the MFC login screen.\n"
-				"; Set to 0 to only hook render+root (may freeze ImGui at login).\n"
+				"; subclass_all_windows=1 (default) subclasses every window so the auto-login\n"
+				"; clicker works even on the MFC login screen.\n"
+				"; Set to 0 to only hook render+root (may break auto-login at login).\n"
 				"[overlay]\n"
 				"subclass_all_windows=1\n");
 			fclose(f);
@@ -291,7 +282,7 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 		(void)g_subclassAllWindows;
 	}
 
-	if (!g_isImGuiInitialized) 
+	if (!g_gameWindow.gameWindowHandle)
 	{
 		InstallInputHooksFromDevice(device);
 
@@ -304,54 +295,34 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 		// immediately after the root/render handles are known.
 		if (g_gameWindow.gameWindowHandle)
 			SubclassAllProcessWindows();
-		
-		ImGui::CreateContext();
-		ImGuiIO& io = ImGui::GetIO();
-		io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;  
-		
-		// Use the render window: mouse messages arrive there, so this keeps
-		// ImGui's input coordinates and display size in the same space.
-		ImGui_ImplWin32_Init(g_gameWindow.gameWindowHandle);
-		ImGui_ImplDX9_Init(g_gameWindow.direct3DDevice);
-		g_isImGuiInitialized = true;
 	}
 
-	ImGui_ImplDX9_NewFrame();
-	ImGui_ImplWin32_NewFrame();
-	ImGui::NewFrame();
-
 	// Apply any commands the AccountManager sent (WM_COPYDATA) since the
-	// last frame - mutations run on this thread, same as the ImGui toggles.
+	// last frame. All state mutations happen on this thread.
 	DrainIpcQueue();
 
-	RenderImGuiInterface();
-	ImGui::EndFrame();
-	ImGui::Render();
-	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
-	
+	// Per-frame feature engines (previously driven from the ImGui overlay
+	// pass; the AccountManager is now the only control surface, but these
+	// must keep running every frame with the overlay gone).
+	ApplyAutoHuntClientState();
+	ApplyXpSkillClientState();
+	ApplySpeedClientState();
+	ApplyBuffsClientState();
+	ApplyGearSwapClientState();
+	ApplyAutoLoginState();
+
 	return g_originalEndSceneFunction(device);
 }
 
 
 HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* presentationParameters) 
 {
-
-	ImGui_ImplDX9_InvalidateDeviceObjects();
-
 	MH_DisableHook(g_originalEndSceneAddress);
-	g_isImGuiInitialized = false;
 
 	HRESULT result = g_originalResetFunction(device, presentationParameters);
 
-
 	if (SUCCEEDED(result)) 
 	{
-		ImGui_ImplDX9_CreateDeviceObjects();
-
-		ImGui_ImplDX9_Shutdown();
-		ImGui_ImplWin32_Shutdown();
-		ImGui::DestroyContext();
-
 		MH_EnableHook(g_originalEndSceneAddress);
 	}
 
@@ -375,84 +346,6 @@ LRESULT CALLBACK HookedWindowProcedure(HWND windowHandle, UINT message, WPARAM w
 		break;
 	}
 
-	if (g_isImGuiInitialized && g_gameWindow.isGuiWindowOpen && !g_suppressImGuiWndProc) 
-	{
-		ImGuiIO& io = ImGui::GetIO();
-
-		bool isExtraWindow = (windowHandle != g_gameWindow.gameWindowHandle &&
-		                      windowHandle != g_gameWindow.parentWindowHandle);
-
-		// Mouse messages from extra windows (the MFC login dialog) carry
-		// coordinates in THEIR client space; ImGui positions are relative to
-		// the render window, so remap before ImGui sees the message.
-		WPARAM imMsgWParam = wParam;
-		LPARAM imMsgLParam = lParam;
-		if (windowHandle != g_gameWindow.gameWindowHandle)
-		{
-			switch (message)
-			{
-			case WM_MOUSEMOVE:
-			case WM_LBUTTONDOWN:
-			case WM_LBUTTONUP:
-			case WM_LBUTTONDBLCLK:
-			case WM_RBUTTONDOWN:
-			case WM_RBUTTONUP:
-			case WM_RBUTTONDBLCLK:
-			case WM_MBUTTONDOWN:
-			case WM_MBUTTONUP:
-			case WM_MBUTTONDBLCLK:
-				{
-					POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
-					ClientToScreen(windowHandle, &pt);
-					ScreenToClient(g_gameWindow.gameWindowHandle, &pt);
-					imMsgLParam = MAKELPARAM(pt.x, pt.y);
-				}
-				break;
-			}
-		}
-
-		ImGui_ImplWin32_WndProcHandler(windowHandle, message, imMsgWParam, imMsgLParam);
-
-		// CRITICAL: extra windows are the MFC login dialog and its Button/Edit
-		// controls. If we swallow their clicks when ImGui wants capture, the
-		// Login button becomes dead (the bug reported). The dialog HWNDs sit
-		// on top of the D3D render target that ImGui draws into, so a click
-		// on the dialog should always go to the game, not be blocked.
-		// Only the render/root windows may be blocked when ImGui is hovered.
-		if (isExtraWindow)
-		{
-			// Still let ImGui see the mouse pos (handled above) but never
-			// block the game's own dialog input. This keeps the MFC Login
-			// button and its Edit controls responsive even while the overlay
-			// is open (overlay is behind the dialog anyway).
-		}
-		else if (io.WantCaptureMouse || io.WantCaptureKeyboard) 
-		{
-			switch (message) {
-			case WM_LBUTTONDOWN:      
-			case WM_LBUTTONUP:        
-			case WM_LBUTTONDBLCLK:    
-			case WM_RBUTTONDOWN:      
-			case WM_RBUTTONUP:        
-			case WM_RBUTTONDBLCLK:    
-			case WM_MBUTTONDOWN:      
-			case WM_MBUTTONUP:        
-			case WM_MBUTTONDBLCLK:    
-			case WM_MOUSEWHEEL:       
-			case WM_MOUSEHWHEEL:      
-			case WM_MOUSEMOVE:        
-			case WM_KEYDOWN:          
-			case WM_KEYUP:            
-			case WM_SYSKEYDOWN:       
-			case WM_SYSKEYUP:         
-			case WM_CHAR:             
-			case WM_IME_CHAR:         
-			case WM_IME_COMPOSITION:  
-				return 0;  
-			}
-		}
-	}
-	
 	// Forward to the correct original procedure for THIS window.
 	WNDPROC originalProcedure = NULL;
 	std::map<HWND, WNDPROC>::iterator it = g_subclassedWindows.find(windowHandle);

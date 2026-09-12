@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <cstdio>
 #include <string.h>
-#include "imgui.h"
 #include "MinHook.h"
 
 // Shared lookup from xp_skill.cpp - the XP bar value (same field the game's
@@ -361,7 +360,7 @@ namespace GearSwap
 	}
 }
 
-// Free wrapper so imgui_interface.cpp can run the per-frame auto-swap tick
+// Free wrapper so EndScene can run the per-frame auto-swap tick
 // (like ApplyXpSkillClientState for the XP pop).
 void ApplyGearSwapClientState()
 {
@@ -382,125 +381,3 @@ void EnsureXpIconHookInstalled()
 	GearSwap::EnsureIconHookInstalled();
 }
 
-void RenderGearSwapInterface()
-{
-	ImGui::Text("Auto Gear Swap");
-	ImGui::Separator();
-
-	if (!GearSwap::IsHeroSupported())
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Unsupported client build - swap unavailable");
-		return;
-	}
-
-	if (ImGui::Checkbox("Auto swap on XP icon", &GearSwap::g_autoSwap))
-	{
-		if (!GearSwap::g_autoSwap)
-			GearSwap::g_pendingTarget = -1;
-	}
-
-	if (GearSwap::g_autoSwap)
-	{
-		ImGui::TextDisabled("XP icon on screen -> wear ALT;");
-		ImGui::TextDisabled("icon gone (pop consumed) -> MAIN.");
-
-		int statusA = GearSwap::g_iconStatusIdA;
-		int statusB = GearSwap::g_iconStatusIdB;
-		if (ImGui::InputInt("Fallback status id A", &statusA))
-		{
-			if (statusA < 0)
-				statusA = 0;
-			if (statusA > 575)
-				statusA = 575;
-			GearSwap::g_iconStatusIdA = statusA;
-		}
-		if (ImGui::InputInt("Fallback status id B", &statusB))
-		{
-			if (statusB < 0)
-				statusB = 0;
-			if (statusB > 575)
-				statusB = 575;
-			GearSwap::g_iconStatusIdB = statusB;
-		}
-		ImGui::TextDisabled("Fallback: also swap when a hero status id is active.");
-	}
-
-	ImGui::Spacing();
-
-	int hero = GearSwap::GetHero();
-	if (hero)
-	{
-		const char* modeName = GearSwap::g_mode == 0 ? "MAIN" :
-			(GearSwap::g_mode == 1 ? "ALT" : "?");
-		ImGui::Text("Equip mode: %s", modeName);
-		ImGui::SameLine();
-		ImGui::TextDisabled("(0x%08X)", (unsigned int)hero);
-		ImGui::Text("XP bar: %u / 100", GearSwap::g_xpBar);
-		ImGui::Text("XP icon: %s", GearSwap::g_iconActive ? "ON SCREEN" : "off");
-		ImGui::Text("Status %d: %s   Status %d: %s",
-			GearSwap::g_iconStatusIdA,
-			GearSwap::IsHeroStatusActive(GearSwap::g_iconStatusIdA) ? "ACTIVE" : "off",
-			GearSwap::g_iconStatusIdB,
-			GearSwap::IsHeroStatusActive(GearSwap::g_iconStatusIdB) ? "ACTIVE" : "off");
-		if (GearSwap::g_autoSwap && GearSwap::g_iconActive)
-		{
-			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
-				"XP icon up - wearing ALT until it clears");
-		}
-		if (GearSwap::g_pendingTarget >= 0)
-		{
-			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Swap in flight -> %s...",
-				GearSwap::g_pendingTarget == 1 ? "ALT" : "MAIN");
-		}
-		ImGui::Text("Last: %s", GearSwap::g_lastResult);
-		ImGui::Text("Swaps sent: %lu | confirmed: %lu | timeouts: %lu | busy-skips: %lu",
-			GearSwap::g_swapCount, GearSwap::g_confirmCount,
-			GearSwap::g_confirmFail, GearSwap::g_skippedWhileBusy);
-
-		ImGui::Spacing();
-		ImGui::TextDisabled("Manual test:");
-		if (ImGui::Button("Wear Main"))
-			GearSwap::RequestSwap(hero, 0);
-		ImGui::SameLine();
-		if (ImGui::Button("Wear Alt"))
-			GearSwap::RequestSwap(hero, 1);
-		ImGui::SameLine();
-		if (ImGui::Button("Force toggle"))
-			GearSwap::RequestSwap(hero, GearSwap::g_mode == 1 ? 0 : 1);
-
-		if (ImGui::TreeNode("Debug"))
-		{
-			ImGui::Text("hero+0x193C raw: %d", GearSwap::g_mode);
-			ImGui::Text("pending target: %d", GearSwap::g_pendingTarget);
-			ImGui::Text("last result at +%lums",
-				GearSwap::g_lastResultTick ? GetTickCount() - GearSwap::g_lastResultTick : 0);
-			ImGui::Text("XP icon hook: %s (status %d, fired %lu)",
-				GearSwap::g_iconHookInstalled ? "installed" : "not installed",
-				GearSwap::g_iconHookStatus, GearSwap::g_iconHookFired);
-			for (int i = 0; i < 2; i++)
-			{
-				ImGui::Text("XP panel[%d]: 0x%08X flag(+0xAC8)=%d%s",
-					i, (unsigned int)GearSwap::g_panels[i].panel,
-					(!GearSwap::g_panels[i].panel || IsBadReadPtr(
-						(const void*)GearSwap::g_panels[i].panel,
-						GearSwap::XP_PANEL_SHOW_FLAG + 1)) ? 0 :
-						*(unsigned char*)(GearSwap::g_panels[i].panel + GearSwap::XP_PANEL_SHOW_FLAG),
-					GearSwap::g_panels[i].panel ? "" : " (not captured yet)");
-				if (GearSwap::g_panels[i].panel && !IsBadReadPtr(
-					(const void*)GearSwap::g_panels[i].panel,
-					GearSwap::XP_PANEL_SHOW_FLAG + 1))
-				{
-					HWND hwnd = *(HWND*)(GearSwap::g_panels[i].panel + GearSwap::HWND_OFFSET);
-					ImGui::Text("  HWND: 0x%08X visible=%d", (unsigned int)hwnd,
-						hwnd ? (IsWindowVisible(hwnd) != FALSE) : 0);
-				}
-			}
-			ImGui::TreePop();
-		}
-	}
-	else
-	{
-		ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-			"(enter the game - no character object yet)");
-	}
-}

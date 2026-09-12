@@ -1,10 +1,9 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
 #include <ctype.h>
-#include "imgui.h"
 #include "MinHook.h"
 #include "login_trace.h"
 
@@ -26,11 +25,11 @@
 //      password: X[i] = raw[i] ^ canonTable[raw[i]] where canonTable is a
 //      FIXED 256-byte table indexed by character value (same per build).
 //      The killfocus/Process handler (FUN_0089c013, password branch at
-//      0x0089c56c) then syncs: GetString(0x13BD0) → SetString(editCEnc+0x30C),
-//      then GetString(editCEnc+0x30C) → SetString(0x13BD0).
+//      0x0089c56c) then syncs: GetString(0x13BD0) ? SetString(editCEnc+0x30C),
+//      then GetString(editCEnc+0x30C) ? SetString(0x13BD0).
 //   2. Login button handler FUN_008A8FCA (__fastcall(CDlgLogin*)) reads
 //      account from dlg+0x13B88 (std::string), password from dlg+0x13BD0
-//      (CEncryptData). The reconnect account 0x13938 MUST be EMPTY —
+//      (CEncryptData). The reconnect account 0x13938 MUST be EMPTY ?
 //      when filled, the game's reconnect gate diverts to FUN_008a965f
 //      which sends a QR-code packet (mode 1) instead of CMsgAccountEx.
 //   3. FUN_0101CB78 @ 0x0101CB78 (cdecl) sends the login packet:
@@ -44,20 +43,20 @@
 //   X[i] = raw[i] ^ canonTable[raw[i]] where canonTable is a 256-byte
 //   table indexed by the CHARACTER VALUE (not position). Verified entries
 //   for the password "3643748z":
-//     '3'(0x33)→0x37, '6'(0x36)→0x92, '4'(0x34)→0xF9,
-//     '7'(0x37)→0xF0, '8'(0x38)→0xF7, 'z'(0x7A)→0xED
+//     '3'(0x33)?0x37, '6'(0x36)?0x92, '4'(0x34)?0xF9,
+//     '7'(0x37)?0xF0, '8'(0x38)?0xF7, 'z'(0x7A)?0xED
 //   These produce X = "04 A4 CD 04 C7 CD CF 97" (constant across all
 //   manual login sessions for the same password).
 //   The table is FIXED per build (same for client and server). In this
 //   build the CEncryptData at dlg+0x13980 keeps a deterministic key table
 //   (63 9D CC 17 14 F3 EB 2E... identical every session), but it is NOT
-//   the canonical table (that gave X=1C EF... ≠ 04 A4 CD...). The
+//   the canonical table (that gave X=1C EF... ? 04 A4 CD...). The
 //   canonical table is separately hardcoded in WritePasswordBlob.
 //
 // NDAC VM KEYSTROKE FEED IS MANDATORY (Ghidra 2026-09-08, loginlog-proven):
 //   The loginlog diff of failed (memory-only fill) vs successful (fill +
 //   the user's manual "add a char then delete it") attempts shows ALL
-//   CEncryptData slots byte-identical — the memory state was correct, yet
+//   CEncryptData slots byte-identical ? the memory state was correct, yet
 //   the server rejected. The missing piece: real typing feeds the ndac VM
 //   per keystroke (mygameinput::Process FUN_00602cbb @ 006034b4):
 //     FUN_005f48b7(dik):                       [__thiscall(editCEnc, dik)]
@@ -76,27 +75,27 @@
 //   mirroring human typing order) before writing any slot.
 //
 // CRITICAL SLOTS:
-//   dlg+0x13BD0  — CEncryptData, password send slot (normal path, mode 0)
+//   dlg+0x13BD0  ? CEncryptData, password send slot (normal path, mode 0)
 //                   Its key table is SESSION-RANDOM (re-seeded by CDlgLogin
 //                   ctor with timeGetTime at 0x86c2bb). The packet builder
-//                   reads GetString() → X from this slot.
-//   dlg+0x13980  — CEncryptData, password reconnect slot (poker/QR, mode 2)
+//                   reads GetString() ? X from this slot.
+//   dlg+0x13980  ? CEncryptData, password reconnect slot (poker/QR, mode 2)
 //                   Its key table is DETERMINISTIC (63 9D CC 17 14 F3 EB 2E...
-//                   identical every session — never re-seeded).
-//   dlg+0x13B88  — std::string, account (normal path)
-//   dlg+0x13938  — std::string, account (reconnect) — MUST BE EMPTY for
+//                   identical every session ? never re-seeded).
+//   dlg+0x13B88  ? std::string, account (normal path)
+//   dlg+0x13938  ? std::string, account (reconnect) ? MUST BE EMPTY for
 //                   normal login; when filled, the reconnect gate triggers
 //                   and sends a different packet (mode 1/2).
-//   *(dlg+0x13DD8)+0x30C — CEncryptData, fgui edit display copy (session-
+//   *(dlg+0x13DD8)+0x30C ? CEncryptData, fgui edit display copy (session-
 //                   random key). The killfocus reads from here.
-//   *(dlg+0x13DD8)+0x238 — raw text buffer (CGameInput at +0x2C then
+//   *(dlg+0x13DD8)+0x238 ? raw text buffer (CGameInput at +0x2C then
 //                   FUN_005f2380 returns +0x20C). The game re-encodes from
 //                   this buffer when the user types.
 //
-// WritePasswordBlob (DEFAULT LOGIN METHOD — confirmed working 2026-09-08,
+// WritePasswordBlob (DEFAULT LOGIN METHOD ? confirmed working 2026-09-08,
 // requires NO manual password-box interaction):
 //   0. Replay the ndac VM keystroke feed for every account+password char
-//      (FUN_005f48b7 via NdacFeedChar) — primes the VM session the packet
+//      (FUN_005f48b7 via NdacFeedChar) ? primes the VM session the packet
 //      builder consumes. MANDATORY: without it the server rejects the login
 //      even with byte-correct slots (this was the "add a char then delete
 //      it" manual workaround, now automated).
@@ -106,11 +105,10 @@
 //   4. Write raw password into editCEnc+0x238 (mygameinput text buffer).
 //   5. Clear dlg+0x13938 (reconnect account) to empty.
 // Verification: NDAC_FEED log lines ("password fed 8 ok 0 refused") in
-// loginlog.txt; refused > 0 after a recompile means FUN_005f48b7 moved —
+// loginlog.txt; refused > 0 after a recompile means FUN_005f48b7 moved ?
 // re-derive from the mygameinput password branch (FUN_00602cbb @ 006034b4).
 // ============================================================================
 
-extern volatile bool g_suppressImGuiWndProc;
 namespace AutoLogin {
 	extern char g_activeAccount[64];
 	extern char g_activePassword[128];
@@ -137,11 +135,11 @@ namespace AutoHunt {
 // Guarantees the ini account/password reach the server regardless of which
 // path the handler takes (normal mode 0 or reconnect mode 1). The handler
 // may take the reconnect path (FUN_008a965f) when the game's auto-login flag
-// is set — this uses dlg+0x13938 account and dlg+0x13980 password with mode 1.
+// is set ? this uses dlg+0x13938 account and dlg+0x13980 password with mode 1.
 // The hook forces mode 0 (CMsgAccountEx) so the server processes credentials.
 // Password: the passed `password` is a CEncryptData* (len at +0x104, enc buf
 // at +0x108, see FUN_00ea20f0). SetString uses the CEncryptData's OWN key
-// table at +0..0xFF (the session key) to transform — the server's GetString
+// table at +0..0xFF (the session key) to transform ? the server's GetString
 // with the same key recovers the XOR'd form. The session key changes per
 // session, so we must NOT hardcode a fixed XOR table.
 typedef int (__cdecl* LoginSendFunc)(const char* account, void* password, void* serverName, int mode, int extra);
@@ -160,7 +158,7 @@ const uintptr_t LOGIN_SEND_ADDR = 0x0101CB78;
 typedef void (__fastcall* LoginBtnHandlerFunc)(void* dlg);
 static const uintptr_t LOGIN_BTN_HANDLER_ADDR = 0x008A8FCA;
 
-// Game's CEncryptData::SetString â€” encrypts plain into the struct at ECX.
+// Game's CEncryptData::SetString ??? encrypts plain into the struct at ECX.
 // Verified: FUN_00ea20f0 @ 0x00EA20F0 is void __thiscall(void* this, const char* plain)
 // where this+0x104 = len, this+0x108 = enc buf[0x100] (encryptdata.cpp:0x1dc).
 // NOTE: the correct base for the login's password is dlg+0x13BD0 directly
@@ -171,8 +169,8 @@ typedef void (__thiscall* SetEncStringFunc)(void* encData, const char* plain);
 static const uintptr_t SET_ENC_STRING_ADDR = 0x00EA20F0;
 
 // ---------------------------------------------------------------------------
-// Debug: dump the FULL state of one CEncryptData — key table (16 bytes),
-// blob (hex), len and dec — so manual vs auto-fill can be diffed byte-for-byte.
+// Debug: dump the FULL state of one CEncryptData ? key table (16 bytes),
+// blob (hex), len and dec ? so manual vs auto-fill can be diffed byte-for-byte.
 // Also reports where the passed `password` pointer actually lives (which slot
 // the packet builder will read from).
 // ---------------------------------------------------------------------------
@@ -238,7 +236,7 @@ static const char* IdentifyPwdSlot(void* password)
 
 // --- Minimized-vs-foreground diagnostics (debug only, no behavior change) ---
 // Heartbeat: incremented once per ApplyClientSideState (i.e. per EndScene).
-// If EndScene stops while minimized, this stops advancing — visible in logs.
+// If EndScene stops while minimized, this stops advancing ? visible in logs.
 static volatile LONG g_endSceneTick = 0;
 // Last X written by WritePasswordBlob (hex) + tick, to detect clobber/staleness.
 static char g_lastWrittenXHex[200] = "";
@@ -278,7 +276,7 @@ static void LogWindowState(const char* tag)
 		}
 		// Reconnect/poker gate inputs (same ones FUN_008A8FCA reads).
 		// Game disasm: LEA ECX,[EDI+0xdc68]; MOV EAX,[ECX]; CALL [EAX+0x80]
-		// i.e. __thiscall with this=dlg+0xdc68 (NOT __stdcall — that was junk).
+		// i.e. __thiscall with this=dlg+0xdc68 (NOT __stdcall ? that was junk).
 		int gateRet = -999; int gateWhy = 0; int pokerByte = -1; int flag13620 = -1;
 		if (dlg && !IsBadReadPtr(dlg, 0x14000)) {
 			__try {
@@ -370,7 +368,7 @@ static void DumpSessionKeyState(const char* tag)
 }
 
 // Decode a CEncryptData slot via GetString and format the plaintext bytes as
-// hex ("04 A4 CD ... " uppercase, trailing space) — byte-exact compare of the
+// hex ("04 A4 CD ... " uppercase, trailing space) ? byte-exact compare of the
 // canonical value X across foreground/background runs. Rendered dec="..." is
 // lossy (non-printables), this is not. Returns byte count (0 on failure).
 static int GetDecHex(void* enc, char* outHex, size_t outLen)
@@ -441,7 +439,7 @@ static int __cdecl HookedLoginSend(const char* account, void* password, void* se
 		}
 	}
 	// WritePasswordBlob (called right before the click) already stored the
-	// canonical-encoded X in all slots. No mutation needed here — the packet
+	// canonical-encoded X in all slots. No mutation needed here ? the packet
 	// builder reads the send slot as-is.
 	if (AutoLogin::g_activePassword[0])
 	{
@@ -1074,20 +1072,20 @@ namespace AutoLogin
 	static bool IsDialogUsable(HWND hwnd)
 	{
 		// ONLY the CDlgLogin object's own m_hWnd (visible) counts as a usable
-		// login screen. Never accept an arbitrary visible window — in-game
+		// login screen. Never accept an arbitrary visible window ? in-game
 		// dialogs with Edit+Button children would otherwise be mistaken for
 		// the login screen and trigger false reconnect attempts.
 		if (!hwnd || !IsWindow(hwnd)) return false;
 		__try {
 			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
+			// NOT FUN_0041F880() ??? that is the 36-byte CQUIManager singleton and
 			// +0x39B948 reads unrelated heap.
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
 				char* dlg = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlg, 0x40)) {
 					HWND hLogin = *(HWND*)(dlg + 0x20);
-					// Must be visible too — a hidden/stale HWND while in game
+					// Must be visible too ? a hidden/stale HWND while in game
 					// must not be treated as a usable login screen.
 					if (hwnd == hLogin && IsWindowVisible(hwnd))
 						return true;
@@ -1119,7 +1117,7 @@ namespace AutoLogin
 	}
 
 	// Finds the MFC login dialog. Only the CDlgLogin object at
-	// gpDlgShell+0x39B948 is authoritative — its m_hWnd at +0x20 is the
+	// gpDlgShell+0x39B948 is authoritative ? its m_hWnd at +0x20 is the
 	// login dialog when visible. The EnumWindows fallback was removed because
 	// it would pick up any in-game dialog with Edit+Button children as a
 	// "login screen", causing false disconnect detection mid-game.
@@ -1127,14 +1125,14 @@ namespace AutoLogin
 	{
 		__try {
 			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
+			// NOT FUN_0041F880() ??? that is the 36-byte CQUIManager singleton and
 			// +0x39B948 reads unrelated heap.
 			void* shell = *(void**)0x01A5A510;
 			if (shell) {
 				char* dlg = (char*)shell + 0x39B948;
 				if (!IsBadReadPtr(dlg, 0x40)) {
 					HWND hDlg = *(HWND*)(dlg + 0x20);
-					// Must be a real, VISIBLE window — a hidden/stale CDlgLogin
+					// Must be a real, VISIBLE window ? a hidden/stale CDlgLogin
 					// HWND survives into the game and must not be treated as a
 					// login screen.
 					if (hDlg && IsWindow(hDlg) && IsWindowVisible(hDlg)) {
@@ -1501,7 +1499,7 @@ namespace AutoLogin
 
 	// Fills the account edit (WM_SETTEXT for display) and logs the status.
 	// The actual login packet's account is guaranteed by the MinHook on
-	// FUN_0101CB78 â€” no member write needed. Never overwrites a field that
+	// FUN_0101CB78 ??? no member write needed. Never overwrites a field that
 	// already holds a different account.
 	static int FillAccountEdit(HWND dialog)
 	{
@@ -1541,7 +1539,7 @@ namespace AutoLogin
 		InstallLoginHook();
 
 		// Write the account into the CDlgLogin std::string at dlg+0x13B88
-		// (normal path) ONLY. Do NOT fill dlg+0x13938 — that is the RECONNECT
+		// (normal path) ONLY. Do NOT fill dlg+0x13938 ? that is the RECONNECT
 		// account slot; in a successful manual login it stays EMPTY (size=0).
 		// Filling it makes the login handler treat the session as a reconnect
 		// and the server rejects the packet. Clear 0x13938 to empty string to
@@ -1594,7 +1592,7 @@ namespace AutoLogin
 		LogCredentialState("FILL_ACCOUNT");
 
 		// Move focus to the password field (user can type there).
-		// Debug: SetFocus fails when minimized/not-foreground — log it.
+		// Debug: SetFocus fails when minimized/not-foreground ? log it.
 		if (result >= 0 && passwordEdit && IsWindow(passwordEdit)) {
 			HWND focusBefore = GetFocus();
 			HWND sfRes = SetFocus(passwordEdit);
@@ -1687,8 +1685,8 @@ namespace AutoLogin
 	// Write the password blob into all three slots the game reads.
 	// The game's manual-typing flow:
 	//   1. fgui framework computes X[i] = raw[i] ^ canonTable[raw[i]] (FIXED
-	//      256-byte canonical table indexed by the CHARACTER VALUE — verified:
-	//      '3'→0x37, '6'→0x92, '4'→0xF9, '7'→0xF0, '8'→0xF7, 'z'→0xED produce
+	//      256-byte canonical table indexed by the CHARACTER VALUE ? verified:
+	//      '3'?0x37, '6'?0x92, '4'?0xF9, '7'?0xF0, '8'?0xF7, 'z'?0xED produce
 	//      X="04 A4 CD 04 C7 CD CF 97" for "3643748z", constant every session).
 	//   2. On killfocus: SetString(0x13BD0, X) and SetString(editCEnc+0x30C, X).
 	//   3. The packet builder sends X (via GetString(0x13BD0)).
@@ -1696,8 +1694,8 @@ namespace AutoLogin
 	//
 	// HARDCODED canonical table for the known password chars (from the manual
 	// login trace: X = 04 A4 CD 04 C7 CD CF 97 for "3643748z"). Entries
-	// verified: '3'(0x33)→0x37, '6'(0x36)→0x92, '4'(0x34)→0xF9, '7'(0x37)→0xF0,
-	// '8'(0x38)→0xF7, 'z'(0x7A)→0xED. All other entries are 0 (identity) as a
+	// verified: '3'(0x33)?0x37, '6'(0x36)?0x92, '4'(0x34)?0xF9, '7'(0x37)?0xF0,
+	// '8'(0x38)?0xF7, 'z'(0x7A)?0xED. All other entries are 0 (identity) as a
 	// fallback so the transform never corrupts the password for unknown chars.
 	static void WritePasswordBlob()
 	{
@@ -1746,8 +1744,8 @@ namespace AutoLogin
 
 			// HARDCODED canonical table (per-character XOR key).
 			// Indexed by the CHARACTER VALUE. Verified from manual login trace:
-			// '3'(0x33)→0x37, '6'(0x36)→0x92, '4'(0x34)→0xF9, '7'(0x37)→0xF0,
-			// '8'(0x38)→0xF7, 'z'(0x7A)→0xED produce X = "04 A4 CD 04 C7 CD CF 97".
+			// '3'(0x33)?0x37, '6'(0x36)?0x92, '4'(0x34)?0xF9, '7'(0x37)?0xF0,
+			// '8'(0x38)?0xF7, 'z'(0x7A)?0xED produce X = "04 A4 CD 04 C7 CD CF 97".
 			static unsigned char canonTable[256] = {0};
 			canonTable[0x33] = 0x37;  // '3'
 			canonTable[0x34] = 0xF9;  // '4'
@@ -1801,7 +1799,7 @@ namespace AutoLogin
 			}
 
 			// SetString X into the send slot (0x13BD0) and the reconnect slot
-			// (0x13980 — SetString only writes len+encBuf, the key table at
+			// (0x13980 ? SetString only writes len+encBuf, the key table at
 			// +0..0xFF stays intact for future reads).
 			DWORD op = 0, tp = 0;
 			const uintptr_t offs[2] = {0x13BD0, 0x13980};
@@ -1911,9 +1909,8 @@ namespace AutoLogin
 	// ------------------------------------------------------------------
 
 	// Synthetic press: WM_LBUTTONDOWN + WM_LBUTTONUP delivered straight to
-	// the button HWND. Synchronous (SendMessage), so the ImGui WndProc
-	// handler is suppressed for exactly these two messages - the game's own
-	// fgui WndProc sees them as a clean real click, no cursor movement.
+	// the button HWND. Synchronous (SendMessage) - the game's own fgui
+	// WndProc sees them as a clean real click, no cursor movement.
 	static bool MessageClickButton(HWND button)
 	{
 		RECT rc;
@@ -1923,10 +1920,8 @@ namespace AutoLogin
 
 		// Debug: capture delivery results + visibility at click time.
 		HWND root = GetAncestor(button, GA_ROOT);
-		g_suppressImGuiWndProc = true;
 		LRESULT downRes = SendMessage(button, WM_LBUTTONDOWN, MK_LBUTTON, pos);
 		LRESULT upRes = SendMessage(button, WM_LBUTTONUP, 0, pos);
-		g_suppressImGuiWndProc = false;
 		LogLogin("CLICK_BTN", "button=0x%08X root=0x%08X rootIconic=%d btnVis=%d btnEn=%d downRes=%d upRes=%d endTick=%d",
 			(unsigned)button, (unsigned)root,
 			(root && IsWindow(root)) ? (IsIconic(root) ? 1 : 0) : -1,
@@ -1965,7 +1960,7 @@ namespace AutoLogin
 	// is the CMyShellApp singleton pointer stored at global 0x01A5A510. The game
 	// itself uses this exact base (e.g. FUN_0089CA85:
 	// CWnd::SetFocus((CWnd *)(DAT_01a5a510 + 0x39b948))). NOTE: FUN_0041F880 is
-	// NOT the app accessor â€” it returns the 36-byte CQUIManager singleton, so
+	// NOT the app accessor ??? it returns the 36-byte CQUIManager singleton, so
 	// adding 0x39B948 to it reads unrelated heap. Calling the handler directly
 	// skips the fgui layer's client-side field check (which rejects an
 	// empty-looking visible edit with a local "Wrong password." tip BEFORE any
@@ -2023,7 +2018,7 @@ namespace AutoLogin
 		g_clickInProgress = true;
 
 		// NEVER attempt a login unless a VISIBLE login screen is present.
-		// (In-game the CDlgLogin object keeps a stale hidden HWND — clicking
+		// (In-game the CDlgLogin object keeps a stale hidden HWND ? clicking
 		// it would send a login packet mid-game.)
 		HWND dialog = FindLoginDialog();
 		if (!dialog || !IsDialogUsable(dialog))
@@ -2046,7 +2041,7 @@ namespace AutoLogin
 			InstallGetWindowTextHooks();
 		}
 
-		// Re-apply the password blob RIGHT before clicking — the server's session
+		// Re-apply the password blob RIGHT before clicking ? the server's session
 		// key seed (CMsgEncryptCode) may arrive AFTER FillPasswordEdit ran, making
 		// 0x13BD0's key table stale. By SetString-ing at click time, we use the
 		// current seeded key table (matching what the server expects). Also syncs
@@ -2059,7 +2054,7 @@ namespace AutoLogin
 		bool ok = false;
 		// The REAL button click is the proven-working path (the fgui gate reads
 		// the visible edits which we already populated via WM_SETTEXT + the
-		// GetWindowText hooks). Prefer it over DirectLoginCall — calling the
+		// GetWindowText hooks). Prefer it over DirectLoginCall ? calling the
 		// handler directly hits the reconnect gate (mode 1) that sends an empty
 		// QR packet. Only method 3 explicitly wants the direct call.
 		if (button && g_clickMethod != 3)
@@ -2148,10 +2143,10 @@ namespace AutoLogin
 		// still fires while minimized. Logged at each fill/click/hook stage.
 		InterlockedIncrement(&g_endSceneTick);
 		// Install the login trace hooks (send/recv + log file) unconditionally,
-		// once — covers MANUAL login too (the log file must capture a hand-typed
+		// once ? covers MANUAL login too (the log file must capture a hand-typed
 		// login attempt, which never goes through ClickLoginOnce).
 		InstallLoginTraceHooks();
-		// Install the login-send hook unconditionally — the HOOK_ENTRY/HOOK_SEND
+		// Install the login-send hook unconditionally ? the HOOK_ENTRY/HOOK_SEND
 		// logs must capture the MANUAL login packet too. The hook's credential
 		// injection (g_activePassword) is guarded by g_activePassword[0] which
 		// is empty until the INI is loaded, so it's safe to have the hook up.
@@ -2188,7 +2183,7 @@ namespace AutoLogin
 			}
 			if (!dlgPtr) {
 				// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-				// NOT FUN_0041F880() â€” that is the 36-byte CQUIManager singleton and
+				// NOT FUN_0041F880() ??? that is the 36-byte CQUIManager singleton and
 				// +0x39B948 reads unrelated heap.
 				void* shell = *(void**)0x01A5A510;
 				if (shell) dlgPtr = (char*)shell + 0x39B948;
@@ -2398,7 +2393,7 @@ namespace AutoLogin
 				FillAccountEdit(g_cachedDialog);
 			}
 		}
-		// Auto-fill the password field once per dialog instance as well — so the
+		// Auto-fill the password field once per dialog instance as well ? so the
 		// user does not need to click Fill Password every time. Uses same ini
 		// Pass= and the same direct CEncryptData write (dlg+0x13BD0).
 		if (g_autoFillPassword && g_filledPasswordDialog != g_cachedDialog && IsDialogUsable(g_cachedDialog))
@@ -2435,7 +2430,7 @@ namespace AutoLogin
 		else if (g_clickCount > 0 && g_loginCompleted == false &&
 		         now - g_lastClickTick > 4000)
 		{
-			// Dialog still up 4s after a click → the server rejected the login.
+			// Dialog still up 4s after a click ? the server rejected the login.
 			g_loginResult = "FAILED (dialog still open)";
 		}
 
@@ -2461,306 +2456,9 @@ namespace AutoLogin
 	}
 }
 
-// Copies the Auto Login debug tree text to the OS clipboard. ImGui captures
-// every Text call rendered after this in the same frame (the debug section
-// follows the button) and flushes to the clipboard at end of frame.
-void CopyDebugLogToClipboard()
-{
-	ImGui::LogToClipboard();
-}
-
-// Free wrapper so imgui_interface.cpp can run the per-frame clicker.
+// Free wrapper so the EndScene pass can run the per-frame clicker.
 void ApplyAutoLoginState()
 {
 	AutoLogin::ApplyClientSideState();
 }
 
-void RenderAutoLoginInterface()
-{
-	ImGui::Text("Auto Login");
-	ImGui::Separator();
-
-	// Manual single-click - works without enabling the auto loop.
-	if (ImGui::Button("Log In"))
-	{
-		AutoLogin::g_loginCompleted = false;
-		AutoLogin::ClickLoginOnce();
-	}
-	ImGui::SameLine();
-	if (ImGui::Button("Fill Account"))
-	{
-		AutoLogin::FillAccountNow();
-	}
-	ImGui::SameLine();
-	if (ImGui::Button("Fill Password"))
-	{
-		AutoLogin::FillPasswordNow();
-	}
-	ImGui::TextDisabled("(Fill Account types User; Fill Password replays the ndac VM keystroke feed + writes Pass= into dialog memory — fully automatic, no password-box interaction)");
-	if (AutoLogin::g_fillStatus[0])
-	{
-		bool ok = strstr(AutoLogin::g_fillStatus, "OK") != NULL;
-		if (ok)
-			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", AutoLogin::g_fillStatus);
-		else
-			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", AutoLogin::g_fillStatus);
-	}
-	if (AutoLogin::g_passwordFillStatus[0])
-	{
-		bool ok = strstr(AutoLogin::g_passwordFillStatus, "OK") != NULL ||
-		          strstr(AutoLogin::g_passwordFillStatus, "set") != NULL;
-		if (ok)
-			ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", AutoLogin::g_passwordFillStatus);
-		else
-			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", AutoLogin::g_passwordFillStatus);
-	}
-
-	if (ImGui::Checkbox("Auto Relogin (fill + click after disconnect)", &AutoLogin::g_autoRelogin))
-	{
-		if (AutoLogin::g_autoRelogin)
-		{
-			// Re-arm the state machine on enable.
-			AutoLogin::g_reloginState = 0;
-			AutoLogin::g_wasInGame = false;
-			AutoLogin::g_connectivityCheckTick = 0;
-			AutoLogin::g_seenLoginDialog = true; // prevent false IDLE→IN_GAME at startup
-		}
-	}
-	if (AutoLogin::g_autoRelogin)
-	{
-		ImGui::SameLine();
-		const char* stateName = "";
-		switch (AutoLogin::g_reloginState)
-		{
-		case 0: stateName = "IDLE"; break;
-		case 1: stateName = "LOGIN"; break;
-		case 2: stateName = "IN GAME"; break;
-		case 3: stateName = "DISCONNECTED"; break;
-		case 4: stateName = "CHECK NET"; break;
-		case 5: stateName = "WAIT NET"; break;
-		}
-		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", stateName);
-		if (AutoLogin::g_reloginStatus[0])
-		{
-			ImGui::TextDisabled("%s", AutoLogin::g_reloginStatus);
-		}
-		ImGui::TextDisabled("Internet check: %s | Attempts: %d | Retry: %d ms",
-			AutoLogin::g_connectivityOk ? "UP" : "?",
-			AutoLogin::g_reloginAttempts, AutoLogin::g_connectivityRetryMs);
-		if (AutoLogin::g_lastDisconnectTick)
-		{
-			DWORD secs = (GetTickCount() - AutoLogin::g_lastDisconnectTick) / 1000;
-			ImGui::TextDisabled("Last disconnect: %u s ago", (unsigned)secs);
-		}
-	}
-	if (ImGui::Checkbox("Auto fill Account", &AutoLogin::g_autoFillAccount))
-	{
-		// Toggle on/off — no side effects needed
-	}
-	ImGui::SameLine();
-	if (ImGui::Checkbox("Auto fill Password", &AutoLogin::g_autoFillPassword))
-	{
-		// Toggle on/off — no side effects needed
-	}
-	if (ImGui::Checkbox("Auto click Login until logged in", &AutoLogin::g_autoClickLogin) &&
-		AutoLogin::g_autoClickLogin)
-	{
-		AutoLogin::g_loginCompleted = false;  // re-arm the click loop
-	}
-	if (AutoLogin::g_autoClickLogin)
-	{
-		ImGui::SliderInt("Click interval (ms)", &AutoLogin::g_clickIntervalMs, 250, 5000);
-		ImGui::SliderInt("Retry delay (ms)", &AutoLogin::g_clickRetryMs, 3000, 60000);
-		ImGui::TextDisabled("First click after arming uses Click interval; retries use Retry delay");
-	}
-
-	ImGui::Combo("Click method", &AutoLogin::g_clickMethod,
-		"Message (no cursor)\0Mouse (real click)\0BM_CLICK\0Direct handler (bypass fgui)\0");
-
-	ImGui::Spacing();
-	ImGui::Text("Account from accountinfo.ini:");
-	if (AutoLogin::g_activeAccount[0])
-	{
-		ImGui::SameLine();
-		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s (%s, Use=1)",
-			AutoLogin::g_activeAccount, AutoLogin::g_accountSection);
-	}
-	else
-	{
-		ImGui::SameLine();
-		ImGui::TextDisabled("no Use=1 account found");
-	}
-	ImGui::SameLine(0, 8);
-	if (ImGui::SmallButton("Reload"))
-	{
-		AutoLogin::LoadActiveAccount();
-	}
-
-	ImGui::Text("Password from accountinfo.ini:");
-	if (AutoLogin::g_activePassword[0])
-	{
-		ImGui::SameLine();
-		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "**** (%s, Use=1)",
-			AutoLogin::g_passwordSection);
-	}
-	else
-	{
-		ImGui::SameLine();
-		ImGui::TextDisabled("no Pass= in Use=1 section");
-	}
-	ImGui::SameLine(0, 8);
-	if (ImGui::SmallButton("Reload##pass"))
-	{
-		AutoLogin::LoadActiveAccount();
-	}
-
-	if (AutoLogin::g_loginCompleted)
-	{
-		ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Login button clicked - dialog closed");
-	}
-
-	if (ImGui::TreeNode("Auto Login Debug"))
-	{
-		if (ImGui::SmallButton("Copy Log"))
-		{
-			CopyDebugLogToClipboard();
-		}
-		ImGui::SameLine();
-		if (ImGui::SmallButton("Log State"))
-		{
-			LogLogin("MANUAL_STATE", "manual credential dump from overlay");
-			LogCredentialState("MANUAL_STATE");
-			AutoLogin::g_fillStatus[0] = 0; // no-op to keep it read-only
-		}
-		ImGui::Text("Dialog: 0x%08X  Button: 0x%08X",
-			(unsigned int)AutoLogin::g_cachedDialog,
-			(unsigned int)AutoLogin::g_cachedButton);
-		ImGui::Text("Button text: \"%s\"  CtrlID: %u", AutoLogin::g_buttonText, AutoLogin::g_buttonId);
-		ImGui::Text("Dialog children: %u edits, %u buttons", AutoLogin::g_editCount, AutoLogin::g_buttonCount);
-		ImGui::Text("Clicks sent: %d", AutoLogin::g_clickCount);
-		{
-			const char* r = AutoLogin::g_loginResult;
-			bool ok = strstr(r, "ok") != NULL;
-			bool bad = strstr(r, "FAIL") != NULL;
-			ImVec4 col = ok ? ImVec4(0,1,0,1) : (bad ? ImVec4(1,0.3f,0.3f,1) : ImVec4(0.8f,0.8f,0.8f,1));
-			ImGui::TextColored(col, "Login result: %s", r);
-		}
-		ImGui::Text("Account: \"%s\" (%s)", AutoLogin::g_activeAccount,
-			AutoLogin::g_accountSection[0] ? AutoLogin::g_accountSection : "none");
-		ImGui::Text("Password: \"%s\" (%s)", AutoLogin::g_activePassword[0] ? "****" : "",
-			AutoLogin::g_passwordSection[0] ? AutoLogin::g_passwordSection : "none");
-		ImGui::Text("Fill Account: \"%s\"", AutoLogin::g_fillStatus[0] ? AutoLogin::g_fillStatus : "none");
-		ImGui::Text("Fill Password: \"%s\"", AutoLogin::g_passwordFillStatus[0] ? AutoLogin::g_passwordFillStatus : "none");
-		ImGui::Text("Login-send hook: %s", g_loginHookInstalled ? "INSTALLED" : "not installed");
-		ImGui::Text("GW hook: %s", g_gwHookInstalled ? "INSTALLED" : "not installed");
-		ImGui::Text("Resolved HWNDs: acc 0x%08X pwd 0x%08X", (unsigned int)AutoLogin::g_resolvedAccountHwnd, (unsigned int)AutoLogin::g_resolvedPasswordHwnd);
-		ImGui::Text("DlgMem HWNDs: acc 0x%08X pwd 0x%08X token 0x%08X", (unsigned int)AutoLogin::g_dlgMemAccountHwnd, (unsigned int)AutoLogin::g_dlgMemPasswordHwnd, (unsigned int)AutoLogin::g_dlgMemTokenHwnd);
-		if (AutoLogin::g_dlgMemPasswordHwnd && AutoLogin::g_resolvedPasswordHwnd &&
-		    AutoLogin::g_dlgMemPasswordHwnd != AutoLogin::g_resolvedPasswordHwnd)
-		{
-			ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "WARNING: pinned pwd != DlgMem pwd â€” pin via pwd button to match DlgMem");
-		}
-		__try {
-			// CDlgLogin = gpDlgShell + 0x39B948 (gpDlgShell = *(void**)0x01A5A510).
-			void* shellDbg = *(void**)0x01A5A510;
-			if (shellDbg) {
-				char* dlgDbg = (char*)shellDbg + 0x39B948;
-				if (!IsBadReadPtr(dlgDbg + 0x13BD0, 0x300) && !IsBadReadPtr(dlgDbg + 0x13980, 0x208)) {
-					int lenBD0 = *(int*)(dlgDbg + 0x13BD0 + 0x104);
-					int len980 = *(int*)(dlgDbg + 0x13980 + 0x104);
-					char flag13620 = *(char*)(dlgDbg + 0x13620);
-					ImGui::Text("EncLens: 0x13BD0=%d 0x13980=%d flag13620=%d", lenBD0, len980, (int)flag13620);
-
-					// Raw blob bytes (what the packet actually carries):
-					// the CEncryptData buffer at +0x108 for len bytes.
-					char raw1[128] = {0}, raw2[128] = {0};
-					{
-						static const char kHex[] = "0123456789ABCDEF";
-						int rp = 0;
-						char* rawBuf = dlgDbg + 0x13BD0 + 0x108;
-						int lim = (lenBD0 > 0 && lenBD0 <= 16) ? lenBD0 : 0;
-						for (int i = 0; i < lim && rp < (int)sizeof(raw1) - 4; i++) {
-							unsigned char c = (unsigned char)rawBuf[i];
-							raw1[rp++] = kHex[c >> 4]; raw1[rp++] = kHex[c & 0xF]; raw1[rp++] = ' ';
-						}
-					}
-					{
-						static const char kHex[] = "0123456789ABCDEF";
-						int rp = 0;
-						char* rawBuf = dlgDbg + 0x13980 + 0x108;
-						int lim = (len980 > 0 && len980 <= 16) ? len980 : 0;
-						for (int i = 0; i < lim && rp < (int)sizeof(raw2) - 4; i++) {
-							unsigned char c = (unsigned char)rawBuf[i];
-							raw2[rp++] = kHex[c >> 4]; raw2[rp++] = kHex[c & 0xF]; raw2[rp++] = ' ';
-						}
-					}
-					ImGui::Text("Blob 0x13BD0: %s", raw1);
-					ImGui::Text("Blob 0x13980: %s", raw2);
-
-					// The FGUI password edit's own CEncryptData at *(dlg+0x13DD8)+0x30C.
-					__try {
-						void* editCEnc = *(void**)(dlgDbg + 0x13DD8);
-						if (editCEnc && !IsBadReadPtr((char*)editCEnc + 0x30C, 0x208)) {
-							char* editEnc = (char*)editCEnc + 0x30C;
-							int editLen = *(int*)(editEnc + 0x104);
-							char eraw[128] = {0};
-							static const char kHexE[] = "0123456789ABCDEF";
-							int rp = 0;
-							char* rawBufE = editEnc + 0x108;
-							int lim = (editLen > 0 && editLen <= 16) ? editLen : 0;
-							for (int i = 0; i < lim && rp < (int)sizeof(eraw) - 4; i++) {
-								unsigned char c = (unsigned char)rawBufE[i];
-								eraw[rp++] = kHexE[c >> 4]; eraw[rp++] = kHexE[c & 0xF]; eraw[rp++] = ' ';
-							}
-							ImGui::Text("EditCEnc ptr=0x%08X len=%d Blob: %s",
-								(unsigned int)editCEnc, editLen, eraw);
-						} else {
-							ImGui::Text("EditCEnc: (unreadable)");
-						}
-					} __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-					// Show the session key table (first 8 bytes) for verification.
-					__try {
-						void* pCanDbg = *(void**)(dlgDbg + 0x13DD8);
-						if (pCanDbg && !IsBadReadPtr((char*)pCanDbg + 0x30C, 0x100)) {
-							char ckey[96] = {0};
-							static const char kHexc[] = "0123456789ABCDEF";
-							int cp = 0;
-							for (int i = 0; i < 8; i++) {
-								unsigned char c = (unsigned char)((char*)pCanDbg + 0x30C)[i];
-								ckey[cp++] = kHexc[c >> 4]; ckey[cp++] = kHexc[c & 0xF]; ckey[cp++] = ' ';
-							}
-							ImGui::Text("CanonKey: %s", ckey);
-						}
-					} __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-					// Show account std::string at 0x13B88.
-					char accBuf[64] = {0};
-					char* accPtr = dlgDbg + 0x13B88;
-					if (!IsBadReadPtr(accPtr + 0x10, 8)) {
-						int accSize = *(int*)(accPtr + 0x10);
-						int accCap = *(int*)(accPtr + 0x14);
-						if (accSize >= 0 && accSize < 64) {
-							char* accStr = accPtr;
-							if (accCap > 0xF) accStr = *(char**)accPtr;
-							if (!IsBadReadPtr(accStr, accSize)) {
-								memcpy(accBuf, accStr, accSize);
-								accBuf[accSize] = 0;
-								ImGui::Text("DlgMem account: \"%s\" (len=%d cap=%d)", accBuf, accSize, accCap);
-							}
-						}
-					}
-				}
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {}
-		// Edit fields summary (compact, without the per-edit pin buttons).
-		if (AutoLogin::g_editListCount > 0)
-		{
-			ImGui::Text("Edits: %d (acc idx=%d pwd idx=%d)",
-				AutoLogin::g_editListCount,
-				AutoLogin::g_accountEditIndex,
-				AutoLogin::g_passwordEditIndex);
-		}
-		ImGui::TreePop();
-	}
-}
