@@ -67,6 +67,10 @@ namespace AutoHunt
 	extern void ApplyClientSideState();
 	extern void Start();
 	extern void Stop();
+	extern int  g_currentWaypoint;
+	extern bool GetPlayerPos(int& x, int& y);
+	extern bool IsHunting();
+	extern bool IsInCombat();
 }
 
 namespace Speed
@@ -219,6 +223,43 @@ void DrainIpcQueue()
     // cap tables / byte patches are re-applied here so a command takes
     // effect on this frame.
     AutoHunt::ApplyClientSideState();
+}
+
+// ---------------------------------------------------------------------------
+// Hunt/character status heartbeat (for the manager's hunting indicator)
+// ---------------------------------------------------------------------------
+// Window text (|HUNT_TEXT_PREFIX prefix) is polled by the manager via
+// GetWindowTextA on the IPC window. One writer, one reader: the DLL
+// overwrites the title exactly once per EndScene; the manager reads it on
+// its existing TIMER_STATUS tick.
+static const char kHuntTextPrefix[] = "|HUNT_";
+
+void IpcPublishHuntHeartbeat()
+{
+    if (!g_ipcWnd || !IsWindow(g_ipcWnd))
+        return;
+
+    int px = -1, py = -1;
+    AutoHunt::GetPlayerPos(px, py);
+
+    int wpIdx = AutoHunt::g_currentWaypoint;
+    int wpCount = (int)AutoHunt::g_waypoints.size();
+
+    // These queries hit the same global flag + client/manager bytes the brain
+    // itself does, so the displayed state mirrors the in-game hunter.
+    int hunting     = AutoHunt::IsHunting()        ? 1 : 0; // hunt flag set + byte
+    int inCombat    = AutoHunt::IsInCombat()       ? 1 : 0; // mgr+0x04 != 0
+    int monsterNear = hunting && AutoHunt::g_waypointsEnabled ? 0 : 0; // filled by caller when available
+    (void)monsterNear;
+
+    // AutoHunt::IsHunting already implies g_clientSideHunting + valid
+    // client/manager bytes, so use it as the displayed "character is hunting".
+    // g_clientSideHunting is the requested hunting intent (Start/Stop),
+
+    char title[160];
+    _snprintf_s(title, sizeof(title), _TRUNCATE,
+        "|HUNT_H%d_WP%d/%d_POS%d,%d", hunting, wpIdx, wpCount, px, py);
+    SetWindowTextA(g_ipcWnd, title);
 }
 
 // ---------------------------------------------------------------------------

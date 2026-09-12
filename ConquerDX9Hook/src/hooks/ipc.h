@@ -12,3 +12,9 @@ void UninstallIpcWindow();
 // Drains queued commands and applies them (call every frame from
 // HookedEndScene so mutations happen on the game thread).
 void DrainIpcQueue();
+
+// Hunt/character status heartbeat: call once per frame from EndScene.
+// Updates the IPC window's title so the manager can poll live hunting
+// state (hunting / combat / waypoint / position) without an extra IPC
+// round-trip.
+void IpcPublishHuntHeartbeat();

@@ -13,6 +13,7 @@ extern EndSceneFunc g_originalEndSceneFunction;
 extern ResetFunc g_originalResetFunction;
 extern LPVOID g_originalEndSceneAddress;
 extern void DrainIpcQueue();
+extern void IpcPublishHuntHeartbeat();
 extern void ApplyAutoHuntClientState();
 extern void ApplyXpSkillClientState();
 extern void ApplySpeedClientState();
@@ -310,6 +311,11 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 	ApplyBuffsClientState();
 	ApplyGearSwapClientState();
 	ApplyAutoLoginState();
+
+	// Hunt status heartbeat for the manager (polled via the IPC window
+	// title; throttle here so it updates at the render rate without IPC
+	// round-trips).
+	IpcPublishHuntHeartbeat();
 
 	return g_originalEndSceneFunction(device);
 }

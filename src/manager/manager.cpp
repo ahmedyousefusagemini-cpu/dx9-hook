@@ -69,6 +69,9 @@
 #define IDC_TABS           1020
 #define IDC_BTN_KILL       1021
 #define IDC_BTN_PUSH       1022
+#define IDC_BTN_HUNT_ON    1023
+#define IDC_BTN_HUNT_OFF   1024
+#define IDC_LBL_HUNTSTATE  1025
 #define IDC_STATIC_STATUS  1900
 #define TIMER_STATUS       1     // live client status poll
 #define TIMER_AUTOSAVE     2     // debounced per-account settings save
@@ -557,6 +560,58 @@ static void KillSelectedClient(HWND hMain)
     else
         SetStatus(hMain, "Kill failed (error %lu)", GetLastError());
     UpdateStatusColumn(hMain);
+}
+
+// ---------------------------------------------------------------------------
+// Auto hunt: live hunting status + Start/Stop commands over IPC
+// ---------------------------------------------------------------------------
+static void PollHuntStatus(HWND hMain)
+{
+    HWND hwnd = FindIpcWindow();
+    if (!hwnd)
+        return;
+    char title[160] = {0};
+    if (GetWindowTextA(hwnd, title, sizeof(title)) <= 0)
+        return;
+    // Title is |HUNT_H<N>_WP<N>/<M>_POS<X>,<Y> when the DLL heartbeat ran.
+    const char* p = strstr(title, "|HUNT_");
+    if (!p)
+        return;
+
+    int H = (p[6] == 'H') ? atoi(p + 7) : 0;
+    int WP = 0, WC = 0, PX = -1, PY = -1;
+    const char *wp = strstr(title, "_WP"), *pos = strstr(title, "_POS");
+    if (wp) sscanf_s(wp, "_WP%d/%d", &WP, &WC);
+    if (pos) sscanf_s(pos, "_POS%d,%d", &PX, &PY);
+
+    wchar_t w[256];
+    _snwprintf_s(w, _TRUNCATE, L"Character: %S  |  Waypoint %d/%d  |  Pos %d,%d",
+        H ? "HUNTING" : "idle", WP, WC, PX, PY);
+    SetWindowTextW(GetDlgItem(hMain, IDC_LBL_HUNTSTATE), w);
+}
+
+static bool SendHuntCommand(HWND hMain, const char* key)
+{
+    if (g_selAccount < 0 || g_selAccount >= (int)g_accounts.size())
+    {
+        SetStatus(hMain, "Select an account first");
+        return false;
+    }
+    Account& a = g_accounts[g_selAccount];
+    if (!a.hProc || WaitForSingleObject(a.hProc, 0) != WAIT_TIMEOUT)
+    {
+        SetStatus(hMain, "No running client for %s", a.name);
+        return false;
+    }
+    char line[64];
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "%s=1\n", key);
+    if (SendIpcLines(hMain, line))
+    {
+        SetStatus(hMain, "%s sent to %s", key, a.name);
+        return true;
+    }
+    SetStatus(hMain, "No IPC window - is the client running?");
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,6 +1164,16 @@ static void Layout(HWND hMain)
     for (int t = 1; t < 4; t++)
     {
         int fx = tx, fy = ty;
+
+        // Auto Hunt tab: hunt status + Start/Stop occupy the first two rows
+        // before the feature checkboxes, so the offsets below shift down.
+        if (t == 1)
+        {
+            MoveWindow(GetDlgItem(hMain, IDC_LBL_HUNTSTATE), fx, fy, tw - 8, 18, TRUE);
+            MoveWindow(GetDlgItem(hMain, IDC_BTN_HUNT_ON), fx, fy + 20, 110, 24, TRUE);
+            MoveWindow(GetDlgItem(hMain, IDC_BTN_HUNT_OFF), fx + 116, fy + 20, 110, 24, TRUE);
+            fy += 48;
+        }
         int chkCols = 3, nInt = 0;
         for (int i = 0; i < kFeatCount; i++)
             if (gFeats[i].tab == t && gFeats[i].kind == K_INT) nInt++;
@@ -1157,6 +1222,9 @@ static void ApplyTabVisibility(HWND hMain)
 {
     HWND tab = GetDlgItem(hMain, IDC_TABS);
     int cur = (int)SendMessage(tab, TCM_GETCURSEL, 0, 0);
+    ShowWindow(GetDlgItem(hMain, IDC_LBL_HUNTSTATE), cur == 1 ? SW_SHOW : SW_HIDE);
+    ShowWindow(GetDlgItem(hMain, IDC_BTN_HUNT_ON), cur == 1 ? SW_SHOW : SW_HIDE);
+    ShowWindow(GetDlgItem(hMain, IDC_BTN_HUNT_OFF), cur == 1 ? SW_SHOW : SW_HIDE);
     for (int i = 0; i < kFeatCount; i++)
     {
         BOOL vis = (gFeats[i].tab == cur) ? SW_SHOW : SW_HIDE;
@@ -1345,6 +1413,20 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             }
         }
 
+        // Auto Hunt: Start/Stop + live hunting indicator (character is
+        // hunting or idle). Text is driven by the DLL's title heartbeat.
+        HWND hHSt = CreateWindowExA(0, "STATIC", "Character: idle  |  Waypoint -/-  |  Pos -,-",
+            WS_CHILD, 0, 0, 100, 18, hMain, (HMENU)(INT_PTR)IDC_LBL_HUNTSTATE, hInst, NULL);
+        SendMessage(hHSt, WM_SETFONT, (WPARAM)hf, TRUE);
+        HWND hOn = CreateWindowExA(0, "BUTTON", "Start Hunting",
+            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 110, 24, hMain, (HMENU)(INT_PTR)IDC_BTN_HUNT_ON, hInst, NULL);
+        SendMessage(hOn, WM_SETFONT, (WPARAM)hf, TRUE);
+        HWND hOff = CreateWindowExA(0, "BUTTON", "Stop Hunting",
+            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 110, 24, hMain, (HMENU)(INT_PTR)IDC_BTN_HUNT_OFF, hInst, NULL);
+        SendMessage(hOff, WM_SETFONT, (WPARAM)hf, TRUE);
+
         // Status bar.
         HWND hSt = CreateWindowExA(0, "STATIC", "",
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
@@ -1373,7 +1455,10 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
 
     case WM_TIMER:
         if (wParam == TIMER_STATUS)
+        {
             UpdateStatusColumn(hMain);
+            PollHuntStatus(hMain);
+        }
         else if (wParam == TIMER_AUTOSAVE)
             FlushAutosave(hMain);
         return 0;
@@ -1547,6 +1632,14 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
                 WriteAccountIni(a);
             }
             PushAccountToClient(hMain, "manual");
+            return 0;
+
+        case IDC_BTN_HUNT_ON:
+            SendHuntCommand(hMain, "AutoHuntStart");
+            return 0;
+
+        case IDC_BTN_HUNT_OFF:
+            SendHuntCommand(hMain, "AutoHuntStop");
             return 0;
         }
 
