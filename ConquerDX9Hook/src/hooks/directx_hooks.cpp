@@ -18,6 +18,7 @@ extern EndSceneFunc g_originalEndSceneFunction;
 extern ResetFunc g_originalResetFunction;
 extern LPVOID g_originalEndSceneAddress;
 extern void RenderImGuiInterface();
+extern void DrainIpcQueue();
 extern HWND FindGameWindowHandle();
 
 // Original window procedure of the render window. The root window's
@@ -318,7 +319,12 @@ HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device)
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
-	RenderImGuiInterface();  
+
+	// Apply any commands the AccountManager sent (WM_COPYDATA) since the
+	// last frame - mutations run on this thread, same as the ImGui toggles.
+	DrainIpcQueue();
+
+	RenderImGuiInterface();
 	ImGui::EndFrame();
 	ImGui::Render();
 	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());

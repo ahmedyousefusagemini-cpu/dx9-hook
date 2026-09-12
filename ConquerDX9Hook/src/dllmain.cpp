@@ -28,6 +28,8 @@ extern void InstallDrawIndexedPrimitiveHook();
 extern uintptr_t FindMemoryPattern(uintptr_t startAddress, size_t searchLength, const std::vector<int>& pattern);
 extern HRESULT WINAPI HookedEndScene(LPDIRECT3DDEVICE9 device);
 extern HRESULT WINAPI HookedReset(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS* presentationParameters);
+extern bool InstallIpcWindow();
+extern void UninstallIpcWindow();
 
 
 void HookInitializationThread() 
@@ -35,6 +37,12 @@ void HookInitializationThread()
 	// Restore the settings saved by the last session's "Save Config" button.
 	// Runs before any frame is rendered, so the overlay comes up configured.
 	LoadConfig();
+
+	// Command channel for the AccountManager control plane: every manager
+	// toggle/command arrives via WM_COPYDATA on this window and is applied
+	// by the next EndScene pass.
+	InstallIpcWindow();
+
 
 	HMODULE direct3D9ModuleHandle = nullptr;
 
@@ -162,6 +170,7 @@ BOOL APIENTRY DllMain(HMODULE moduleHandle, DWORD reason, LPVOID reserved)
 		break;
 		
 	case DLL_PROCESS_DETACH:
+		UninstallIpcWindow();
 		break;
 	}
 	return TRUE;

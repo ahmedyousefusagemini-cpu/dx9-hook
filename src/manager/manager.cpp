@@ -55,7 +55,6 @@
 #define IDC_BTN_PATH       1006
 #define IDC_EDIT_ACCOUNT   1007
 #define IDC_EDIT_PASSWORD  1008
-#define IDC_EDIT_TOKEN     1009
 #define IDC_COMBO_METHOD   1010
 #define IDC_CHK_FILL_ACCT  1011
 #define IDC_CHK_FILL_PASS  1012
@@ -69,6 +68,7 @@
 #define IDC_ED_PASSIDX     1019
 #define IDC_TABS           1020
 #define IDC_BTN_KILL       1021
+#define IDC_BTN_PUSH       1022
 #define IDC_STATIC_STATUS  1900
 // Feature controls: table row i -> checkbox 1100+i, edit 1300+i, label 2100+i.
 #define IDC_FEAT_CHK_FIRST  1100
@@ -160,7 +160,6 @@ struct Account
 {
     char name[64];
     char pass[128];
-    char token[64];
     Settings s;
     // ALL Feature.<Key> rows (suffix key -> raw value string), known and
     // unknown. Unknown keys round-trip untouched; known ones feed the GUI and
@@ -243,7 +242,6 @@ static void ClearAccount(Account& a)
 {
     memset(a.name, 0, sizeof(a.name));
     memset(a.pass, 0, sizeof(a.pass));
-    memset(a.token, 0, sizeof(a.token));
     Defaults(a.s);
     a.feats.clear();
     a.pid = 0;
@@ -318,7 +316,6 @@ static void LoadAll()
         ClearAccount(a);
         strcpy_s(a.name, nm);
         GetPrivateProfileStringA(sec, "Pass", "", a.pass, sizeof(a.pass), g_cfgPath);
-        GetPrivateProfileStringA(sec, "Token", "", a.token, sizeof(a.token), g_cfgPath);
 
         a.s.autoFillAccount   = GetPrivateProfileIntA(sec, "AutoFillAccount", 1, g_cfgPath) != 0;
         a.s.autoFillPassword  = GetPrivateProfileIntA(sec, "AutoFillPassword", 1, g_cfgPath) != 0;
@@ -361,7 +358,6 @@ static void WriteAccountIni(const Account& a)
     _snprintf_s(sec, sizeof(sec), _TRUNCATE, "Account:%s", a.name);
 
     WritePrivateProfileStringA(sec, "Pass", a.pass, g_cfgPath);
-    WritePrivateProfileStringA(sec, "Token", a.token, g_cfgPath);
     WritePrivateProfileStringA(sec, "AutoFillAccount", a.s.autoFillAccount ? "1" : "0", g_cfgPath);
     WritePrivateProfileStringA(sec, "AutoFillPassword", a.s.autoFillPassword ? "1" : "0", g_cfgPath);
     WritePrivateProfileStringA(sec, "AutoClick", a.s.autoClick ? "1" : "0", g_cfgPath);
@@ -403,7 +399,6 @@ static Account AccountFromGui(HWND hMain, const char* name, const Account* old =
     ClearAccount(a);
     strcpy_s(a.name, name);
     GetDlgItemTextA(hMain, IDC_EDIT_PASSWORD, a.pass, sizeof(a.pass));
-    GetDlgItemTextA(hMain, IDC_EDIT_TOKEN, a.token, sizeof(a.token));
     a.s.autoFillAccount   = (IsDlgButtonChecked(hMain, IDC_CHK_FILL_ACCT) == BST_CHECKED);
     a.s.autoFillPassword  = (IsDlgButtonChecked(hMain, IDC_CHK_FILL_PASS) == BST_CHECKED);
     a.s.autoClick         = (IsDlgButtonChecked(hMain, IDC_CHK_AUTOCLICK) == BST_CHECKED);
@@ -449,7 +444,6 @@ static void GuiShowAccount(HWND hMain, int idx)
     g_loading = true;
     SetDlgItemTextA(hMain, IDC_EDIT_ACCOUNT, a.name);
     SetDlgItemTextA(hMain, IDC_EDIT_PASSWORD, a.pass);
-    SetDlgItemTextA(hMain, IDC_EDIT_TOKEN, a.token);
     CheckDlgButton(hMain, IDC_CHK_FILL_ACCT, a.s.autoFillAccount ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(hMain, IDC_CHK_FILL_PASS, a.s.autoFillPassword ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(hMain, IDC_CHK_AUTOCLICK, a.s.autoClick ? BST_CHECKED : BST_UNCHECKED);
@@ -481,7 +475,6 @@ static void GuiClearFields(HWND hMain)
     g_loading = true;
     SetDlgItemTextA(hMain, IDC_EDIT_ACCOUNT, "");
     SetDlgItemTextA(hMain, IDC_EDIT_PASSWORD, "");
-    SetDlgItemTextA(hMain, IDC_EDIT_TOKEN, "");
     CheckDlgButton(hMain, IDC_CHK_FILL_ACCT, BST_CHECKED);
     CheckDlgButton(hMain, IDC_CHK_FILL_PASS, BST_CHECKED);
     CheckDlgButton(hMain, IDC_CHK_AUTOCLICK, BST_UNCHECKED);
@@ -562,6 +555,149 @@ static void KillSelectedClient(HWND hMain)
     else
         SetStatus(hMain, "Kill failed (error %lu)", GetLastError());
     UpdateStatusColumn(hMain);
+}
+
+// ---------------------------------------------------------------------------
+// IPC: push settings/commands into the RUNNING client's proxied DLL
+// ----------------------------------------------------------------------------
+// The DLL creates a message-only window titled "ConquerDX9HookIPC". We send
+// WM_COPYDATA (signature 'CONQ') with newline-separated key=value lines using
+// exactly the coinfo.ini LoadConfig key names - the DLL's DrainIpcQueue
+// applies them through the same paths as the ImGui toggles.
+//
+// The DLL window may not exist yet right after CreateProcess (the proxy DLL
+// needs a moment to load), so SendIpcToAccount retries briefly.
+
+static const UINT_PTR kIpcSignature = 0x434F4E51; // 'CONQ'
+
+static bool SendIpcLines(HWND hMain, const std::string& payload)
+{
+    if (payload.empty())
+        return true;
+
+    // Broadcast: only the DLL's IPC window answers (message-only windows
+    // receive HWND_BROADCAST WM_COPYDATA even though they are hidden).
+    struct Cb
+    {
+        static BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lp)
+        {
+            char name[64];
+            if (GetWindowTextA(hwnd, name, sizeof(name)) && _stricmp(name, "ConquerDX9HookIPC") == 0)
+                *(HWND*)lp = hwnd;
+            return TRUE;
+        }
+    };
+    HWND target = NULL;
+    DWORD deadline = GetTickCount() + 5000;
+    for (;;)
+    {
+        EnumWindows(Cb::EnumProc, (LPARAM)&target);
+        if (target)
+            break;
+        if (GetTickCount() >= deadline)
+            return false;
+        Sleep(100);
+    }
+
+    COPYDATASTRUCT cds;
+    cds.dwData = kIpcSignature;
+    cds.cbData = (DWORD)payload.size();
+    cds.lpData = (void*)payload.c_str();
+    LRESULT ok = SendMessageA(target, WM_COPYDATA, (WPARAM)hMain, (LPARAM)&cds);
+    return ok != 0;
+}
+
+// Build the full key=value line set for an account (login settings + all
+// Feature.* rows) - the same keys the transient coinfo.ini export writes.
+static std::string BuildIpcPayload(const Account& a)
+{
+    std::string out;
+    char line[256];
+
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoClick=%d\n", a.s.autoClick ? 1 : 0);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoFillAccount=%d\n", a.s.autoFillAccount ? 1 : 0);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoFillPassword=%d\n", a.s.autoFillPassword ? 1 : 0);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoRelogin=%d\n", a.s.autoRelogin ? 1 : 0);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "ClickIntervalMs=%d\n", a.s.clickIntervalMs);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "ClickRetryMs=%d\n", a.s.clickRetryMs);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "ClickMethod=%d\n", a.s.clickMethod);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "ButtonIdOverride=%d\n", a.s.buttonIdOverride);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "AccountEditIndex=%d\n", a.s.accountEditIndex);
+    out += line;
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "PasswordEditIndex=%d\n", a.s.passwordEditIndex);
+    out += line;
+
+    for (int i = 0; i < kFeatCount; i++)
+    {
+        if (gFeats[i].kind == K_TEXT)
+            continue;
+        std::string v = GetFeat(a, gFeats[i].key, gFeats[i].def);
+        if (gFeats[i].kind == K_CHECK)
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "%s=%d\n",
+                gFeats[i].coinKey, atoi(v.c_str()) != 0 ? 1 : 0);
+        else
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "%s=%s\n",
+                gFeats[i].coinKey, v.c_str());
+        out += line;
+    }
+
+    // Waypoints row (K_TEXT) - the DLL parses "x,y;x,y".
+    std::string wps = GetFeat(a, "Waypoints", "");
+    if (!wps.empty())
+    {
+        out += "Waypoints=" + wps + "\n";
+    }
+    return out;
+}
+
+// Status-bar helper: the coinfo key name a changed control maps to.
+static const char* IpcKeyFor(int controlId)
+{
+    if (controlId >= IDC_FEAT_CHK_FIRST && controlId < IDC_FEAT_CHK_FIRST + kFeatCount)
+        return gFeats[controlId - IDC_FEAT_CHK_FIRST].coinKey;
+    if (controlId >= IDC_FEAT_EDIT_FIRST && controlId < IDC_FEAT_EDIT_FIRST + kFeatCount)
+        return gFeats[controlId - IDC_FEAT_EDIT_FIRST].coinKey;
+    switch (controlId)
+    {
+    case IDC_CHK_FILL_ACCT:  return "AutoFillAccount";
+    case IDC_CHK_FILL_PASS:  return "AutoFillPassword";
+    case IDC_CHK_AUTOCLICK:   return "AutoClick";
+    case IDC_CHK_RELOGIN:    return "AutoRelogin";
+    case IDC_COMBO_METHOD:   return "ClickMethod";
+    case IDC_ED_CLICKINT:    return "ClickIntervalMs";
+    case IDC_ED_CLICKRETRY:  return "ClickRetryMs";
+    case IDC_ED_BTNOR:       return "ButtonIdOverride";
+    case IDC_ED_ACCTIDX:     return "AccountEditIndex";
+    case IDC_ED_PASSIDX:     return "PasswordEditIndex";
+    }
+    return "setting";
+}
+
+static void PushAccountToClient(HWND hMain, const char* who)
+{
+    if (g_selAccount < 0 || g_selAccount >= (int)g_accounts.size())
+    {
+        SetStatus(hMain, "No account selected - nothing to push");
+        return;
+    }
+    const Account& a = g_accounts[g_selAccount];
+    if (!a.hProc || WaitForSingleObject(a.hProc, 0) != WAIT_TIMEOUT)
+    {
+        SetStatus(hMain, "No running client for %s", a.name);
+        return;
+    }
+    if (SendIpcLines(hMain, BuildIpcPayload(a)))
+        SetStatus(hMain, "Pushed %s settings to running client (%s)", a.name, who);
+    else
+        SetStatus(hMain, "Push failed: no IPC window in client of %s", a.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -671,7 +807,6 @@ static void ExportAccountInfoIni(const Account& a, const char* clientDir)
 
     WritePrivateProfileStringA("Account1", "User", a.name, path);
     WritePrivateProfileStringA("Account1", "Pass", a.pass, path);
-    WritePrivateProfileStringA("Account1", "Token", a.token, path);
     WritePrivateProfileStringA("Account1", "Use", "1", path);
 }
 
@@ -846,6 +981,47 @@ static void LaunchSelectedClient(HWND hMain)
     a.hProc = pi.hProcess;
 
     UpdateStatusColumn(hMain);
+
+    // Push the live settings into the DLL via IPC right after launch. The
+    // proxy DLL needs a moment to create its window; retry for up to ~6s in
+    // a worker thread so a slow startup never freezes the manager UI.
+    struct PushCtx { int idx; };
+    PushCtx* ctx = new PushCtx{ g_selAccount };
+    CreateThread(NULL, 0, [](LPVOID p) -> DWORD
+    {
+        PushCtx* c = (PushCtx*)p;
+        int idx = c->idx;
+        delete c;
+        Sleep(1500); // give the DLL time to create its IPC window
+        if (idx < 0 || idx >= (int)g_accounts.size())
+            return 0;
+        std::string s = BuildIpcPayload(g_accounts[idx]);
+
+        HWND found = NULL;
+        struct Cb { static BOOL CALLBACK Enum(HWND hwnd, LPARAM lp)
+        {
+            char name[64];
+            if (GetWindowTextA(hwnd, name, sizeof(name))
+                && _stricmp(name, "ConquerDX9HookIPC") == 0)
+                *(HWND*)lp = hwnd;
+            return TRUE;
+        } };
+        DWORD deadline = GetTickCount() + 5000;
+        for (;;)
+        {
+            EnumWindows(Cb::Enum, (LPARAM)&found);
+            if (found) break;
+            if (GetTickCount() >= deadline) return 0;
+            Sleep(100);
+        }
+        COPYDATASTRUCT cds;
+        cds.dwData = 0x434F4E51; // 'CONQ'
+        cds.cbData = (DWORD)s.size();
+        cds.lpData = (void*)s.c_str();
+        SendMessageA(found, WM_COPYDATA, 0, (LPARAM)&cds);
+        return 0;
+    }, ctx, 0, NULL);
+
     SetStatus(hMain, "Launched pid %lu with account %s", pi.dwProcessId, a.name);
 }
 
@@ -868,15 +1044,13 @@ static void Layout(HWND hMain)
     MoveWindow(GetDlgItem(hMain, IDC_LIST), MARGIN, y, w - MARGIN * 2, listH, TRUE);
     y += listH + 10;
 
-    // Left column: account / password / token edits.
+    // Left column: account / password edits.
     int labelW = 110;
     int editW = w / 2 - labelW - MARGIN * 2;
     MoveWindow(GetDlgItem(hMain, IDC_LBL_FIRST + 0), MARGIN, y + 3, labelW - 6, 18, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), MARGIN + labelW, y, editW, 22, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_LBL_FIRST + 1), MARGIN, y + 31, labelW - 6, 18, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_EDIT_PASSWORD), MARGIN + labelW, y + 28, editW, 22, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_LBL_FIRST + 2), MARGIN, y + 59, labelW - 6, 18, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_EDIT_TOKEN), MARGIN + labelW, y + 56, editW, 22, TRUE);
 
     // Right column: buttons.
     int bx = w - 180 - MARGIN, bw = 180;
@@ -885,8 +1059,9 @@ static void Layout(HWND hMain)
     MoveWindow(GetDlgItem(hMain, IDC_BTN_DELETE), bx, y + 60, bw, 26, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_BTN_LAUNCH), bx, y + 90, bw, 30, TRUE);
     MoveWindow(GetDlgItem(hMain, IDC_BTN_KILL), bx, y + 124, bw, 26, TRUE);
-    MoveWindow(GetDlgItem(hMain, IDC_BTN_PATH), bx, y + 154, bw, 26, TRUE);
-    y += 190;
+    MoveWindow(GetDlgItem(hMain, IDC_BTN_PUSH), bx, y + 154, bw, 26, TRUE);
+    MoveWindow(GetDlgItem(hMain, IDC_BTN_PATH), bx, y + 184, bw, 26, TRUE);
+    y += 220;
 
     // Tab control fills the rest above the status bar.
     HWND tab = GetDlgItem(hMain, IDC_TABS);
@@ -1040,13 +1215,12 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
 
         // Edits + labels.
         struct EditDef { int id; const char* label; DWORD style; };
-        const EditDef edits[3] =
+        const EditDef edits[2] =
         {
             { IDC_EDIT_ACCOUNT,  "Account:",  0 },
             { IDC_EDIT_PASSWORD, "Password:", ES_PASSWORD },
-            { IDC_EDIT_TOKEN,    "Token:",    0 },
         };
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 2; i++)
         {
             HWND hS = CreateWindowExA(0, "STATIC", edits[i].label,
                 WS_CHILD | WS_VISIBLE, 0, 0, 100, 18, hMain,
@@ -1060,16 +1234,17 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
 
         // Buttons.
         struct BtnDef { int id; const char* label; };
-        const BtnDef btns[6] =
+        const BtnDef btns[7] =
         {
             { IDC_BTN_ADD,    "Add" },
             { IDC_BTN_SAVE,   "Save" },
             { IDC_BTN_DELETE, "Delete" },
             { IDC_BTN_LAUNCH, "Launch Client" },
             { IDC_BTN_KILL,   "Kill Client" },
+            { IDC_BTN_PUSH,   "Push to Client" },
             { IDC_BTN_PATH,   "Change Client Path" },
         };
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 7; i++)
         {
             HWND hB = CreateWindowExA(0, "BUTTON", btns[i].label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -1360,6 +1535,46 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_BTN_KILL:
             KillSelectedClient(hMain);
             return 0;
+
+        case IDC_BTN_PUSH:
+            // Save first so accounts.txt matches what we push, then send.
+            if (g_selAccount >= 0 && g_selAccount < (int)g_accounts.size())
+            {
+                Account a = AccountFromGui(hMain, g_accounts[g_selAccount].name, &g_accounts[g_selAccount]);
+                g_accounts[g_selAccount] = a;
+                WriteAccountIni(a);
+            }
+            PushAccountToClient(hMain, "manual");
+            return 0;
+        }
+
+        // Live push: any checkbox/combo/edit change while the selected
+        // account's client is running re-sends the full setting set over
+        // IPC, so the manager drives the DLL like the ImGui menu does.
+        if (HIWORD(wParam) == BN_CLICKED || HIWORD(wParam) == CBN_SELCHANGE
+            || HIWORD(wParam) == EN_CHANGE)
+        {
+            if (g_loading)
+                return 0;
+            int id = LOWORD(wParam);
+            bool isSetting =
+                (id >= IDC_CHK_FILL_ACCT && id <= IDC_ED_PASSIDX)
+                || (id >= IDC_FEAT_CHK_FIRST && id < IDC_FEAT_CHK_FIRST + kFeatCount)
+                || (id >= IDC_FEAT_EDIT_FIRST && id < IDC_FEAT_EDIT_FIRST + kFeatCount);
+            if (isSetting && g_selAccount >= 0 && g_selAccount < (int)g_accounts.size())
+            {
+                Account& live = g_accounts[g_selAccount];
+                if (live.hProc && WaitForSingleObject(live.hProc, 0) == WAIT_TIMEOUT)
+                {
+                    // Update the in-memory account from the GUI and push.
+                    Account a = AccountFromGui(hMain, live.name, &live);
+                    g_accounts[g_selAccount] = a;
+                    if (SendIpcLines(hMain, BuildIpcPayload(a)))
+                        SetStatus(hMain, "%s -> applied to running client", IpcKeyFor(id));
+                    else
+                        SetStatus(hMain, "%s -> no IPC window (client starting?)", IpcKeyFor(id));
+                }
+            }
         }
         break;
 
