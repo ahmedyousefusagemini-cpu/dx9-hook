@@ -12,6 +12,18 @@
 // CreateProcess("\"<ClientPath>\" blacknull") with the client dir as CWD.
 // ============================================================================
 
+// Deliberately ANSI translation unit: every call below uses the A-suffix APIs
+// (accounts.txt, client paths, window text are ANSI). The project builds with
+// CharacterSet=Unicode, so kill the Unicode macros BEFORE windows.h - this
+// makes the generic ListView_*/SNDMSG macros resolve to their ANSI forms
+// (LV_ITEM/LVITEMA + LVM_*A) and stay consistent with the explicit *A calls.
+#ifdef UNICODE
+#undef UNICODE
+#endif
+#ifdef _UNICODE
+#undef _UNICODE
+#endif
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -328,7 +340,7 @@ static Account AccountFromGui(HWND hMain, const char* name)
     a.s.autoFillPassword  = (IsDlgButtonChecked(hMain, IDC_CHK_FILL_PASS) == BST_CHECKED);
     a.s.autoClick         = (IsDlgButtonChecked(hMain, IDC_CHK_AUTOCLICK) == BST_CHECKED);
     a.s.autoRelogin       = (IsDlgButtonChecked(hMain, IDC_CHK_RELOGIN) == BST_CHECKED);
-    LRESULT cm = SendMessageA(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_GETCURSEL, 0, 0);
+    LRESULT cm = SendMessage(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_GETCURSEL, 0, 0);
     a.s.clickMethod = (cm >= 0 && cm <= 3) ? (int)cm : 0;
     for (int i = 0; i < kFeatureCount; i++)
         a.feature[i] = (IsDlgButtonChecked(hMain, IDC_CHK_FEAT_FIRST + i) == BST_CHECKED);
@@ -351,11 +363,11 @@ static void GuiShowAccount(HWND hMain, int idx)
     CheckDlgButton(hMain, IDC_CHK_RELOGIN, a.s.autoRelogin ? BST_CHECKED : BST_UNCHECKED);
     int cm = a.s.clickMethod;
     if (cm < 0 || cm > 3) cm = 0; // combo index == ClickMethod value (0-3)
-    SendMessageA(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_SETCURSEL, (WPARAM)cm, 0);
+    SendMessage(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_SETCURSEL, (WPARAM)cm, 0);
     for (int i = 0; i < kFeatureCount; i++)
         CheckDlgButton(hMain, IDC_CHK_FEAT_FIRST + i, a.feature[i] ? BST_CHECKED : BST_UNCHECKED);
     // Name is read-only while a row is selected.
-    SendMessageA(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, TRUE, 0);
+    SendMessage(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, TRUE, 0);
     g_loading = false;
 }
 
@@ -369,11 +381,11 @@ static void GuiClearFields(HWND hMain)
     CheckDlgButton(hMain, IDC_CHK_FILL_PASS, BST_CHECKED);
     CheckDlgButton(hMain, IDC_CHK_AUTOCLICK, BST_UNCHECKED);
     CheckDlgButton(hMain, IDC_CHK_RELOGIN, BST_CHECKED);
-    SendMessageA(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_SETCURSEL, 0, 0);
+    SendMessage(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_SETCURSEL, 0, 0);
     for (int i = 0; i < kFeatureCount; i++)
         CheckDlgButton(hMain, IDC_CHK_FEAT_FIRST + i, kFeatures[i].def ? BST_CHECKED : BST_UNCHECKED);
     // Name is editable when no row is selected (add mode).
-    SendMessageA(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, FALSE, 0);
+    SendMessage(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, FALSE, 0);
     g_loading = false;
 }
 
@@ -707,8 +719,8 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             HWND hE = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | edits[i].style,
                 0, 0, 100, 22, hMain, (HMENU)(INT_PTR)edits[i].id, hInst, NULL);
-            SendMessageA(hS, WM_SETFONT, (WPARAM)hf, TRUE);
-            SendMessageA(hE, WM_SETFONT, (WPARAM)hf, TRUE);
+            SendMessage(hS, WM_SETFONT, (WPARAM)hf, TRUE);
+            SendMessage(hE, WM_SETFONT, (WPARAM)hf, TRUE);
         }
 
         // Buttons.
@@ -726,7 +738,7 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             HWND hB = CreateWindowExA(0, "BUTTON", btns[i].label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                 0, 0, 100, 26, hMain, (HMENU)(INT_PTR)btns[i].id, hInst, NULL);
-            SendMessageA(hB, WM_SETFONT, (WPARAM)hf, TRUE);
+            SendMessage(hB, WM_SETFONT, (WPARAM)hf, TRUE);
         }
 
         // Auto-login checkboxes.
@@ -743,14 +755,14 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             HWND hC = CreateWindowExA(0, "BUTTON", chks[i].label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 0, 0, 130, 20, hMain, (HMENU)(INT_PTR)chks[i].id, hInst, NULL);
-            SendMessageA(hC, WM_SETFONT, (WPARAM)hf, TRUE);
+            SendMessage(hC, WM_SETFONT, (WPARAM)hf, TRUE);
         }
 
         // ClickMethod combo.
         HWND hS3 = CreateWindowExA(0, "STATIC", "Click method:",
             WS_CHILD | WS_VISIBLE, 0, 0, 100, 18, hMain,
             (HMENU)(INT_PTR)(IDC_LBL_FIRST + 3), hInst, NULL);
-        SendMessageA(hS3, WM_SETFONT, (WPARAM)hf, TRUE);
+        SendMessage(hS3, WM_SETFONT, (WPARAM)hf, TRUE);
         HWND hCombo = CreateWindowExA(0, "COMBOBOX", "",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
             0, 0, 160, 200, hMain, (HMENU)(INT_PTR)IDC_COMBO_METHOD, hInst, NULL);
@@ -762,29 +774,29 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             "3 - Direct handler",
         };
         for (int i = 0; i < 4; i++)
-            SendMessageA(hCombo, CB_ADDSTRING, 0, (LPARAM)methods[i]);
-        SendMessageA(hCombo, CB_SETCURSEL, 0, 0);
-        SendMessageA(hCombo, WM_SETFONT, (WPARAM)hf, TRUE);
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)methods[i]);
+        SendMessage(hCombo, CB_SETCURSEL, 0, 0);
+        SendMessage(hCombo, WM_SETFONT, (WPARAM)hf, TRUE);
 
         // Feature checkboxes.
         HWND hS4 = CreateWindowExA(0, "STATIC", "Bot features:",
             WS_CHILD | WS_VISIBLE, 0, 0, 100, 18, hMain,
             (HMENU)(INT_PTR)(IDC_LBL_FIRST + 4), hInst, NULL);
-        SendMessageA(hS4, WM_SETFONT, (WPARAM)hf, TRUE);
+        SendMessage(hS4, WM_SETFONT, (WPARAM)hf, TRUE);
         for (int i = 0; i < kFeatureCount; i++)
         {
             HWND hC = CreateWindowExA(0, "BUTTON", kFeatures[i].label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 0, 0, 130, 20, hMain,
                 (HMENU)(INT_PTR)(IDC_CHK_FEAT_FIRST + i), hInst, NULL);
-            SendMessageA(hC, WM_SETFONT, (WPARAM)hf, TRUE);
+            SendMessage(hC, WM_SETFONT, (WPARAM)hf, TRUE);
         }
 
         // Status bar.
         HWND hSt = CreateWindowExA(0, "STATIC", "",
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             0, 0, 100, 20, hMain, (HMENU)(INT_PTR)IDC_STATIC_STATUS, hInst, NULL);
-        SendMessageA(hSt, WM_SETFONT, (WPARAM)hf, TRUE);
+        SendMessage(hSt, WM_SETFONT, (WPARAM)hf, TRUE);
 
         // Data.
         BuildPaths();
@@ -957,7 +969,7 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
         PostQuitMessage(0);
         return 0;
     }
-    return DefWindowProcA(hMain, msg, wParam, lParam);
+    return DefWindowProc(hMain, msg, wParam, lParam);
 }
 
 // ---------------------------------------------------------------------------
