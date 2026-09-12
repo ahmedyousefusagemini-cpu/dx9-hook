@@ -70,6 +70,8 @@
 #define IDC_BTN_KILL       1021
 #define IDC_BTN_PUSH       1022
 #define IDC_STATIC_STATUS  1900
+#define TIMER_STATUS       1     // live client status poll
+#define TIMER_AUTOSAVE     2     // debounced per-account settings save
 // Feature controls: table row i -> checkbox 1100+i, edit 1300+i, label 2100+i.
 #define IDC_FEAT_CHK_FIRST  1100
 #define IDC_FEAT_EDIT_FIRST 1300
@@ -555,6 +557,27 @@ static void KillSelectedClient(HWND hMain)
     else
         SetStatus(hMain, "Kill failed (error %lu)", GetLastError());
     UpdateStatusColumn(hMain);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-save: every settings edit is committed to the SELECTED account's own
+// [Account:<name>] section, debounced so typing in an edit doesn't hammer
+// WritePrivateProfileString per keystroke.
+// ---------------------------------------------------------------------------
+static void ScheduleAutosave(HWND hMain)
+{
+    SetTimer(hMain, TIMER_AUTOSAVE, 500, NULL);
+}
+
+static void FlushAutosave(HWND hMain)
+{
+    KillTimer(hMain, TIMER_AUTOSAVE);
+    if (g_selAccount < 0 || g_selAccount >= (int)g_accounts.size())
+        return;
+    Account& live = g_accounts[g_selAccount];
+    Account a = AccountFromGui(hMain, live.name, &live);
+    g_accounts[g_selAccount] = a;
+    WriteAccountIni(a);
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,8 +1372,10 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
         return 0;
 
     case WM_TIMER:
-        if (wParam == 1)
+        if (wParam == TIMER_STATUS)
             UpdateStatusColumn(hMain);
+        else if (wParam == TIMER_AUTOSAVE)
+            FlushAutosave(hMain);
         return 0;
 
     case WM_GETMINMAXINFO:
@@ -1381,6 +1406,7 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             else if (!(nlv->uNewState & LVIS_SELECTED)
                 && (nlv->uOldState & LVIS_SELECTED))
             {
+                FlushAutosave(hMain);
                 // Deselected (clicked empty space) - name becomes editable.
                 g_selAccount = -1;
                 GuiClearFields(hMain);
@@ -1488,6 +1514,7 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             // Release the client handle (a running client keeps running).
             if (g_accounts[g_selAccount].hProc)
                 CloseHandle(g_accounts[g_selAccount].hProc);
+            KillTimer(hMain, TIMER_AUTOSAVE);
             g_accounts.erase(g_accounts.begin() + g_selAccount);
             g_selAccount = -1;
             RefreshList(hMain);
@@ -1523,27 +1550,32 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
             return 0;
         }
 
-        // Live push: any checkbox/combo/edit change while the selected
-        // account's client is running re-sends the full setting set over
-        // IPC, so the manager drives the DLL like the ImGui menu does.
+        // Live push + auto-save: any per-account control change updates the
+        // selected account's own section in accounts.txt (debounced) and, if
+        // its client is running, pushes the change into the DLL over IPC.
         if (HIWORD(wParam) == BN_CLICKED || HIWORD(wParam) == CBN_SELCHANGE
             || HIWORD(wParam) == EN_CHANGE)
         {
             if (g_loading)
                 return 0;
             int id = LOWORD(wParam);
+            // Per-account controls: login + all Feature.<Key> rows + the
+            // account/password edits.
             bool isSetting =
-                (id >= IDC_CHK_FILL_ACCT && id <= IDC_ED_PASSIDX)
+                (id == IDC_EDIT_ACCOUNT && false) // name is identity, never a setting
+                || (id == IDC_EDIT_PASSWORD)
+                || (id >= IDC_CHK_FILL_ACCT && id <= IDC_ED_PASSIDX)
                 || (id >= IDC_FEAT_CHK_FIRST && id < IDC_FEAT_CHK_FIRST + kFeatCount)
                 || (id >= IDC_FEAT_EDIT_FIRST && id < IDC_FEAT_EDIT_FIRST + kFeatCount);
             if (isSetting && g_selAccount >= 0 && g_selAccount < (int)g_accounts.size())
             {
+                Account a = AccountFromGui(hMain, g_accounts[g_selAccount].name, &g_accounts[g_selAccount]);
+                g_accounts[g_selAccount] = a;
+                ScheduleAutosave(hMain);
+
                 Account& live = g_accounts[g_selAccount];
                 if (live.hProc && WaitForSingleObject(live.hProc, 0) == WAIT_TIMEOUT)
                 {
-                    // Update the in-memory account from the GUI and push.
-                    Account a = AccountFromGui(hMain, live.name, &live);
-                    g_accounts[g_selAccount] = a;
                     if (SendIpcLines(hMain, BuildIpcPayload(a)))
                         SetStatus(hMain, "%s -> applied to running client", IpcKeyFor(id));
                     else
@@ -1554,7 +1586,9 @@ static LRESULT CALLBACK WndProc(HWND hMain, UINT msg, WPARAM wParam, LPARAM lPar
         break;
 
     case WM_DESTROY:
-        KillTimer(hMain, 1);
+        FlushAutosave(hMain);
+        KillTimer(hMain, TIMER_AUTOSAVE);
+        KillTimer(hMain, TIMER_STATUS);
         for (size_t i = 0; i < g_accounts.size(); i++)
             if (g_accounts[i].hProc)
                 CloseHandle(g_accounts[i].hProc);
