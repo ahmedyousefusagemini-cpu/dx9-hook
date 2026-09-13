@@ -45,16 +45,17 @@ if errorlevel 1 (
 )
 
 echo.
-echo BUILD OK - output: %~dp0Release\D3DX9_43.dll  ^(with the debug pdb if enabled^)
+echo BUILD OK - output: %~dp0Release\D3DX9_43.dll + AccountManager.exe  ^(with the debug pdb if enabled^)
 
 rem ============================================================================
-rem Push compiled DLL to physical local machine via RDP
+rem Push compiled DLL + AccountManager.exe to physical local machine via RDP
 rem ============================================================================
 set "SOURCE_DLL=%~dp0Release\D3DX9_43.dll"
+set "SOURCE_EXE=%~dp0Release\AccountManager.exe"
 set "DEST_DIR=\\tsclient\H\client\Env_DX9"
 
 echo.
-echo Pushing DLL to local machine (%DEST_DIR%)...
+echo Pushing DLL + AccountManager.exe to local machine (%DEST_DIR%)...
 
 if not exist "%DEST_DIR%" (
     echo WARNING: Destination "%DEST_DIR%" not found. 
@@ -64,9 +65,17 @@ if not exist "%DEST_DIR%" (
     copy /Y "%SOURCE_DLL%" "%DEST_DIR%\"
     
     if errorlevel 1 (
-        echo ERROR: Failed to copy the file. Make sure the target file is not currently in use/locked.
+        echo ERROR: Failed to copy the DLL. Make sure the target file is not currently in use/locked.
     ) else (
         echo SUCCESS: Overwrote D3DX9_43.dll on local machine.
+    )
+
+    copy /Y "%SOURCE_EXE%" "%DEST_DIR%\"
+    
+    if errorlevel 1 (
+        echo ERROR: Failed to copy AccountManager.exe. Make sure the target file is not currently in use/locked.
+    ) else (
+        echo SUCCESS: Overwrote AccountManager.exe on local machine.
     )
 )
 
