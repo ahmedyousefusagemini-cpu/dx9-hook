@@ -34,6 +34,7 @@ struct IpcCommand
 static std::vector<IpcCommand> g_ipcQueue;
 static CRITICAL_SECTION g_ipcCs;
 static bool g_ipcCsReady = false;
+static HWND g_ipcWnd = NULL;
 
 static void LogIpc(const char* fmt, ...)
 {
@@ -273,7 +274,6 @@ void IpcPublishHuntHeartbeat()
 // ---------------------------------------------------------------------------
 static const char* kIpcClassName = "ConquerDX9HookIPCWnd";
 static const char* kIpcWinName   = "ConquerDX9HookIPC";
-static HWND g_ipcWnd = NULL;
 
 static LRESULT CALLBACK IpcWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {

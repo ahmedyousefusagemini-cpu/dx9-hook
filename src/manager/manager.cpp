@@ -565,6 +565,9 @@ static void KillSelectedClient(HWND hMain)
 // ---------------------------------------------------------------------------
 // Auto hunt: live hunting status + Start/Stop commands over IPC
 // ---------------------------------------------------------------------------
+static HWND FindIpcWindow();
+static bool SendIpcLines(HWND hMain, const std::string& payload);
+
 static void PollHuntStatus(HWND hMain)
 {
     HWND hwnd = FindIpcWindow();
