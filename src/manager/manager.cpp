@@ -650,15 +650,18 @@ static void FlushAutosave(HWND hMain)
 // needs a moment to load), so SendIpcToAccount retries briefly.
 
 static const UINT_PTR kIpcSignature = 0x434F4E51; // 'CONQ'
-static const char* kIpcWinName = "ConquerDX9HookIPC";
 
 // Message-only windows are NOT visible to EnumWindows and never receive
 // HWND_BROADCAST - the only cross-process lookup is FindWindowEx under the
-// HWND_MESSAGE pseudo-parent. The window title identifies the DLL instance;
+// HWND_MESSAGE pseudo-parent. The window CLASS identifies the DLL instance;
+// the heartbeat overwrites the window TITLE with "|HUNT_..." every frame, so
+// matching by title would stop finding the window after the first frame.
 // NULL hwndParent finds any process's window (single-client machine).
+static const char* kIpcClassName = "ConquerDX9HookIPCWnd";
+
 static HWND FindIpcWindow()
 {
-    return FindWindowExA(HWND_MESSAGE, NULL, NULL, kIpcWinName);
+    return FindWindowExA(HWND_MESSAGE, NULL, kIpcClassName, NULL);
 }
 
 static bool SendIpcLines(HWND hMain, const std::string& payload)
