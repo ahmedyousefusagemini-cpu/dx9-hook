@@ -356,6 +356,20 @@ static void LoadAll()
     }
 }
 
+static void WriteSettingsIni(const Settings& s, const char* section, const char* path)
+{
+    WritePrivateProfileStringA(section, "AutoFillAccount", s.autoFillAccount ? "1" : "0", path);
+    WritePrivateProfileStringA(section, "AutoFillPassword", s.autoFillPassword ? "1" : "0", path);
+    WritePrivateProfileStringA(section, "AutoClick", s.autoClick ? "1" : "0", path);
+    WritePrivateProfileStringA(section, "AutoRelogin", s.autoRelogin ? "1" : "0", path);
+    WriteIntKey(section, "ClickMethod", s.clickMethod, path);
+    WriteIntKey(section, "ClickIntervalMs", s.clickIntervalMs, path);
+    WriteIntKey(section, "ClickRetryMs", s.clickRetryMs, path);
+    WriteIntKey(section, "ButtonIdOverride", s.buttonIdOverride, path);
+    WriteIntKey(section, "AccountEditIndex", s.accountEditIndex, path);
+    WriteIntKey(section, "PasswordEditIndex", s.passwordEditIndex, path);
+}
+
 // Persist one account into its "Account:<name>" section (per-key writes).
 static void WriteAccountIni(const Account& a)
 {
@@ -363,16 +377,7 @@ static void WriteAccountIni(const Account& a)
     _snprintf_s(sec, sizeof(sec), _TRUNCATE, "Account:%s", a.name);
 
     WritePrivateProfileStringA(sec, "Pass", a.pass, g_cfgPath);
-    WritePrivateProfileStringA(sec, "AutoFillAccount", a.s.autoFillAccount ? "1" : "0", g_cfgPath);
-    WritePrivateProfileStringA(sec, "AutoFillPassword", a.s.autoFillPassword ? "1" : "0", g_cfgPath);
-    WritePrivateProfileStringA(sec, "AutoClick", a.s.autoClick ? "1" : "0", g_cfgPath);
-    WritePrivateProfileStringA(sec, "AutoRelogin", a.s.autoRelogin ? "1" : "0", g_cfgPath);
-    WriteIntKey(sec, "ClickMethod", a.s.clickMethod, g_cfgPath);
-    WriteIntKey(sec, "ClickIntervalMs", a.s.clickIntervalMs, g_cfgPath);
-    WriteIntKey(sec, "ClickRetryMs", a.s.clickRetryMs, g_cfgPath);
-    WriteIntKey(sec, "ButtonIdOverride", a.s.buttonIdOverride, g_cfgPath);
-    WriteIntKey(sec, "AccountEditIndex", a.s.accountEditIndex, g_cfgPath);
-    WriteIntKey(sec, "PasswordEditIndex", a.s.passwordEditIndex, g_cfgPath);
+    WriteSettingsIni(a.s, sec, g_cfgPath);
     for (size_t i = 0; i < a.feats.size(); i++)
     {
         char key[96];
@@ -441,11 +446,8 @@ static Account AccountFromGui(HWND hMain, const char* name, const Account* old =
     return a;
 }
 
-static void GuiShowAccount(HWND hMain, int idx)
+static void GuiSetAccountFields(HWND hMain, const Account& a, bool readOnlyName)
 {
-    if (idx < 0 || idx >= (int)g_accounts.size())
-        return;
-    const Account& a = g_accounts[idx];
     g_loading = true;
     SetDlgItemTextA(hMain, IDC_EDIT_ACCOUNT, a.name);
     SetDlgItemTextA(hMain, IDC_EDIT_PASSWORD, a.pass);
@@ -470,37 +472,22 @@ static void GuiShowAccount(HWND hMain, int idx)
         else
             SetDlgItemTextA(hMain, IDC_FEAT_EDIT_FIRST + i, v.c_str());
     }
-    // Name is read-only while a row is selected.
-    SendMessage(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, TRUE, 0);
+    SendMessage(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, readOnlyName, 0);
     g_loading = false;
+}
+
+static void GuiShowAccount(HWND hMain, int idx)
+{
+    if (idx < 0 || idx >= (int)g_accounts.size())
+        return;
+    GuiSetAccountFields(hMain, g_accounts[idx], true);
 }
 
 static void GuiClearFields(HWND hMain)
 {
-    g_loading = true;
-    SetDlgItemTextA(hMain, IDC_EDIT_ACCOUNT, "");
-    SetDlgItemTextA(hMain, IDC_EDIT_PASSWORD, "");
-    CheckDlgButton(hMain, IDC_CHK_FILL_ACCT, BST_CHECKED);
-    CheckDlgButton(hMain, IDC_CHK_FILL_PASS, BST_CHECKED);
-    CheckDlgButton(hMain, IDC_CHK_AUTOCLICK, BST_UNCHECKED);
-    CheckDlgButton(hMain, IDC_CHK_RELOGIN, BST_CHECKED);
-    SendMessage(GetDlgItem(hMain, IDC_COMBO_METHOD), CB_SETCURSEL, 0, 0);
-    SetDlgItemInt(hMain, IDC_ED_CLICKINT, 1000, FALSE);
-    SetDlgItemInt(hMain, IDC_ED_CLICKRETRY, 10000, FALSE);
-    SetDlgItemInt(hMain, IDC_ED_BTNOR, 0, FALSE);
-    SetDlgItemInt(hMain, IDC_ED_ACCTIDX, (UINT)-1, TRUE);
-    SetDlgItemInt(hMain, IDC_ED_PASSIDX, (UINT)-1, TRUE);
-    for (int i = 0; i < kFeatCount; i++)
-    {
-        if (gFeats[i].kind == K_CHECK)
-            CheckDlgButton(hMain, IDC_FEAT_CHK_FIRST + i,
-                atoi(gFeats[i].def) != 0 ? BST_CHECKED : BST_UNCHECKED);
-        else
-            SetDlgItemTextA(hMain, IDC_FEAT_EDIT_FIRST + i, gFeats[i].def);
-    }
-    // Name is editable when no row is selected (add mode).
-    SendMessage(GetDlgItem(hMain, IDC_EDIT_ACCOUNT), EM_SETREADONLY, FALSE, 0);
-    g_loading = false;
+    Account a;
+    ClearAccount(a);
+    GuiSetAccountFields(hMain, a, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -689,33 +676,48 @@ static bool SendIpcLines(HWND hMain, const std::string& payload)
     return ok != 0;
 }
 
+static std::string BuildLoginPayload(const Settings& s)
+{
+    std::string out;
+    char line[256];
+    struct I { const char* k; int v; };
+    const I ints[6] =
+    {
+        { "ClickIntervalMs",   s.clickIntervalMs },
+        { "ClickRetryMs",      s.clickRetryMs },
+        { "ClickMethod",       s.clickMethod },
+        { "ButtonIdOverride",  s.buttonIdOverride },
+        { "AccountEditIndex",  s.accountEditIndex },
+        { "PasswordEditIndex", s.passwordEditIndex },
+    };
+    const struct { const char* k; bool v; } bools[4] =
+    {
+        { "AutoClick",        s.autoClick },
+        { "AutoFillAccount",  s.autoFillAccount },
+        { "AutoFillPassword", s.autoFillPassword },
+        { "AutoRelogin",      s.autoRelogin },
+    };
+    // Flat AutoLogin.Key lines (IPC) - the coinfo export below writes the same
+    // keys under the [AutoLogin] section via the shared WriteSettingsIni.
+    for (int i = 0; i < 4; i++)
+    {
+        _snprintf_s(line, sizeof(line), _TRUNCATE, "%s=%d\n", bools[i].k, bools[i].v ? 1 : 0);
+        out += line;
+    }
+    for (int i = 0; i < 6; i++)
+    {
+        _snprintf_s(line, sizeof(line), _TRUNCATE, "%s=%d\n", ints[i].k, ints[i].v);
+        out += line;
+    }
+    return out;
+}
+
 // Build the full key=value line set for an account (login settings + all
 // Feature.* rows) - the same keys the transient coinfo.ini export writes.
 static std::string BuildIpcPayload(const Account& a)
 {
-    std::string out;
+    std::string out = BuildLoginPayload(a.s);
     char line[256];
-
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoClick=%d\n", a.s.autoClick ? 1 : 0);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoFillAccount=%d\n", a.s.autoFillAccount ? 1 : 0);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoFillPassword=%d\n", a.s.autoFillPassword ? 1 : 0);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "AutoRelogin=%d\n", a.s.autoRelogin ? 1 : 0);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "ClickIntervalMs=%d\n", a.s.clickIntervalMs);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "ClickRetryMs=%d\n", a.s.clickRetryMs);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "ClickMethod=%d\n", a.s.clickMethod);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "ButtonIdOverride=%d\n", a.s.buttonIdOverride);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "AccountEditIndex=%d\n", a.s.accountEditIndex);
-    out += line;
-    _snprintf_s(line, sizeof(line), _TRUNCATE, "PasswordEditIndex=%d\n", a.s.passwordEditIndex);
-    out += line;
 
     for (int i = 0; i < kFeatCount; i++)
     {
@@ -925,16 +927,7 @@ static void ExportCoinfoIni(const Account& a, const char* clientDir)
     _snprintf_s(path, MAX_PATH, _TRUNCATE, "%s\\coinfo.ini", clientDir);
 
     // [AutoLogin] - key names must match the hook's config.cpp LoadConfig.
-    WritePrivateProfileStringA("AutoLogin", "AutoClick", a.s.autoClick ? "1" : "0", path);
-    WritePrivateProfileStringA("AutoLogin", "AutoFillAccount", a.s.autoFillAccount ? "1" : "0", path);
-    WritePrivateProfileStringA("AutoLogin", "AutoFillPassword", a.s.autoFillPassword ? "1" : "0", path);
-    WritePrivateProfileStringA("AutoLogin", "AutoRelogin", a.s.autoRelogin ? "1" : "0", path);
-    WriteIntKey("AutoLogin", "ClickIntervalMs", a.s.clickIntervalMs, path);
-    WriteIntKey("AutoLogin", "ClickRetryMs", a.s.clickRetryMs, path);
-    WriteIntKey("AutoLogin", "ClickMethod", a.s.clickMethod, path);
-    WriteIntKey("AutoLogin", "ButtonIdOverride", a.s.buttonIdOverride, path);
-    WriteIntKey("AutoLogin", "AccountEditIndex", a.s.accountEditIndex, path);
-    WriteIntKey("AutoLogin", "PasswordEditIndex", a.s.passwordEditIndex, path);
+    WriteSettingsIni(a.s, "AutoLogin", path);
 
     // Feature.* -> their coinfo.ini sections/keys (the Waypoints row expands
     // to WaypointCount/WaypointN below).
